@@ -26,3 +26,6 @@ ureq = "3.4"
 [dev-dependencies]
 osmpbf = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

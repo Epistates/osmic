@@ -15,3 +15,6 @@ description = "Plugin system, App builder, event bus, and lifecycle"
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[lints]
+workspace = true

@@ -35,3 +35,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 geo = { workspace = true }
 bytes = { workspace = true }
+
+[lints]
+workspace = true

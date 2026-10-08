@@ -11,3 +11,6 @@ osmic-core = { workspace = true }
 osmic-osm = { workspace = true, features = ["native"] }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

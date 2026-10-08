@@ -1,0 +1,52 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally with `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # Unmaintained, no fix available upstream. Each is reviewed when its
+    # parent crate releases.
+    { id = "RUSTSEC-2024-0436", reason = "paste (unmaintained): proc-macro used at build time by metal (osmic-accel) and wgpu-hal" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser (unmaintained): font parsing via cosmic-text/fontdb; tracked with the cosmic-text upgrade" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode (unmaintained): only with the optional `mlt` feature, via mlt-core -> probabilistic-collections" },
+]
+# Transitive "unsound" notices (reported by `cargo audit`, not by cargo-deny
+# for indirect dependencies), reviewed and not reachable from osmic:
+# - RUSTSEC-2026-0186 memmap2 0.5 `*_range` methods: osmpbf's mmap reader,
+#   which osmic does not use.
+# - RUSTSEC-2026-0097 rand 0.7 `thread_rng` with a custom logger: only with
+#   the optional `mlt` feature, via probabilistic-collections.
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

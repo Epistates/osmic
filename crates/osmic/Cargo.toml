@@ -23,3 +23,6 @@ osmic-tiles = { workspace = true }
 osmic-render = { workspace = true }
 osmic-text = { workspace = true }
 osmic-serve = { workspace = true }
+
+[lints]
+workspace = true

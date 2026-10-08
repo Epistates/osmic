@@ -97,6 +97,16 @@ unicode-normalization = "0.1"
 clap = { version = "4", features = ["derive"] }
 mimalloc = "0.1.52"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
 [profile.release]
 lto = "thin"
 codegen-units = 4

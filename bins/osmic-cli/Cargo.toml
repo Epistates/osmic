@@ -43,3 +43,6 @@ predicates = "3"
 bytes = { workspace = true }
 pmtiles = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

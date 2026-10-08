@@ -32,3 +32,6 @@ pmtiles = { workspace = true, features = ["mmap-async-tokio", "write"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

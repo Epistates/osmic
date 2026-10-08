@@ -29,3 +29,6 @@ geo-types = { workspace = true }
 bytemuck = { workspace = true }
 metal = "0.33"
 objc = "0.2"
+
+[lints]
+workspace = true

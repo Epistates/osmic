@@ -8,3 +8,6 @@ publish = false
 
 [dependencies]
 osmic-app = { workspace = true }
+
+[lints]
+workspace = true

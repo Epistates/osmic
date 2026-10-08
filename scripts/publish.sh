@@ -22,30 +22,11 @@
 #     the `epistates` crates.io namespace
 #   - a working directory the script is comfortable making dirty (passes
 #     `--allow-dirty` to cargo publish)
+#   - jq
 
 set -euo pipefail
 
 # --- configuration ----------------------------------------------------------
-
-# Dep order: each crate depends only on crates earlier in the list.
-CRATES=(
-  osmic-core
-  osmic-app
-  osmic-text
-  osmic-geo
-  osmic-accel
-  osmic-osm
-  osmic-style
-  osmic-index
-  osmic-render
-  osmic-extract
-  osmic-tiles
-  osmic-serve
-  osmic-repl
-  osmic
-  osmic-cli
-  osmic-viewer
-)
 
 BURST_SIZE=5
 THROTTLE_SECONDS=610          # 10 min + safety margin
@@ -88,6 +69,29 @@ WORKSPACE_VERSION="$(
 
 if [[ -z "$WORKSPACE_VERSION" ]]; then
   echo "failed to read workspace package version from Cargo.toml" >&2
+  exit 1
+fi
+
+# Publishable crates in dependency order (each depends only on crates
+# earlier in the list), derived from the manifests so it cannot drift.
+CRATES=()
+while IFS= read -r crate; do CRATES+=("$crate"); done < <(
+  cargo metadata --format-version 1 --no-deps | jq -r '
+    [.packages[] | select(.publish != [])] as $pkgs
+    | ($pkgs | map(.name)) as $names
+    | ($pkgs
+       | map({key: .name,
+              value: ([.dependencies[] | select(.kind != "dev") | .name | select(IN($names[]))] | unique)})
+       | from_entries) as $deps
+    | def visit($order):
+        ($names | map(select(. as $n | ($order | index($n)) == null and ($deps[$n] - $order | length) == 0)) | first) as $next
+        | if $next == null then $order else visit($order + [$next]) end;
+      visit([]) | .[]
+  '
+)
+EXPECTED="$(cargo metadata --format-version 1 --no-deps | jq '[.packages[] | select(.publish != [])] | length')"
+if [[ ${#CRATES[@]} -ne $EXPECTED ]]; then
+  echo "dependency cycle among workspace crates: ordered ${#CRATES[@]} of $EXPECTED" >&2
   exit 1
 fi
 
@@ -170,4 +174,4 @@ for i in "${!CRATES[@]}"; do
   published_this_run=$(( published_this_run + 1 ))
 done
 
-step "All 16 crates are on crates.io"
+step "All ${#CRATES[@]} crates are on crates.io"
