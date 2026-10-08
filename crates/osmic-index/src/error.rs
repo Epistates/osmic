@@ -32,4 +32,8 @@ pub enum NodeStoreError {
     /// says which.
     #[error("invalid node store file: {0}")]
     InvalidFile(String),
+
+    /// Another store (in this or another process) has the file open.
+    #[error("node store {} is in use by another process", .0.display())]
+    Locked(std::path::PathBuf),
 }

@@ -14,19 +14,20 @@
 //! - [`DenseNodeStore::create`] / [`DenseNodeStore::open`]: a file with a
 //!   small header (magic, format version, capacity) followed by the slots,
 //!   comparable to osm2pgsql's flat-nodes file. The file is sparse on disk
-//!   until written.
+//!   until written, and exclusively locked (advisory) while a store has it
+//!   open.
 //!
 //! All slot access goes through `AtomicU64` with relaxed ordering, so
 //! concurrent writers (parallel PBF decoding, including duplicate ids in
 //! history files) can never tear a coordinate; readers see either the old or
 //! the new value.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use memmap2::{MmapOptions, MmapRaw};
-use tracing::info;
+use tracing::{info, warn};
 
 use osmic_core::{FixedCoord, NodeLocationStore};
 
@@ -47,6 +48,23 @@ pub struct DenseNodeStore {
     offset: usize,
     /// Number of slots: valid ids are `0..capacity`.
     capacity: usize,
+    /// The backing file, kept open to hold its lock; `None` in memory.
+    _file: Option<File>,
+}
+
+/// Take an exclusive advisory lock on `file`, held until it is closed.
+///
+/// Some filesystems (FAT-family and some network mounts) cannot lock; the
+/// store then works without the guard.
+fn lock(file: &File, path: &Path) -> Result<(), NodeStoreError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(NodeStoreError::Locked(path.to_path_buf())),
+        Err(TryLockError::Error(e)) => {
+            warn!(path = %path.display(), error = %e, "Cannot lock the node store; continuing unguarded");
+            Ok(())
+        }
+    }
 }
 
 fn slot_bytes(max_node_id: i64) -> Result<(usize, usize), NodeStoreError> {
@@ -83,6 +101,7 @@ impl DenseNodeStore {
             map: MmapRaw::from(map),
             offset: 0,
             capacity,
+            _file: None,
         })
     }
 
@@ -91,8 +110,9 @@ impl DenseNodeStore {
     /// # Errors
     ///
     /// [`NodeStoreError::InvalidCapacity`] for a negative or oversized
-    /// `max_node_id`; [`NodeStoreError::Io`] if the file cannot be created,
-    /// sized or mapped.
+    /// `max_node_id`; [`NodeStoreError::Locked`] if another store has the
+    /// file open (it is left untouched); [`NodeStoreError::Io`] if the file
+    /// cannot be created, sized or mapped.
     pub fn create(path: &Path, max_node_id: i64) -> Result<Self, NodeStoreError> {
         let (capacity, bytes) = slot_bytes(max_node_id)?;
         let total = bytes
@@ -104,17 +124,23 @@ impl DenseNodeStore {
             gib = total as f64 / f64::from(1u32 << 30),
             "Creating file-backed dense node store"
         );
+        // Lock before truncating, so a store in use elsewhere is not wiped.
+        #[expect(
+            clippy::suspicious_open_options,
+            reason = "truncated by set_len(0) once locked"
+        )]
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
             .open(path)?;
+        lock(&file, path)?;
+        file.set_len(0)?;
         file.set_len(total as u64)?;
-        // SAFETY: the file was just created/truncated by us and stays open
-        // for the lifetime of the mapping; osmic never truncates it while
-        // mapped. Concurrent modification by other processes is outside the
-        // store's contract (documented on `open`).
+        // SAFETY: the file was just truncated by us, is locked, and stays
+        // open for the lifetime of the mapping; osmic never truncates it
+        // while mapped. Processes that ignore the advisory lock are outside
+        // the store's contract (documented on `open`).
         let mut map = unsafe { MmapOptions::new().len(total).map_mut(&file)? };
         map[..8].copy_from_slice(MAGIC);
         map[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -123,21 +149,25 @@ impl DenseNodeStore {
             map: MmapRaw::from(map),
             offset: HEADER_LEN,
             capacity,
+            _file: Some(file),
         })
     }
 
     /// Open an existing file-backed store.
     ///
-    /// The file must not be truncated or rewritten by another process while
-    /// it is open: it is memory-mapped.
+    /// The file is memory-mapped and exclusively locked while open. The lock
+    /// is advisory: a process that ignores it must still not truncate or
+    /// rewrite the file meanwhile.
     ///
     /// # Errors
     ///
+    /// [`NodeStoreError::Locked`] if another store has the file open;
     /// [`NodeStoreError::Io`] if the file cannot be opened read-write or
     /// mapped; [`NodeStoreError::InvalidFile`] if it is not a store written
     /// by [`DenseNodeStore::create`] in this format version.
     pub fn open(path: &Path) -> Result<Self, NodeStoreError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
+        lock(&file, path)?;
         let len = usize::try_from(file.metadata()?.len())
             .map_err(|_| NodeStoreError::InvalidFile("file larger than address space".into()))?;
         if len < HEADER_LEN {
@@ -178,6 +208,7 @@ impl DenseNodeStore {
             map: MmapRaw::from(map),
             offset: HEADER_LEN,
             capacity,
+            _file: Some(file),
         })
     }
 
@@ -330,6 +361,27 @@ mod tests {
         let tiny = dir.path().join("tiny.bin");
         std::fs::write(&tiny, b"x").expect("write");
         assert!(DenseNodeStore::open(&tiny).is_err());
+    }
+
+    #[test]
+    fn an_open_file_store_is_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nodes.bin");
+        let store = DenseNodeStore::create(&path, 100).expect("create");
+        store.set(7, fc(1, 2)).expect("in range");
+        assert!(matches!(
+            DenseNodeStore::open(&path),
+            Err(NodeStoreError::Locked(_))
+        ));
+        // Creating over a store in use must not truncate it.
+        assert!(matches!(
+            DenseNodeStore::create(&path, 10),
+            Err(NodeStoreError::Locked(_))
+        ));
+        assert_eq!(store.get(7), Some(fc(1, 2)));
+        drop(store);
+        let store = DenseNodeStore::open(&path).expect("unlocked once closed");
+        assert_eq!(store.get(7), Some(fc(1, 2)));
     }
 
     #[test]
