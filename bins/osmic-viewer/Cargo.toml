@@ -16,24 +16,28 @@ osmic-core = { workspace = true }
 osmic-render = { workspace = true }
 osmic-style = { workspace = true }
 osmic-text = { workspace = true }
-osmic-tiles = { workspace = true, features = ["native"] }
+osmic-tiles = { workspace = true, features = ["reader"] }
 wgpu = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 lru = { workspace = true }
-pmtiles = { workspace = true, features = ["mmap-async-tokio"] }
+# Tile coordinates and header types only; reading goes through
+# `osmic_tiles::reader`.
+pmtiles = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+flate2 = { workspace = true }
 geo-types = { workspace = true }
 naga = { workspace = true, features = ["wgsl-in"] }
 tempfile = { workspace = true }
 tiny-skia = { workspace = true }
 serde_json = { workspace = true }
+osmic-tiles = { workspace = true, features = ["native", "reader"] }
 
 [lints]
 workspace = true

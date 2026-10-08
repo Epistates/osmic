@@ -16,7 +16,8 @@ use osmic_render::{
 use osmic_style::Style;
 use osmic_text::LabelCandidate;
 use osmic_tiles::mvt_decode::{self, DecodedFeature};
-use pmtiles::{AsyncPmTilesReader, MmapBackend};
+use osmic_tiles::reader::{self, ArchiveReader};
+use pmtiles::Compression;
 use tracing::{debug, warn};
 
 use crate::tile_cache::Weigh;
@@ -124,8 +125,11 @@ pub trait TileSource: Send + Sync {
 
 /// A PMTiles archive opened for reading.
 pub struct PmtilesSource {
-    reader: AsyncPmTilesReader<MmapBackend>,
+    reader: ArchiveReader,
     runtime: tokio::runtime::Runtime,
+    compression: Compression,
+    /// Largest decompressed tile accepted.
+    max_tile_bytes: u64,
     /// Highest zoom level stored in the archive.
     pub max_zoom: u8,
     /// Center suggested by the archive header: `(lon, lat, zoom)`.
@@ -133,7 +137,8 @@ pub struct PmtilesSource {
 }
 
 impl PmtilesSource {
-    /// Open `path`. A missing, unreadable or non-PMTiles file is an error.
+    /// Open `path`. A missing, unreadable or non-PMTiles file, a malformed
+    /// header, or tile compression the viewer cannot read is an error.
     pub fn open(path: &Path) -> Result<Self, String> {
         // One worker thread so concurrent `block_on` calls from the tile
         // workers are all driven.
@@ -142,15 +147,19 @@ impl PmtilesSource {
             .enable_all()
             .build()
             .map_err(|e| format!("starting async runtime: {e}"))?;
-        let reader = runtime.block_on(async {
-            let backend = MmapBackend::try_from(path)
-                .await
-                .map_err(|e| format!("opening {}: {e}", path.display()))?;
-            AsyncPmTilesReader::try_from_source(backend)
-                .await
-                .map_err(|e| format!("{} is not a readable PMTiles archive: {e}", path.display()))
-        })?;
+        let reader = runtime
+            .block_on(reader::open(path, reader::DEFAULT_DIRECTORY_CACHE))
+            .map_err(|e| describe(&e))?;
         let header = reader.get_header();
+        // What `reader::decompress_tile` can inflate; failing here beats
+        // failing every tile.
+        let compression = header.tile_compression;
+        if !matches!(compression, Compression::None | Compression::Gzip) {
+            return Err(format!(
+                "{} uses {compression:?} tile compression, which the viewer cannot read",
+                path.display()
+            ));
+        }
         let max_zoom = header.max_zoom;
         let has_center = header.center_longitude.is_finite()
             && header.center_latitude.is_finite()
@@ -163,6 +172,8 @@ impl PmtilesSource {
         Ok(Self {
             reader,
             runtime,
+            compression,
+            max_tile_bytes: reader::MAX_DECOMPRESSED_TILE,
             max_zoom,
             center,
         })
@@ -173,11 +184,29 @@ impl TileSource for PmtilesSource {
     fn fetch(&self, coord: TileCoord) -> Result<Option<Vec<u8>>, String> {
         let pm = pmtiles::TileCoord::new(coord.z.0, coord.x, coord.y)
             .map_err(|e| format!("tile {coord}: {e}"))?;
-        self.runtime
-            .block_on(self.reader.get_tile_decompressed(pm))
-            .map(|o| o.map(|b| b.to_vec()))
-            .map_err(|e| format!("reading tile {coord}: {e}"))
+        let Some(raw) = self
+            .runtime
+            .block_on(self.reader.get_tile(pm))
+            .map_err(|e| format!("reading tile {coord}: {e}"))?
+        else {
+            return Ok(None);
+        };
+        reader::decompress_tile(&raw, self.compression, self.max_tile_bytes)
+            .map(|tile| Some(tile.into_owned()))
+            .map_err(|e| format!("tile {coord}: {}", describe(&e)))
     }
+}
+
+/// `error` followed by its sources, separated by `: `.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(e) = source {
+        text.push_str(": ");
+        text.push_str(&e.to_string());
+        source = e.source();
+    }
+    text
 }
 
 /// The outcome of loading one tile.
@@ -578,10 +607,18 @@ mod tests {
     }
 
     /// Write a one-tile PMTiles archive (z8/70/95) with a forest polygon, a
-    /// named road and a named shop.
+    /// named road and a named shop, uncompressed.
     fn write_archive(path: &Path) {
+        write_archive_with(path, osmic_tiles::assemble::TileCompression::None, |t| t);
+    }
+
+    /// Like [`write_archive`], storing `pack(tile)` with `compression`.
+    fn write_archive_with(
+        path: &Path,
+        compression: osmic_tiles::assemble::TileCompression,
+        pack: impl FnOnce(Vec<u8>) -> Vec<u8>,
+    ) {
         use osmic_core::BBox;
-        use osmic_tiles::assemble::TileCompression;
         use osmic_tiles::encode::TileFormat;
         use osmic_tiles::model::{GeomType, TileFeature, TileLayer};
         use osmic_tiles::mvt::encode_tile;
@@ -631,7 +668,7 @@ mod tests {
             path,
             &ArchiveOptions {
                 format: TileFormat::Mvt,
-                compression: TileCompression::None,
+                compression,
                 bounds: BBox::new(-90.0, 0.0, 0.0, 66.0),
                 min_zoom: 8,
                 max_zoom: 8,
@@ -641,9 +678,46 @@ mod tests {
         )
         .unwrap();
         archive
-            .add_tile(TileCoord::new(70, 95, Zoom(8)), &tile)
+            .add_tile(TileCoord::new(70, 95, Zoom(8)), &pack(tile))
             .unwrap();
         archive.finalize().unwrap();
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn gzip_tiles_are_inflated_within_the_cap() {
+        use osmic_tiles::assemble::TileCompression;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gz.pmtiles");
+        write_archive_with(&path, TileCompression::Gzip, |t| gzip(&t));
+        let present = TileCoord::new(70, 95, Zoom(8));
+
+        let mut source = PmtilesSource::open(&path).unwrap();
+        let tile = source.fetch(present).unwrap().expect("present");
+        assert!(mvt_decode::decode_tile(&tile, present).is_ok());
+
+        // The same tile is refused once it inflates past the cap.
+        source.max_tile_bytes = tile.len() as u64 - 1;
+        let err = source.fetch(present).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+    }
+
+    #[test]
+    fn a_decompression_bomb_is_an_error_not_an_allocation() {
+        use osmic_tiles::assemble::TileCompression;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bomb.pmtiles");
+        // 65 MiB of zeros: past the default 64 MiB cap, ~65 KiB packed.
+        write_archive_with(&path, TileCompression::Gzip, |_| gzip(&vec![0; 65 << 20]));
+        let source = PmtilesSource::open(&path).unwrap();
+        let err = source.fetch(TileCoord::new(70, 95, Zoom(8))).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
     }
 
     #[test]
@@ -707,5 +781,22 @@ mod tests {
         let empty = dir.path().join("empty.pmtiles");
         std::fs::write(&empty, b"").unwrap();
         assert!(PmtilesSource::open(&empty).is_err());
+
+        // A valid magic and version but a root directory past the end of
+        // the file: the `pmtiles` reader would slice out of bounds.
+        let mut header = b"PMTiles\x03".to_vec();
+        for field in [127u64, 100_000, 0, 0, 0, 0, 0, 0] {
+            header.extend_from_slice(&field.to_le_bytes());
+        }
+        header.resize(200, 0);
+        let malformed = dir.path().join("malformed.pmtiles");
+        std::fs::write(&malformed, &header).unwrap();
+        let err = PmtilesSource::open(&malformed)
+            .err()
+            .expect("malformed header");
+        assert!(
+            err.contains("malformed.pmtiles") && err.contains("root directory"),
+            "{err}"
+        );
     }
 }
