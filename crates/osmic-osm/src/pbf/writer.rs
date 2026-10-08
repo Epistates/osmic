@@ -56,7 +56,9 @@ pub struct PbfWriterOptions {
     /// timestamp (Unix seconds), sequence number and base URL the data is
     /// current to.
     pub replication_timestamp: Option<i64>,
+    /// Replication sequence number (see `replication_timestamp`).
     pub replication_sequence: Option<i64>,
+    /// Replication base URL (see `replication_timestamp`).
     pub replication_base_url: Option<String>,
 }
 
@@ -126,11 +128,15 @@ impl PbfWriterOptions {
 /// Object metadata as stored in PBF `Info` / `DenseInfo`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ElementMeta {
+    /// Object version, starting at 1.
     pub version: i32,
     /// Seconds since the Unix epoch.
     pub timestamp: i64,
+    /// Id of the changeset that wrote this version.
     pub changeset: i64,
+    /// Id of the user who wrote this version.
     pub uid: i32,
+    /// Display name of that user.
     pub user: String,
 }
 
@@ -182,6 +188,10 @@ fn too_large(what: &str, bytes: usize) -> io::Error {
 
 impl<W: Write> PbfWriter<W> {
     /// Start a file: writes the header block immediately.
+    ///
+    /// # Errors
+    ///
+    /// Any error from writing the header to `out`.
     pub fn new(mut out: W, options: &PbfWriterOptions) -> io::Result<Self> {
         let mut header = Vec::new();
         if let Some(b) = options.bbox {
@@ -256,6 +266,10 @@ impl<W: Write> PbfWriter<W> {
     }
 
     /// Write a node.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::write_node_with_meta`].
     pub fn write_node(
         &mut self,
         id: i64,
@@ -266,6 +280,12 @@ impl<W: Write> PbfWriter<W> {
     }
 
     /// Write a node with optional metadata.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] if the encoded node would exceed the
+    /// 24 MiB element limit; any error from writing completed blocks to the
+    /// output, which happens in batches.
     pub fn write_node_with_meta(
         &mut self,
         id: i64,
@@ -303,11 +323,21 @@ impl<W: Write> PbfWriter<W> {
     }
 
     /// Write a way.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::write_way_with_meta`].
     pub fn write_way(&mut self, id: i64, refs: &[i64], tags: &[(&str, &str)]) -> io::Result<()> {
         self.write_way_with_meta(id, refs, tags, None)
     }
 
     /// Write a way with optional metadata.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] if the encoded way would exceed the
+    /// 24 MiB element limit; any error from writing completed blocks to the
+    /// output, which happens in batches.
     pub fn write_way_with_meta(
         &mut self,
         id: i64,
@@ -321,6 +351,12 @@ impl<W: Write> PbfWriter<W> {
     /// Write a way with the location of each node (`None` for a missing
     /// node, written as an out-of-range location like osmium does). Needs
     /// [`PbfWriterOptions::locations_on_ways`].
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] without `locations_on_ways`, if
+    /// `locations` and `refs` differ in length, or past the element limit;
+    /// otherwise as [`Self::write_way_with_meta`].
     pub fn write_way_with_locations(
         &mut self,
         id: i64,
@@ -369,6 +405,10 @@ impl<W: Write> PbfWriter<W> {
     }
 
     /// Write a relation; members are `(type, id, role)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::write_relation_with_meta`].
     pub fn write_relation(
         &mut self,
         id: i64,
@@ -379,6 +419,12 @@ impl<W: Write> PbfWriter<W> {
     }
 
     /// Write a relation with optional metadata.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] if the encoded relation would exceed
+    /// the 24 MiB element limit; any error from writing completed blocks to
+    /// the output, which happens in batches.
     pub fn write_relation_with_meta(
         &mut self,
         id: i64,
@@ -413,7 +459,12 @@ impl<W: Write> PbfWriter<W> {
     }
 
     /// Copy an already-framed blob (length prefix, `BlobHeader`, `Blob`)
-    /// from another PBF file, after everything written so far.
+    /// from another PBF file, after everything written so far. The blob is
+    /// not validated.
+    ///
+    /// # Errors
+    ///
+    /// Any error from writing to the output.
     pub fn write_raw_blob(&mut self, framed: &[u8]) -> io::Result<()> {
         self.flush_block()?;
         self.write_pending()?;
@@ -516,6 +567,10 @@ impl<W: Write> PbfWriter<W> {
     }
 
     /// Flush the last block and return the underlying writer.
+    ///
+    /// # Errors
+    ///
+    /// Any error from writing or flushing the output.
     pub fn finish(mut self) -> io::Result<W> {
         self.flush_block()?;
         self.write_pending()?;

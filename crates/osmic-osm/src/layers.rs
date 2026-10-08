@@ -1,3 +1,5 @@
+//! Feature layers ([`Layer`]) and sets of enabled layers ([`LayerSet`]).
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -6,24 +8,43 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Layer {
+    /// Roads and paths (`highway=*`).
     Highway,
+    /// Buildings (`building=*`).
     Building,
+    /// Waterways and water bodies (`waterway=*`, `water=*`, `natural=water`).
     Water,
+    /// Land cover and natural features (`natural=*`).
     Natural,
+    /// Land use (`landuse=*`).
     Landuse,
+    /// Railways (`railway=*`).
     Railway,
+    /// Amenities (`amenity=*`).
     Amenity,
+    /// Leisure facilities (`leisure=*`).
     Leisure,
+    /// Administrative and protected-area boundaries (`boundary=*`).
     Boundary,
+    /// Settlements and localities (`place=*`).
     Place,
+    /// Shops (`shop=*`).
     Shop,
+    /// Tourism (`tourism=*`).
     Tourism,
+    /// Offices (`office=*`).
     Office,
+    /// Healthcare (`healthcare=*`).
     Healthcare,
+    /// Crafts and trades (`craft=*`).
     Craft,
+    /// Historic sites (`historic=*`).
     Historic,
+    /// Clubs (`club=*`).
     Club,
+    /// Emergency facilities (`emergency=*`).
     Emergency,
+    /// Education (`education=*`).
     Education,
 }
 
@@ -127,18 +148,22 @@ impl LayerSet {
         Self(0)
     }
 
+    /// Whether `layer` is enabled.
     pub const fn contains(self, layer: Layer) -> bool {
         self.0 & layer.bit() != 0
     }
 
+    /// Enable `layer`.
     pub fn insert(&mut self, layer: Layer) {
         self.0 |= layer.bit();
     }
 
+    /// Disable `layer`.
     pub fn remove(&mut self, layer: Layer) {
         self.0 &= !layer.bit();
     }
 
+    /// Whether no layer is enabled.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
@@ -149,6 +174,11 @@ impl LayerSet {
     }
 
     /// Parse a comma-separated list of layer names (whitespace ignored).
+    /// Empty input, or input of only commas, yields an empty set.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownLayer`] for the first name that is not a [`Layer`].
     pub fn from_names(input: &str) -> Result<Self, UnknownLayer> {
         let mut set = Self::none();
         for name in input.split(',').map(str::trim).filter(|n| !n.is_empty()) {

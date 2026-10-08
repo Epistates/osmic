@@ -1,3 +1,6 @@
+//! Compact tag storage: interned keys ([`TagStore`]), per-feature
+//! [`Tags`], and the [`TagRetention`] policy deciding which tags are kept.
+
 use std::sync::Arc;
 
 use lasso::{Key, Spur, ThreadedRodeo};
@@ -16,59 +19,110 @@ pub type TagValue = SmolStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum WellKnownKey {
+    /// `highway`.
     Highway = 0,
+    /// `building`.
     Building,
+    /// `name`.
     Name,
+    /// `waterway`.
     Waterway,
+    /// `natural`.
     Natural,
+    /// `landuse`.
     Landuse,
+    /// `railway`.
     Railway,
+    /// `amenity`.
     Amenity,
+    /// `leisure`.
     Leisure,
+    /// `boundary`.
     Boundary,
+    /// `place`.
     Place,
+    /// `shop`.
     Shop,
+    /// `tourism`.
     Tourism,
+    /// `power`.
     Power,
+    /// `aeroway`.
     Aeroway,
+    /// `surface`.
     Surface,
+    /// `maxspeed`.
     Maxspeed,
+    /// `ref`.
     Ref,
+    /// `oneway`.
     Oneway,
+    /// `bridge`.
     Bridge,
+    /// `tunnel`.
     Tunnel,
+    /// `layer`.
     Layer,
+    /// `access`.
     Access,
+    /// `service`.
     Service,
+    /// `foot`.
     Foot,
+    /// `bicycle`.
     Bicycle,
+    /// `lanes`.
     Lanes,
+    /// `lit`.
     Lit,
+    /// `admin_level`.
     AdminLevel,
+    /// `water`.
     Water,
+    /// `office`.
     Office,
+    /// `healthcare`.
     Healthcare,
+    /// `craft`.
     Craft,
+    /// `historic`.
     Historic,
+    /// `club`.
     Club,
+    /// `emergency`.
     Emergency,
+    /// `education`.
     Education,
+    /// `addr:street`.
     AddrStreet,
+    /// `addr:housenumber`.
     AddrHousenumber,
+    /// `addr:city`.
     AddrCity,
+    /// `addr:postcode`.
     AddrPostcode,
+    /// `phone`.
     Phone,
+    /// `contact:phone`.
     ContactPhone,
+    /// `website`.
     Website,
+    /// `contact:website`.
     ContactWebsite,
+    /// `opening_hours`.
     OpeningHours,
+    /// `cuisine`.
     Cuisine,
+    /// `brand`.
     Brand,
+    /// `operator`.
     Operator,
+    /// `description`.
     Description,
 }
 
 impl WellKnownKey {
+    /// Every variant, in discriminant order.
     pub const ALL: &[WellKnownKey] = &[
         Self::Highway,
         Self::Building,
@@ -122,6 +176,7 @@ impl WellKnownKey {
         Self::Description,
     ];
 
+    /// The OSM key string.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Highway => "highway",
@@ -196,6 +251,8 @@ pub struct TagStore {
 }
 
 impl TagStore {
+    /// A store with every [`WellKnownKey`] and [`CURATED_KEYS`] entry
+    /// already interned.
     pub fn new() -> Self {
         let rodeo: ThreadedRodeo<TagKey, FxBuildHasher> = ThreadedRodeo::with_hasher(FxBuildHasher);
         let mut preset = FxHashMap::default();
@@ -252,11 +309,13 @@ impl TagStore {
             .or_else(|| self.rodeo.get(key))
     }
 
-    /// Number of distinct keys interned.
+    /// Number of distinct keys interned, including the preset keys.
     pub fn len(&self) -> usize {
         self.rodeo.len()
     }
 
+    /// Whether no key is interned; never true for a store built by
+    /// [`TagStore::new`], which presets keys.
     pub fn is_empty(&self) -> bool {
         self.rodeo.is_empty()
     }
@@ -278,18 +337,22 @@ pub struct Tags {
 }
 
 impl Tags {
+    /// No tags; does not allocate.
     pub fn new() -> Self {
         Self {
             inner: SmallVec::new(),
         }
     }
 
+    /// Room for `cap` tags; allocates only beyond the inline capacity of 4.
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             inner: SmallVec::with_capacity(cap),
         }
     }
 
+    /// Append a tag. Duplicate keys are not checked; [`Tags::get`] returns
+    /// the first.
     pub fn push(&mut self, key: TagKey, value: impl Into<TagValue>) {
         self.inner.push((key, value.into()));
     }
@@ -302,18 +365,22 @@ impl Tags {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Whether a tag with `key` is present.
     pub fn contains(&self, key: TagKey) -> bool {
         self.inner.iter().any(|(k, _)| *k == key)
     }
 
+    /// Tags in insertion order; resolve keys with [`TagStore::resolve`].
     pub fn iter(&self) -> impl Iterator<Item = &(TagKey, TagValue)> {
         self.inner.iter()
     }
 
+    /// Number of tags.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    /// Whether there are no tags.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }

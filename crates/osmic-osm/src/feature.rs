@@ -1,3 +1,6 @@
+//! Classified features: [`Feature`], its [`FeatureKind`], and one subtype
+//! enum per tag key, with the zoom and importance rules used by tiling.
+
 use osmic_core::{Geometry, OsmId};
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +17,10 @@ macro_rules! tag_value_enum {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub enum $name {
-            $($variant,)*
+            $(
+                #[doc = concat!("`", $value, "`", $(" (also `", $alias, "`)",)* ".")]
+                $variant,
+            )*
             /// Any value without a dedicated variant.
             Other,
         }
@@ -23,6 +29,8 @@ macro_rules! tag_value_enum {
             /// Every named variant (excluding `Other`).
             pub const NAMED: &'static [Self] = &[$(Self::$variant),*];
 
+            /// The variant for a raw tag value (aliases included), or
+            /// `Other`. Matching is exact and case-sensitive.
             pub fn from_tag_value(val: &str) -> Self {
                 match val {
                     $($value $(| $alias)* => Self::$variant,)*
@@ -30,6 +38,7 @@ macro_rules! tag_value_enum {
                 }
             }
 
+            /// The canonical tag value, or `"other"` for `Other`.
             pub const fn as_str(&self) -> &'static str {
                 match self {
                     $(Self::$variant => $value,)*
@@ -100,21 +109,35 @@ tag_value_enum!(
 /// Water features from `waterway=*`, `water=*` and `natural=water`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WaterKind {
+    /// `waterway=river` or `water=river`.
     River,
+    /// `waterway=stream`.
     Stream,
+    /// `waterway=canal`.
     Canal,
+    /// `waterway=drain`.
     Drain,
+    /// `waterway=ditch`.
     Ditch,
+    /// `water=lake`, and plain `natural=water` without a `water=*` tag.
     Lake,
+    /// `water=pond`.
     Pond,
+    /// `water=reservoir`.
     Reservoir,
+    /// `water=basin`.
     Basin,
+    /// Wetland; not produced by tag classification.
     Wetland,
+    /// Coastline; not produced by tag classification, which files
+    /// `natural=coastline` under [`NaturalKind::Coastline`].
     Coastline,
+    /// Any value without a dedicated variant.
     Other,
 }
 
 impl WaterKind {
+    /// The variant for a `waterway=*` value, or `Other`.
     pub fn from_waterway_value(val: &str) -> Self {
         match val {
             "river" => Self::River,
@@ -126,6 +149,7 @@ impl WaterKind {
         }
     }
 
+    /// The variant for a `water=*` value, or `Other`.
     pub fn from_water_value(val: &str) -> Self {
         match val {
             "lake" => Self::Lake,
@@ -137,6 +161,7 @@ impl WaterKind {
         }
     }
 
+    /// Lower-case name of the variant (`"other"` for `Other`).
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::River => "river",
@@ -430,24 +455,43 @@ tag_value_enum!(
 /// Top-level feature classification from OSM tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeatureKind {
+    /// `highway=*`: roads and paths.
     Highway(HighwayKind),
+    /// `building=*` other than `building=no`.
     Building(BuildingKind),
+    /// `waterway=*`, else `water=*`, else `natural=water`.
     Water(WaterKind),
+    /// `landuse=*`.
     Landuse(LanduseKind),
+    /// `natural=*` other than `natural=water` (which is [`Self::Water`]).
     Natural(NaturalKind),
+    /// `railway=*`.
     Railway(RailwayKind),
+    /// `amenity=*`.
     Amenity(AmenityKind),
+    /// `leisure=*`.
     Leisure(LeisureKind),
+    /// `shop=*`.
     Shop(ShopKind),
+    /// `tourism=*`.
     Tourism(TourismKind),
+    /// `office=*`.
     Office(OfficeKind),
+    /// `healthcare=*`.
     Healthcare(HealthcareKind),
+    /// `craft=*`.
     Craft(CraftKind),
+    /// `historic=*`.
     Historic(HistoricKind),
+    /// `club=*`.
     Club(ClubKind),
+    /// `emergency=*`.
     Emergency(EmergencyKind),
+    /// `education=*`.
     Education(EducationKind),
+    /// `boundary=*`.
     Boundary(BoundaryKind),
+    /// `place=*`: settlements and named localities.
     Place(PlaceKind),
 }
 
@@ -592,10 +636,13 @@ impl FeatureKind {
 pub struct Feature {
     /// The OSM element this feature came from.
     pub id: OsmId,
+    /// Classification; an element in several layers yields one feature per
+    /// layer.
     pub kind: FeatureKind,
     /// WGS84 geometry (x = longitude, y = latitude). Polygon exteriors are
     /// counter-clockwise and holes clockwise.
     pub geometry: Geometry,
+    /// The element's tags after [`crate::TagRetention`] filtering.
     pub tags: Tags,
 }
 

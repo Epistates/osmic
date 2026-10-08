@@ -66,6 +66,7 @@ impl FeatureIndex {
         self.tree.size()
     }
 
+    /// Whether no feature is indexed.
     pub fn is_empty(&self) -> bool {
         self.tree.size() == 0
     }

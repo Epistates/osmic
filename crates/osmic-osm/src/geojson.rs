@@ -268,11 +268,21 @@ impl<'de> Visitor<'de> for TopLevel<'_, '_> {
 }
 
 /// Load a GeoJSON file, classifying properties like OSM tags into `layers`.
+///
+/// # Errors
+///
+/// As [`load_geojson_with`].
 pub fn load_geojson(path: &Path, layers: LayerSet) -> Result<ProcessedData, OsmError> {
     load_geojson_with(path, layers, &TagRetention::All)
 }
 
 /// [`load_geojson`] keeping only the properties `retention` selects.
+///
+/// # Errors
+///
+/// [`OsmError::Io`] if the file cannot be opened; [`OsmError::GeoJson`]
+/// if reading fails part-way or the document is not valid JSON holding a
+/// `FeatureCollection` or `Feature`.
 pub fn load_geojson_with(
     path: &Path,
     layers: LayerSet,

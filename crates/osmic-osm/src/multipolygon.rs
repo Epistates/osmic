@@ -35,7 +35,9 @@ use osmic_core::{FixedCoord, Geometry};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Role {
+    /// `outer`; a mismatch if the way ends up in a hole.
     Outer,
+    /// `inner`; a mismatch if the way ends up in an outer ring.
     Inner,
     /// Empty role — never counted as a mismatch.
     Empty,
@@ -60,8 +62,11 @@ impl Role {
 /// A member way with resolved coordinates.
 #[derive(Debug, Clone, Copy)]
 pub struct MemberWay<'a> {
+    /// OSM way id.
     pub id: i64,
+    /// The way's role in the relation; only used to count mismatches.
     pub role: Role,
+    /// The way's node locations, in way order.
     pub coords: &'a [FixedCoord],
 }
 
@@ -69,20 +74,37 @@ pub struct MemberWay<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum AssemblyError {
+    /// No member way has a segment of non-zero length.
     #[error("relation has no member ways with geometry")]
     NoMembers,
+    /// A vertex has odd degree, so a ring cannot close there; usually a
+    /// member way missing from an extract.
     #[error("ring cannot be closed at {lon},{lat} (missing or broken member way)")]
-    OpenRing { lon: i32, lat: i32 },
+    OpenRing {
+        /// Longitude of the vertex, in 1e-7 degrees.
+        lon: i32,
+        /// Latitude of the vertex, in 1e-7 degrees.
+        lat: i32,
+    },
+    /// Every segment cancelled out, or every ring has zero area.
     #[error("no ring encloses a positive area")]
     NoArea,
+    /// Two segments cross, overlap, or one touches the other's interior.
     #[error("rings cross or overlap near {lon},{lat}")]
-    SelfIntersection { lon: i32, lat: i32 },
+    SelfIntersection {
+        /// Longitude near the intersection, in 1e-7 degrees.
+        lon: i32,
+        /// Latitude near the intersection, in 1e-7 degrees.
+        lat: i32,
+    },
 }
 
 /// Diagnostics from a successful assembly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssemblyReport {
+    /// Rings at even nesting depth (one output polygon each).
     pub outer_rings: usize,
+    /// Rings at odd nesting depth (holes).
     pub inner_rings: usize,
     /// Segments whose member role disagreed with the ring they ended up in.
     pub role_mismatches: usize,
@@ -91,6 +113,14 @@ pub struct AssemblyReport {
 }
 
 /// Assemble the area described by `members`.
+///
+/// Returns a [`Geometry::Polygon`] for one outer ring, otherwise a
+/// [`Geometry::MultiPolygon`].
+///
+/// # Errors
+///
+/// [`AssemblyError`] when the members describe no valid area: no usable
+/// segments, a ring that cannot close, crossing rings, or zero area.
 pub fn assemble_area(
     members: &[MemberWay<'_>],
 ) -> Result<(Geometry, AssemblyReport), AssemblyError> {

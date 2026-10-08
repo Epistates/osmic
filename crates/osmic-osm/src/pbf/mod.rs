@@ -26,13 +26,21 @@ const SUPPORTED_REQUIRED_FEATURES: &[&str] = &["OsmSchema-V0.6", "DenseNodes"];
 /// Contents of a PBF file's `OSMHeader` block.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PbfHeader {
+    /// Features a reader must support (e.g. `OsmSchema-V0.6`, `DenseNodes`).
     pub required_features: Vec<String>,
+    /// Features a reader may ignore (e.g. `Sort.Type_then_ID`).
     pub optional_features: Vec<String>,
+    /// Declared extent of the data, if the writer recorded one.
     pub bbox: Option<BBox>,
+    /// The program that wrote the file.
     pub writing_program: Option<String>,
+    /// Free-form data source (e.g. an API URL).
     pub source: Option<String>,
+    /// Replication timestamp, in seconds since the Unix epoch.
     pub replication_timestamp: Option<i64>,
+    /// Replication sequence number the data is current to.
     pub replication_sequence: Option<i64>,
+    /// Base URL of the replication server the data follows.
     pub replication_base_url: Option<String>,
 }
 
@@ -78,6 +86,7 @@ pub struct StringTable<'a> {
 }
 
 impl<'a> StringTable<'a> {
+    /// Decode `block`'s string table.
     pub fn new(block: &'a PrimitiveBlock) -> Self {
         Self {
             strings: block
@@ -88,6 +97,7 @@ impl<'a> StringTable<'a> {
         }
     }
 
+    /// The string at `index`, or `None` past the end of the table.
     pub fn get(&self, index: usize) -> Option<&str> {
         self.strings.get(index).map(|s| &**s)
     }
@@ -111,6 +121,12 @@ impl<'a> StringTable<'a> {
 /// Fails for files that need features osmic does not implement — notably
 /// OSM history files (`HistoricalInformation`), where several versions of
 /// each object would otherwise be mixed into one dataset.
+///
+/// # Errors
+///
+/// [`OsmError::Pbf`] if the file cannot be opened or a blob cannot be read,
+/// [`OsmError::UnsupportedFeature`] for an unsupported required feature,
+/// [`OsmError::MissingHeader`] if a data block comes before any header.
 pub fn read_header(path: &Path) -> Result<PbfHeader, OsmError> {
     let reader = BlobReader::from_path(path).map_err(|e| OsmError::pbf(path, e))?;
     for blob in reader {
@@ -150,6 +166,12 @@ pub fn read_header(path: &Path) -> Result<PbfHeader, OsmError> {
 ///
 /// Returns `(block_sequence, result)` pairs sorted by sequence (file
 /// order). Stops at the first error.
+///
+/// # Errors
+///
+/// [`OsmError::Pbf`] if the file cannot be opened or a blob cannot be read,
+/// [`OsmError::Block`] if a blob cannot be decoded, and any error `f`
+/// returns.
 pub fn par_blocks<T, F>(path: &Path, f: F) -> Result<Vec<(u64, T)>, OsmError>
 where
     T: Send,

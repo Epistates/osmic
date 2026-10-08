@@ -51,10 +51,20 @@ pub enum NodeStorage {
     Sparse,
     /// Dense in-memory array indexed by node id (8 bytes per possible id;
     /// only pages that receive nodes use RAM).
-    DenseMemory { max_node_id: i64 },
+    DenseMemory {
+        /// Largest node id the store holds; a larger id in the input fails
+        /// the run with [`OsmError::NodeStore`].
+        max_node_id: i64,
+    },
     /// Dense memory-mapped file, for node locations that do not fit in
     /// RAM. Created (or truncated) on every run.
-    DenseFile { path: PathBuf, max_node_id: i64 },
+    DenseFile {
+        /// The store file.
+        path: PathBuf,
+        /// Largest node id the store holds; a larger id in the input fails
+        /// the run with [`OsmError::NodeStore`].
+        max_node_id: i64,
+    },
 }
 
 /// What to do with a way some of whose nodes are missing from the input.
@@ -66,7 +76,7 @@ pub enum IncompleteWays {
     Skip,
     /// Build the way from the nodes that are present, if at least two are.
     /// A closed way missing its first/last node is no longer treated as
-    /// closed.
+    /// closed. Relations using the way are still skipped.
     KeepAvailable,
 }
 
@@ -76,9 +86,12 @@ pub struct PipelineConfig {
     /// Layers to classify into; elements matching no enabled layer are
     /// skipped.
     pub layers: LayerSet,
+    /// Where pass 1 keeps node locations; unused for files with locations
+    /// on ways.
     pub node_storage: NodeStorage,
     /// Which tags to keep on emitted features.
     pub tag_retention: TagRetention,
+    /// What to do with ways whose nodes are missing from the input.
     pub incomplete_ways: IncompleteWays,
     /// Only elements whose (raw) tags match become features. Applied
     /// before classification, so it can test any key — including ones
@@ -89,6 +102,12 @@ pub struct PipelineConfig {
 /// Receives features as the pipeline produces them, in batches, from many
 /// threads.
 pub trait FeatureSink: Sync {
+    /// Take one batch of features (one per block, or per chunk of
+    /// relations); batches arrive in no particular order.
+    ///
+    /// # Errors
+    ///
+    /// Any error aborts the run, which returns it as [`OsmError::Sink`].
     fn accept(&self, features: Vec<Feature>) -> Result<(), BoxError>;
 }
 
@@ -119,9 +138,14 @@ impl FeatureSink for CollectSink {
 /// Statistics from one pipeline run.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineStats {
+    /// Nodes in the input, including invalid ones.
     pub node_count: u64,
+    /// Ways in the input.
     pub way_count: u64,
+    /// Relations in the input.
     pub relation_count: u64,
+    /// Features emitted (an element in several layers counts once per
+    /// layer).
     pub feature_count: u64,
     /// Nodes with coordinates outside WGS84 bounds (ignored).
     pub invalid_nodes: u64,
@@ -129,6 +153,7 @@ pub struct PipelineStats {
     pub incomplete_ways: u64,
     /// Multipolygon/boundary relations that classify into an enabled layer.
     pub area_relations: u64,
+    /// Area relations assembled into a polygon or multipolygon.
     pub assembled_relations: u64,
     /// Relations with member ways missing from the input.
     pub incomplete_relations: u64,
@@ -136,18 +161,24 @@ pub struct PipelineStats {
     pub invalid_relations: u64,
     /// Member roles that disagreed with the assembled geometry.
     pub role_mismatches: u64,
-    /// Memory used by the node index.
+    /// Memory used by the node index: heap bytes for the sparse index, the
+    /// mapped size for dense stores, 0 for files with locations on ways.
     pub node_index_bytes: u64,
+    /// Pass 1: header, node locations and relation collection.
     pub pass1_duration: Duration,
+    /// Pass 2, including relation assembly.
     pub pass2_duration: Duration,
+    /// The whole run.
     pub total_duration: Duration,
 }
 
 /// Result of a streaming run.
 pub struct RunOutput {
+    /// The input file's header.
     pub header: PbfHeader,
     /// Bounding box of every emitted feature.
     pub bbox: BBox,
+    /// Counts and timings for the run.
     pub stats: PipelineStats,
     /// The node index built in pass 1 (`None` for files with locations on
     /// ways).
@@ -156,11 +187,15 @@ pub struct RunOutput {
 
 /// Result of [`PbfProcessor::process`].
 pub struct ProcessedData {
+    /// The input file's header (default for GeoJSON input).
     pub header: PbfHeader,
+    /// Interner resolving the keys of every feature's tags.
     pub tag_store: Arc<TagStore>,
     /// Features sorted by element id, then layer.
     pub features: Vec<Feature>,
+    /// Bounding box of every feature.
     pub bbox: BBox,
+    /// Counts and timings for the run.
     pub stats: PipelineStats,
 }
 
@@ -195,6 +230,7 @@ pub struct PbfProcessor {
 }
 
 impl PbfProcessor {
+    /// A processor with its own, fresh [`TagStore`].
     pub fn new(config: PipelineConfig) -> Self {
         Self::with_tag_store(config, Arc::new(TagStore::new()))
     }
@@ -204,6 +240,7 @@ impl PbfProcessor {
         Self { config, tag_store }
     }
 
+    /// The configuration runs use.
     pub fn config(&self) -> &PipelineConfig {
         &self.config
     }
@@ -214,6 +251,10 @@ impl PbfProcessor {
     }
 
     /// Process `path` and collect all features in memory.
+    ///
+    /// # Errors
+    ///
+    /// As [`PbfProcessor::run`].
     pub fn process(&self, path: &Path) -> Result<ProcessedData, OsmError> {
         let sink = CollectSink::default();
         let out = self.run(path, &sink)?;
@@ -227,6 +268,13 @@ impl PbfProcessor {
     }
 
     /// Process `path`, streaming features into `sink`.
+    ///
+    /// # Errors
+    ///
+    /// As [`scan_nodes`] for pass 1; in pass 2, [`OsmError::Pbf`] or
+    /// [`OsmError::Block`] for unreadable input and [`OsmError::Sink`] if
+    /// `sink` rejects a batch. `sink` may already hold features when an
+    /// error is returned.
     pub fn run(&self, path: &Path, sink: &dyn FeatureSink) -> Result<RunOutput, OsmError> {
         let total_start = Instant::now();
         let mut stats = PipelineStats::default();
@@ -335,32 +383,44 @@ pub type RelationSelector<'a> = dyn Fn(&[(&str, &str)]) -> bool + Sync + 'a;
 /// A member of a relation selected by [`scan_nodes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationMember {
+    /// Element type of the member.
     pub osm_type: OsmType,
+    /// OSM id of the member.
     pub id: i64,
+    /// Member role (empty if none, or if not in the block's string table).
     pub role: String,
 }
 
 /// A relation selected by [`scan_nodes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationRecord {
+    /// OSM relation id.
     pub id: i64,
+    /// Every tag, in file order.
     pub tags: Vec<(String, String)>,
+    /// Every member, in file order.
     pub members: Vec<RelationMember>,
 }
 
 /// Result of [`scan_nodes`].
 pub struct NodeScan {
+    /// The input file's header.
     pub header: PbfHeader,
     /// Node locations (`None` for files with locations on ways).
     pub index: Option<NodeIndex>,
     /// Relations accepted by the selector, in file order.
     pub relations: Vec<RelationRecord>,
+    /// Nodes in the input, including invalid ones.
     pub node_count: u64,
+    /// Ways in the input.
     pub way_count: u64,
+    /// Relations in the input.
     pub relation_count: u64,
     /// Nodes with coordinates outside WGS84 bounds (not stored).
     pub invalid_nodes: u64,
+    /// Memory used by `index`, as in [`PipelineStats::node_index_bytes`].
     pub node_index_bytes: u64,
+    /// Wall-clock time of the scan.
     pub duration: Duration,
 }
 
@@ -370,6 +430,13 @@ pub struct NodeScan {
 /// Relations are collected here because they come last in sorted files:
 /// knowing them up front lets pass 2 cache exactly the member ways it
 /// needs.
+///
+/// # Errors
+///
+/// As [`read_header`] for the header; [`OsmError::Pbf`] or
+/// [`OsmError::Block`] for unreadable data; [`OsmError::NodeStore`] if a
+/// dense store cannot be created or flushed, or a node id exceeds its
+/// `max_node_id`.
 pub fn scan_nodes(
     path: &Path,
     storage: &NodeStorage,

@@ -7,6 +7,8 @@
 //! - [`pbf`] (`native`): PBF header inspection, block decoding, writing.
 //! - [`geojson`] (`native`): streaming GeoJSON input.
 
+#![warn(missing_docs)]
+
 pub mod classify;
 mod error;
 pub mod feature;

@@ -13,6 +13,7 @@ use crate::layers::{Layer, LayerSet};
 /// One layer an element was classified into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Classified<'a> {
+    /// The feature kind, which determines the layer.
     pub kind: FeatureKind,
     /// The tag key that produced the classification (e.g. `"amenity"`).
     pub key: &'static str,

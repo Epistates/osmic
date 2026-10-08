@@ -35,9 +35,17 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub enum TagFilter {
     /// `key=value`.
-    Tag { key: String, value: String },
+    Tag {
+        /// Tag key, compared exactly.
+        key: String,
+        /// Tag value, compared exactly.
+        value: String,
+    },
     /// The key is present (any value).
-    KeyExists { key: String },
+    KeyExists {
+        /// Tag key, compared exactly.
+        key: String,
+    },
     /// Every sub-filter matches (an empty list matches everything).
     All(Vec<TagFilter>),
     /// At least one sub-filter matches (an empty list matches nothing).
@@ -50,11 +58,15 @@ pub enum TagFilter {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid tag filter at character {position}: {message}")]
 pub struct FilterParseError {
+    /// Byte offset into the input where parsing failed (the input length
+    /// if it ended early).
     pub position: usize,
+    /// What was expected or wrong there.
     pub message: String,
 }
 
 impl TagFilter {
+    /// Matches when `key` has exactly `value`.
     pub fn tag(key: &str, value: &str) -> Self {
         Self::Tag {
             key: key.to_string(),
@@ -62,20 +74,24 @@ impl TagFilter {
         }
     }
 
+    /// Matches when `key` is present, whatever its value.
     pub fn key_exists(key: &str) -> Self {
         Self::KeyExists {
             key: key.to_string(),
         }
     }
 
+    /// Matches when every filter matches (an empty list matches everything).
     pub fn all(filters: Vec<TagFilter>) -> Self {
         Self::All(filters)
     }
 
+    /// Matches when any filter matches (an empty list matches nothing).
     pub fn any(filters: Vec<TagFilter>) -> Self {
         Self::Any(filters)
     }
 
+    /// Matches when `filter` does not.
     #[allow(clippy::should_implement_trait)]
     pub fn negate(filter: TagFilter) -> Self {
         Self::Not(Box::new(filter))
@@ -100,6 +116,11 @@ impl TagFilter {
     }
 
     /// Parse the text syntax described in the module docs.
+    ///
+    /// # Errors
+    ///
+    /// [`FilterParseError`] for empty input, an unterminated or misplaced
+    /// quote, a missing key or value, or a malformed operator.
     pub fn parse(input: &str) -> Result<Self, FilterParseError> {
         let mut p = Parser {
             chars: input.char_indices().collect(),

@@ -10,14 +10,18 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum OsmError {
+    /// Opening or reading an input file failed.
     #[error("I/O error")]
     Io(#[from] std::io::Error),
 
     /// The PBF container could not be read.
     #[error("{}: {message}", path.display())]
     Pbf {
+        /// The PBF file.
         path: PathBuf,
+        /// Human-readable cause, with a remedy where one is known.
         message: String,
+        /// The underlying `osmpbf` error.
         #[source]
         source: BoxError,
     },
@@ -25,13 +29,19 @@ pub enum OsmError {
     /// One data block could not be decoded.
     #[error("{}: block {block}: {message}", path.display())]
     Block {
+        /// The PBF file.
         path: PathBuf,
+        /// Zero-based index of the blob in the file, counting the header.
         block: u64,
+        /// Human-readable cause, with a remedy where one is known.
         message: String,
+        /// The underlying `osmpbf` error.
         #[source]
         source: BoxError,
     },
 
+    /// The PBF header lists a required feature osmic does not implement,
+    /// e.g. `HistoricalInformation` in OSM history files.
     #[error(
         "{}: requires PBF feature '{feature}', which osmic does not support{}",
         path.display(),
@@ -41,14 +51,23 @@ pub enum OsmError {
             ""
         }
     )]
-    UnsupportedFeature { path: PathBuf, feature: String },
+    UnsupportedFeature {
+        /// The PBF file.
+        path: PathBuf,
+        /// The unsupported feature name, as written in the header.
+        feature: String,
+    },
 
+    /// The file at this path has no `OSMHeader` block before its first data
+    /// block, so it is not a valid PBF file.
     #[error("{}: no OSMHeader block before the first data block", .0.display())]
     MissingHeader(PathBuf),
 
+    /// Creating or writing the node location store failed.
     #[error("node store")]
     NodeStore(#[from] osmic_index::NodeStoreError),
 
+    /// A GeoJSON input could not be parsed; the message names the file.
     #[error("invalid GeoJSON: {0}")]
     GeoJson(String),
 
