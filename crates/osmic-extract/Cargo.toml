@@ -15,6 +15,7 @@ description = "Entity extraction from OSM PBF: tag filters, contact metadata, lo
 osmic-core = { workspace = true }
 osmic-index = { workspace = true }
 osmic-osm = { workspace = true, features = ["native"] }
+caseless = { workspace = true }
 csv = { workspace = true }
 geo = { workspace = true }
 geo-types = { workspace = true }

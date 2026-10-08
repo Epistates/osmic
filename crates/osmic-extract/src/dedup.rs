@@ -1,7 +1,7 @@
 //! Name + proximity deduplication for extracted entities.
 //!
-//! Entities are grouped by normalised name (Unicode NFKC, case-folded,
-//! whitespace collapsed). Within a group, the richest entity of each
+//! Entities are grouped by normalised name (Unicode compatibility caseless
+//! matching, whitespace collapsed; see [`normalize_name`]). Within a group, the richest entity of each
 //! cluster is kept: entities are visited richest-first and dropped if a
 //! kept entity lies within the radius (great-circle distance on a sphere).
 //! Points are bucketed by their position on the unit sphere in cubes whose
@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use caseless::Caseless;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::entity::Entity;
@@ -41,9 +42,29 @@ fn chord_squared(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 /// Normalised grouping key for a name.
+///
+/// Names that match under Unicode compatibility caseless matching
+/// (Unicode §3.13, D146: `NFKD(fold(NFKD(fold(NFD(name)))))`, with full
+/// default case folding) get the same key, so "STRASSE" matches "Straße",
+/// "ΟΔΟΣ" matches "οδος" and "Ｃafé" matches "cafe\u{301}". The key is
+/// returned in NFKC form. A combining dot above directly after `i` or `j`
+/// is dropped (those letters already carry a dot, and folding maps "İ" to
+/// "i\u{307}"), so "İSTANBUL" matches "Istanbul". Runs of whitespace
+/// collapse to one space.
 pub fn normalize_name(name: &str) -> String {
-    name.nfkc()
-        .flat_map(char::to_lowercase)
+    let mut previous = '\0';
+    name.nfd()
+        .default_case_fold()
+        .nfkd()
+        .default_case_fold()
+        .filter(move |&c| {
+            let redundant_dot = c == '\u{307}' && matches!(previous, 'i' | 'j');
+            if !redundant_dot {
+                previous = c;
+            }
+            !redundant_dot
+        })
+        .nfkc()
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -308,6 +329,24 @@ mod tests {
         // Precomposed vs combining-accent "Café", and a full-width "Ｃafé".
         assert_eq!(normalize_name("Café"), normalize_name("Cafe\u{301}"));
         assert_eq!(normalize_name("Ｃafé  Bar"), "café bar");
+    }
+
+    #[test]
+    fn full_case_folding_groups_case_variants() {
+        // ß folds to "ss" (lowercasing leaves it alone).
+        assert_eq!(normalize_name("STRASSE"), normalize_name("Straße"));
+        assert_eq!(normalize_name("Hauptstraße"), "hauptstrasse");
+        // Final sigma: "ΟΔΟΣ" lowercases to "οδοσ", but is written "οδος".
+        assert_eq!(normalize_name("ΟΔΟΣ"), normalize_name("οδο\u{3c2}"));
+        // Dotted capital I folds to "i" + combining dot above; the dot is
+        // redundant on an i.
+        assert_eq!(normalize_name("İSTANBUL"), "istanbul");
+        assert_eq!(normalize_name("İstanbul"), normalize_name("Istanbul"));
+        // Compatibility forms fold too: full-width letters, the "ﬁ" ligature.
+        assert_eq!(normalize_name("ＴＥＳＴ ﬁ"), "test fi");
+        // Accents are kept; a combining dot on other letters is kept.
+        assert_ne!(normalize_name("Café"), normalize_name("Cafe"));
+        assert_eq!(normalize_name("Ż"), "ż");
     }
 
     #[test]
