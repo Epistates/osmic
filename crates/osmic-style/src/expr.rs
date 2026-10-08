@@ -14,7 +14,7 @@ use osmic_core::Color;
 use serde_json::Value as Json;
 
 use crate::error::{EvalError, StyleError};
-use crate::value::{EvalContext, Value, number_json, type_error};
+use crate::value::{EvalContext, Value, ValueRef, number_json, type_error};
 
 /// A comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,115 +520,128 @@ impl Expr {
 
     /// Evaluate to a [`Value`].
     pub fn evaluate(&self, ctx: &EvalContext<'_>) -> Result<Value, EvalError> {
-        match self {
-            Self::Literal(v) => Ok(v.clone()),
-            Self::Zoom => Ok(Value::Number(ctx.zoom)),
+        self.eval(ctx).map(Eval::into_value)
+    }
+
+    /// Evaluate as a filter: only a boolean `true` matches; errors and
+    /// other values do not.
+    pub fn evaluate_bool(&self, ctx: &EvalContext<'_>) -> bool {
+        matches!(
+            self.eval(ctx).as_ref().map(Eval::view),
+            Ok(ValueRef::Bool(true))
+        )
+    }
+
+    /// Evaluate, borrowing literals and feature attributes rather than
+    /// copying them: only `to-string` produces an owned result.
+    pub(crate) fn eval<'a>(&'a self, ctx: &EvalContext<'a>) -> Result<Eval<'a>, EvalError> {
+        let bool_of = |x: &Expr, op| x.eval(ctx)?.view().expect_bool(op);
+        Ok(Eval::Ref(match self {
+            Self::Literal(v) => v.view(),
+            Self::Zoom => ValueRef::Number(ctx.zoom),
             Self::Get(key) => {
-                let key = expect_string(&key.evaluate(ctx)?)?;
-                Ok(ctx
-                    .feature
-                    .and_then(|f| f.property(&key))
-                    .unwrap_or(Value::Null))
+                let key = key.eval(ctx)?;
+                let key = expect_string("get", key.view())?;
+                ctx.feature
+                    .and_then(|f| f.property(key))
+                    .unwrap_or(ValueRef::Null)
             }
             Self::Has(key) => {
-                let key = expect_string(&key.evaluate(ctx)?)?;
-                Ok(Value::Bool(
-                    ctx.feature.is_some_and(|f| f.property(&key).is_some()),
-                ))
+                let key = key.eval(ctx)?;
+                let key = expect_string("has", key.view())?;
+                ValueRef::Bool(ctx.feature.is_some_and(|f| f.property(key).is_some()))
             }
-            Self::Not(x) => Ok(Value::Bool(!x.evaluate(ctx)?.expect_bool("!")?)),
-            Self::Compare(op, a, b) => compare(*op, &a.evaluate(ctx)?, &b.evaluate(ctx)?),
+            Self::Not(x) => ValueRef::Bool(!bool_of(x, "!")?),
+            Self::Compare(op, a, b) => {
+                ValueRef::Bool(compare(*op, a.eval(ctx)?.view(), b.eval(ctx)?.view())?)
+            }
             Self::All(xs) => {
                 for x in xs {
-                    if !x.evaluate(ctx)?.expect_bool("all")? {
-                        return Ok(Value::Bool(false));
+                    if !bool_of(x, "all")? {
+                        return Ok(Eval::Ref(ValueRef::Bool(false)));
                     }
                 }
-                Ok(Value::Bool(true))
+                ValueRef::Bool(true)
             }
             Self::Any(xs) => {
                 for x in xs {
-                    if x.evaluate(ctx)?.expect_bool("any")? {
-                        return Ok(Value::Bool(true));
+                    if bool_of(x, "any")? {
+                        return Ok(Eval::Ref(ValueRef::Bool(true)));
                     }
                 }
-                Ok(Value::Bool(false))
+                ValueRef::Bool(false)
             }
             Self::In(needle, haystack) => {
-                let needle = needle.evaluate(ctx)?;
-                match haystack.evaluate(ctx)? {
-                    Value::Array(items) => Ok(Value::Bool(items.contains(&needle))),
-                    Value::String(h) => match needle {
-                        Value::String(n) => Ok(Value::Bool(h.contains(&n))),
-                        other => Err(type_error("in", "string", &other)),
-                    },
-                    other => Err(type_error("in", "array or string", &other)),
-                }
+                let (needle, haystack) = (needle.eval(ctx)?, haystack.eval(ctx)?);
+                let needle = needle.view();
+                ValueRef::Bool(match haystack.view() {
+                    ValueRef::Array(items) => items.iter().any(|i| i.view() == needle),
+                    ValueRef::String(h) => h.contains(expect_string("in", needle)?),
+                    other => return Err(type_error("in", "array or string", other)),
+                })
             }
             Self::Match {
                 input,
                 branches,
                 fallback,
             } => {
-                let input = input.evaluate(ctx)?;
-                match branches.iter().find(|b| b.labels.contains(&input)) {
-                    Some(b) => b.output.evaluate(ctx),
-                    None => fallback.evaluate(ctx),
-                }
+                let input = input.eval(ctx)?;
+                let input = input.view();
+                let arm = branches
+                    .iter()
+                    .find(|b| b.labels.iter().any(|l| l.view() == input));
+                return match arm {
+                    Some(b) => b.output.eval(ctx),
+                    None => fallback.eval(ctx),
+                };
             }
             Self::Case { branches, fallback } => {
                 for (cond, out) in branches {
-                    if cond.evaluate(ctx)?.expect_bool("case")? {
-                        return out.evaluate(ctx);
+                    if bool_of(cond, "case")? {
+                        return out.eval(ctx);
                     }
                 }
-                fallback.evaluate(ctx)
+                return fallback.eval(ctx);
             }
             // As in MapLibre, an operand that fails to evaluate fails the
             // whole expression; only null results fall through.
             Self::Coalesce(xs) => {
                 for x in xs {
-                    match x.evaluate(ctx)? {
-                        Value::Null => continue,
-                        v => return Ok(v),
+                    let v = x.eval(ctx)?;
+                    if v.view() != ValueRef::Null {
+                        return Ok(v);
                     }
                 }
-                Ok(Value::Null)
+                ValueRef::Null
             }
             Self::Interpolate {
                 interpolation,
                 input,
                 stops,
             } => {
-                let x = finite_input("interpolate", &input.evaluate(ctx)?)?;
-                interpolate(*interpolation, x, stops, ctx)
+                let x = finite_input("interpolate", input.eval(ctx)?.view())?;
+                return interpolate(*interpolation, x, stops, ctx);
             }
             Self::Step { input, base, stops } => {
-                let x = finite_input("step", &input.evaluate(ctx)?)?;
-                match stops.iter().rev().find(|(stop, _)| *stop <= x) {
-                    Some((_, out)) => out.evaluate(ctx),
-                    None => base.evaluate(ctx),
-                }
+                let x = finite_input("step", input.eval(ctx)?.view())?;
+                return match stops.iter().rev().find(|(stop, _)| *stop <= x) {
+                    Some((_, out)) => out.eval(ctx),
+                    None => base.eval(ctx),
+                };
             }
-            Self::ToString(x) => Ok(Value::String(x.evaluate(ctx)?.stringify())),
+            Self::ToString(x) => return Ok(Eval::String(x.eval(ctx)?.view().stringify())),
             Self::ToNumber(xs) => {
                 let mut found = "null";
                 for x in xs {
-                    let v = x.evaluate(ctx)?;
-                    if let Some(n) = to_number(&v) {
-                        return Ok(Value::Number(n));
+                    let v = x.eval(ctx)?;
+                    if let Some(n) = to_number(v.view()) {
+                        return Ok(Eval::Ref(ValueRef::Number(n)));
                     }
-                    found = v.type_name();
+                    found = v.view().type_name();
                 }
-                Err(EvalError::NotANumber { found })
+                return Err(EvalError::NotANumber { found });
             }
-        }
-    }
-
-    /// Evaluate as a filter: only a boolean `true` matches; errors and
-    /// other values do not.
-    pub fn evaluate_bool(&self, ctx: &EvalContext<'_>) -> bool {
-        matches!(self.evaluate(ctx), Ok(Value::Bool(true)))
+        }))
     }
 
     /// Whether the result can vary between features (reads attributes).
@@ -719,15 +732,38 @@ impl Expr {
     }
 }
 
-fn expect_string(v: &Value) -> Result<String, EvalError> {
+/// An evaluation result. Literals and feature attributes are borrowed;
+/// only `to-string` builds a new string.
+pub(crate) enum Eval<'a> {
+    Ref(ValueRef<'a>),
+    String(String),
+}
+
+impl Eval<'_> {
+    pub(crate) fn view(&self) -> ValueRef<'_> {
+        match self {
+            Self::Ref(v) => *v,
+            Self::String(s) => ValueRef::String(s),
+        }
+    }
+
+    pub(crate) fn into_value(self) -> Value {
+        match self {
+            Self::Ref(v) => v.to_value(),
+            Self::String(s) => Value::String(s),
+        }
+    }
+}
+
+fn expect_string<'v>(op: &'static str, v: ValueRef<'v>) -> Result<&'v str, EvalError> {
     match v {
-        Value::String(s) => Ok(s.clone()),
-        other => Err(type_error("get", "string", other)),
+        ValueRef::String(s) => Ok(s),
+        other => Err(type_error(op, "string", other)),
     }
 }
 
 /// The numeric input of `interpolate`/`step`, which must be finite.
-fn finite_input(op: &'static str, v: &Value) -> Result<f64, EvalError> {
+fn finite_input(op: &'static str, v: ValueRef<'_>) -> Result<f64, EvalError> {
     let x = v.expect_number(op)?;
     if x.is_finite() {
         Ok(x)
@@ -739,12 +775,12 @@ fn finite_input(op: &'static str, v: &Value) -> Result<f64, EvalError> {
 /// MapLibre `to-number` of one operand: null is 0, booleans are 0/1 and
 /// strings parse as decimal numbers after trimming (`""` is 0, like
 /// JavaScript's `Number("")`); `None` if not convertible.
-fn to_number(v: &Value) -> Option<f64> {
+fn to_number(v: ValueRef<'_>) -> Option<f64> {
     match v {
-        Value::Number(n) => Some(*n),
-        Value::Null => Some(0.0),
-        Value::Bool(b) => Some(f64::from(u8::from(*b))),
-        Value::String(s) => {
+        ValueRef::Number(n) => Some(n),
+        ValueRef::Null => Some(0.0),
+        ValueRef::Bool(b) => Some(f64::from(u8::from(b))),
+        ValueRef::String(s) => {
             let t = s.trim();
             if t.is_empty() {
                 Some(0.0)
@@ -752,20 +788,20 @@ fn to_number(v: &Value) -> Option<f64> {
                 t.parse::<f64>().ok().filter(|n| n.is_finite())
             }
         }
-        Value::Color(_) | Value::Array(_) => None,
+        ValueRef::Color(_) | ValueRef::Array(_) => None,
     }
 }
 
-fn compare(op: CompareOp, a: &Value, b: &Value) -> Result<Value, EvalError> {
+fn compare(op: CompareOp, a: ValueRef<'_>, b: ValueRef<'_>) -> Result<bool, EvalError> {
     use std::cmp::Ordering;
     match op {
         // Differently-typed operands are simply unequal.
-        CompareOp::Eq => Ok(Value::Bool(a == b)),
-        CompareOp::Ne => Ok(Value::Bool(a != b)),
+        CompareOp::Eq => Ok(a == b),
+        CompareOp::Ne => Ok(a != b),
         _ => {
             let ord = match (a, b) {
-                (Value::Number(x), Value::Number(y)) => x.partial_cmp(y),
-                (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
+                (ValueRef::Number(x), ValueRef::Number(y)) => x.partial_cmp(&y),
+                (ValueRef::String(x), ValueRef::String(y)) => Some(x.cmp(y)),
                 _ => {
                     return Err(EvalError::Compare {
                         op: op.name(),
@@ -774,24 +810,24 @@ fn compare(op: CompareOp, a: &Value, b: &Value) -> Result<Value, EvalError> {
                     });
                 }
             };
-            Ok(Value::Bool(match (op, ord) {
+            Ok(match (op, ord) {
                 (_, None) => false,
                 (CompareOp::Lt, Some(o)) => o == Ordering::Less,
                 (CompareOp::Le, Some(o)) => o != Ordering::Greater,
                 (CompareOp::Gt, Some(o)) => o == Ordering::Greater,
                 (CompareOp::Ge, Some(o)) => o != Ordering::Less,
                 _ => unreachable!("Eq/Ne handled above"),
-            }))
+            })
         }
     }
 }
 
-fn interpolate(
+fn interpolate<'a>(
     interpolation: Interpolation,
     x: f64,
-    stops: &[(f64, Expr)],
-    ctx: &EvalContext<'_>,
-) -> Result<Value, EvalError> {
+    stops: &'a [(f64, Expr)],
+    ctx: &EvalContext<'a>,
+) -> Result<Eval<'a>, EvalError> {
     let (first, last) = match (stops.first(), stops.last()) {
         (Some(f), Some(l)) => (f, l),
         _ => return Err(EvalError::NoStops { op: "interpolate" }),
@@ -800,10 +836,10 @@ fn interpolate(
         return Err(EvalError::NonFinite { op: "interpolate" });
     }
     if x <= first.0 {
-        return first.1.evaluate(ctx);
+        return first.1.eval(ctx);
     }
     if x >= last.0 {
-        return last.1.evaluate(ctx);
+        return last.1.eval(ctx);
     }
     // `first.0 < x < last.0`, so at least one stop is `<= x` and one is
     // `> x`; the saturation only guards against unsorted programmatic stops.
@@ -813,16 +849,17 @@ fn interpolate(
         .min(stops.len() - 2);
     let ((x0, lo), (x1, hi)) = (&stops[i], &stops[i + 1]);
     let t = interpolation_factor(interpolation, x, *x0, *x1);
-    let (lo, hi) = (lo.evaluate(ctx)?, hi.evaluate(ctx)?);
-    match (&lo, &hi) {
-        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + (b - a) * t)),
-        (Value::Color(_) | Value::String(_), Value::Color(_) | Value::String(_)) => Ok(
-            Value::Color(lerp_color(lo.to_color()?, hi.to_color()?, t as f32)),
-        ),
-        (Value::Number(_), other) | (other, _) => {
-            Err(type_error("interpolate", "number or color", other))
+    let (lo, hi) = (lo.eval(ctx)?, hi.eval(ctx)?);
+    Ok(Eval::Ref(match (lo.view(), hi.view()) {
+        (ValueRef::Number(a), ValueRef::Number(b)) => ValueRef::Number(a + (b - a) * t),
+        (
+            lo @ (ValueRef::Color(_) | ValueRef::String(_)),
+            hi @ (ValueRef::Color(_) | ValueRef::String(_)),
+        ) => ValueRef::Color(lerp_color(lo.to_color()?, hi.to_color()?, t as f32)),
+        (ValueRef::Number(_), other) | (other, _) => {
+            return Err(type_error("interpolate", "number or color", other));
         }
-    }
+    }))
 }
 
 /// How far `x` is from `x0` towards `x1`, in `[0, 1]`.

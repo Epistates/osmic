@@ -1,6 +1,7 @@
 //! The typed style model and its MapLibre JSON reader/writer.
 
 use std::collections::HashSet;
+use std::sync::{Arc, LazyLock};
 
 use osmic_core::Color;
 use serde_json::{Map, Value as Json};
@@ -173,7 +174,7 @@ pub struct SymbolLayer {
     pub placement: Option<Property<SymbolPlacement>>,
     pub sort_key: Option<Property<f64>>,
     pub text_field: Option<Property<String>>,
-    pub text_font: Option<Property<Vec<String>>>,
+    pub text_font: Option<Property<Arc<[String]>>>,
     pub text_size: Option<Property<f64>>,
     pub text_transform: Option<Property<TextTransform>>,
     pub text_anchor: Option<Property<TextAnchor>>,
@@ -226,7 +227,7 @@ pub struct SymbolStyle {
     pub sort_key: f32,
     /// The label text, after `text-transform`.
     pub text: String,
-    pub font: Vec<String>,
+    pub font: Arc<[String]>,
     /// Size in logical pixels.
     pub size: f32,
     pub anchor: TextAnchor,
@@ -242,6 +243,14 @@ pub struct SymbolStyle {
     pub halo_color: Color,
     pub halo_width: f32,
 }
+
+/// MapLibre's `text-font` default, built once.
+static DEFAULT_TEXT_FONT: LazyLock<Arc<[String]>> = LazyLock::new(|| {
+    Arc::from([
+        "Open Sans Regular".to_string(),
+        "Arial Unicode MS Regular".to_string(),
+    ])
+});
 
 fn opacity(p: &Option<Property<f64>>, ctx: &EvalContext<'_>) -> f32 {
     eval_or(p, ctx, 1.0).clamp(0.0, 1.0) as f32
@@ -294,23 +303,21 @@ impl CircleLayer {
 impl SymbolLayer {
     pub fn resolve(&self, ctx: &EvalContext<'_>) -> SymbolStyle {
         let op = opacity(&self.text_opacity, ctx);
-        let offset = eval_or(&self.text_offset, ctx, vec![0.0, 0.0]);
+        // Missing offset components are 0, so the default needs no
+        // allocation.
+        let offset = eval_or(&self.text_offset, ctx, Vec::new());
+        let text = eval_or(&self.text_field, ctx, String::new());
         SymbolStyle {
             placement: eval_or(&self.placement, ctx, SymbolPlacement::Point),
             sort_key: eval_or(&self.sort_key, ctx, 0.0) as f32,
-            text: eval_or(&self.text_transform, ctx, TextTransform::None).apply(&eval_or(
-                &self.text_field,
-                ctx,
-                String::new(),
-            )),
-            font: eval_or(
-                &self.text_font,
-                ctx,
-                vec![
-                    "Open Sans Regular".into(),
-                    "Arial Unicode MS Regular".into(),
-                ],
-            ),
+            text: match eval_or(&self.text_transform, ctx, TextTransform::None) {
+                TextTransform::None => text,
+                transform => transform.apply(&text),
+            },
+            font: match &self.text_font {
+                Some(p) => p.evaluate(ctx, &DEFAULT_TEXT_FONT),
+                None => Arc::clone(&DEFAULT_TEXT_FONT),
+            },
             size: eval_or(&self.text_size, ctx, 16.0).max(0.0) as f32,
             anchor: eval_or(&self.text_anchor, ctx, TextAnchor::Center),
             offset: [

@@ -99,7 +99,11 @@ impl TileData {
                     layer: f.layer.clone(),
                     class: f.class.clone(),
                     name,
-                    tags: f.tags.clone(),
+                    tags: f
+                        .tags
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_string()))
+                        .collect(),
                 })
             })
             .collect();

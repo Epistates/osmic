@@ -1,11 +1,13 @@
 //! Typed layout/paint properties: a constant or an expression.
 
+use std::sync::Arc;
+
 use osmic_core::Color;
 use serde_json::Value as Json;
 
 use crate::error::StyleError;
 use crate::expr::{Expr, is_expression};
-use crate::value::{EvalContext, Value, number_json};
+use crate::value::{EvalContext, Value, ValueRef, number_json};
 
 /// A Rust type a style property can hold.
 pub trait PropertyValue: Sized + Clone + PartialEq + std::fmt::Debug {
@@ -19,7 +21,7 @@ pub trait PropertyValue: Sized + Clone + PartialEq + std::fmt::Debug {
     fn to_json(&self) -> Json;
 
     /// Convert an expression result; `None` falls back to the default.
-    fn from_value(value: &Value) -> Option<Self>;
+    fn from_value(value: ValueRef<'_>) -> Option<Self>;
 
     /// Parse-time validation/coercion of an expression of this type.
     fn prepare(_expr: &mut Expr) -> Result<(), String> {
@@ -62,9 +64,9 @@ impl<T: PropertyValue> Property<T> {
         match self {
             Self::Constant(c) => c.clone(),
             Self::Expr(e) => e
-                .evaluate(ctx)
+                .eval(ctx)
                 .ok()
-                .and_then(|v| T::from_value(&v))
+                .and_then(|v| T::from_value(v.view()))
                 .unwrap_or_else(|| default.clone()),
         }
     }
@@ -105,9 +107,9 @@ impl PropertyValue for f64 {
 
     /// Non-finite results (for example from interpolating between infinite
     /// outputs) are rejected, so the property falls back to its default.
-    fn from_value(value: &Value) -> Option<Self> {
+    fn from_value(value: ValueRef<'_>) -> Option<Self> {
         match value {
-            Value::Number(n) if n.is_finite() => Some(*n),
+            ValueRef::Number(n) if n.is_finite() => Some(n),
             _ => None,
         }
     }
@@ -124,9 +126,9 @@ impl PropertyValue for bool {
         Json::Bool(*self)
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    fn from_value(value: ValueRef<'_>) -> Option<Self> {
         match value {
-            Value::Bool(b) => Some(*b),
+            ValueRef::Bool(b) => Some(b),
             _ => None,
         }
     }
@@ -145,9 +147,9 @@ impl PropertyValue for String {
         Json::String(self.clone())
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    fn from_value(value: ValueRef<'_>) -> Option<Self> {
         match value {
-            Value::Null | Value::Array(_) => None,
+            ValueRef::Null | ValueRef::Array(_) => None,
             other => Some(other.stringify()),
         }
     }
@@ -165,7 +167,7 @@ impl PropertyValue for Color {
         Json::String(self.to_css())
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    fn from_value(value: ValueRef<'_>) -> Option<Self> {
         value.to_color().ok()
     }
 
@@ -198,9 +200,9 @@ impl PropertyValue for Vec<f64> {
         Json::Array(self.iter().map(|n| number_json(*n)).collect())
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    fn from_value(value: ValueRef<'_>) -> Option<Self> {
         match value {
-            Value::Array(items) => items
+            ValueRef::Array(items) => items
                 .iter()
                 .map(|v| match v {
                     Value::Number(n) if n.is_finite() => Some(*n),
@@ -212,7 +214,9 @@ impl PropertyValue for Vec<f64> {
     }
 }
 
-impl PropertyValue for Vec<String> {
+/// A list of strings (`text-font`). Shared, so evaluating a constant
+/// property is a reference-count increment rather than a deep copy.
+impl PropertyValue for Arc<[String]> {
     const TYPE_NAME: &'static str = "array of strings";
 
     fn from_json(json: &Json) -> Result<Self, String> {
@@ -231,9 +235,9 @@ impl PropertyValue for Vec<String> {
         Json::Array(self.iter().cloned().map(Json::String).collect())
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    fn from_value(value: ValueRef<'_>) -> Option<Self> {
         match value {
-            Value::Array(items) => items
+            ValueRef::Array(items) => items
                 .iter()
                 .map(|v| match v {
                     Value::String(s) => Some(s.clone()),
@@ -277,9 +281,9 @@ macro_rules! string_enum {
                 Json::String(self.as_str().to_string())
             }
 
-            fn from_value(value: &Value) -> Option<Self> {
+            fn from_value(value: ValueRef<'_>) -> Option<Self> {
                 match value {
-                    Value::String(s) => Self::from_name(s),
+                    ValueRef::String(s) => Self::from_name(s),
                     _ => None,
                 }
             }
@@ -438,8 +442,11 @@ mod tests {
 
     #[test]
     fn arrays_distinguish_constants_from_expressions() {
-        let p = Property::<Vec<String>>::parse(&json!(["Open Sans Regular"]), "p").unwrap();
-        assert_eq!(p, Property::Constant(vec!["Open Sans Regular".to_string()]));
+        let p = Property::<Arc<[String]>>::parse(&json!(["Open Sans Regular"]), "p").unwrap();
+        assert_eq!(
+            p,
+            Property::Constant(Arc::from(["Open Sans Regular".to_string()]))
+        );
         let p = Property::<Vec<f64>>::parse(&json!([4, 2]), "p").unwrap();
         assert_eq!(p, Property::Constant(vec![4.0, 2.0]));
     }

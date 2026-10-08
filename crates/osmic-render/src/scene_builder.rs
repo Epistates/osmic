@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use geo_types::{Coord, LineString, Polygon};
 use osmic_core::{Color, Geometry};
 use osmic_style::{
-    EvalContext, Layer, LayerKind, PropertySource, Style, SymbolPlacement, SymbolStyle, Value,
+    EvalContext, Layer, LayerKind, PropertySource, Style, SymbolPlacement, SymbolStyle, ValueRef,
 };
 use osmic_text::{LabelAnchor, LabelCandidate, LabelStyle};
-use osmic_tiles::mvt_decode::DecodedFeature;
+use osmic_tiles::mvt_decode::{AttrRef, DecodedFeature};
 
 use crate::camera::PixelMapping;
 use crate::scene::{RenderFeature, RenderLayer, SceneGraph};
@@ -33,25 +33,21 @@ pub struct SceneOptions {
     pub clip: Option<[f32; 4]>,
 }
 
-/// Feature attributes as seen by style expressions: `class` and `name`
-/// first, then the remaining tags.
+/// Feature attributes as seen by style expressions, with their tile types:
+/// numbers are numbers and booleans booleans, so MapLibre filters such as
+/// `["==", ["get", "admin_level"], 2]` match. Lookups borrow; nothing is
+/// allocated.
 struct FeatureProps<'a>(&'a DecodedFeature);
 
 impl PropertySource for FeatureProps<'_> {
-    fn property(&self, key: &str) -> Option<Value> {
-        let f = self.0;
-        let found = match key {
-            "class" => f.class.as_deref(),
-            "name" => f.name.as_deref(),
-            _ => None,
-        }
-        .or_else(|| {
-            f.tags
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.as_str())
-        });
-        found.map(|v| Value::String(v.to_string()))
+    fn property(&self, key: &str) -> Option<ValueRef<'_>> {
+        self.0.attribute(key).map(|v| match v {
+            AttrRef::String(s) => ValueRef::String(s),
+            AttrRef::Number(n) => ValueRef::Number(n),
+            AttrRef::Bool(b) => ValueRef::Bool(b),
+            // A value type newer than this renderer: unreadable, so null.
+            _ => ValueRef::Null,
+        })
     }
 }
 
@@ -882,6 +878,47 @@ mod tests {
             inside
         };
         assert!(inside, "{pt:?}");
+    }
+
+    #[test]
+    fn numeric_and_boolean_filters_match_typed_attributes() {
+        use osmic_tiles::mvt_decode::AttrValue;
+        let style = Style::from_value(&serde_json::json!({
+            "version": 8,
+            "sources": {"s": {"type": "vector", "tiles": ["x/{z}/{x}/{y}"]}},
+            "layers": [
+                {"id": "legacy", "type": "line", "source": "s", "source-layer": "boundary",
+                 "filter": ["==", "admin_level", 2]},
+                {"id": "rank", "type": "line", "source": "s", "source-layer": "boundary",
+                 "filter": ["<=", ["get", "rank"], 3]},
+                {"id": "oneway", "type": "line", "source": "s", "source-layer": "boundary",
+                 "filter": ["==", ["get", "oneway"], true]},
+            ],
+        }))
+        .unwrap();
+        let (tile, opts) = tile_options(10.0);
+        let with = |tags: Vec<(&str, AttrValue)>| {
+            let mut f = feature("boundary", "x", None, road(tile));
+            f.tags = tags.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+            f
+        };
+        let features = [
+            with(vec![
+                ("admin_level", AttrValue::Int(2)),
+                ("rank", AttrValue::UInt(3)),
+                ("oneway", AttrValue::Bool(true)),
+            ]),
+            with(vec![
+                ("admin_level", AttrValue::Int(4)),
+                ("rank", AttrValue::Float(3.5)),
+                ("oneway", AttrValue::Bool(false)),
+            ]),
+            // Strings are not numbers: MapLibre does not coerce them.
+            with(vec![("admin_level", "2".into()), ("oneway", "true".into())]),
+        ];
+        let scene = build_scene(&style, &features, &opts);
+        let counts: Vec<usize> = scene.layers.iter().map(|l| l.features.len()).collect();
+        assert_eq!(counts, [1, 1, 1], "one typed feature matches each filter");
     }
 
     #[test]

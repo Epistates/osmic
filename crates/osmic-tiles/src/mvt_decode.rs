@@ -6,6 +6,8 @@
 //! polygons by winding order as MVT 2.1 requires (positive area = new
 //! exterior, negative = hole of the preceding exterior).
 
+use std::fmt;
+
 use geo_types::{Coord, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon};
 
 use osmic_core::mercator::{unit_x_to_lon, unit_y_to_lat};
@@ -22,26 +24,163 @@ fn invalid(what: &'static str, detail: impl Into<String>) -> DecodeError {
     }
 }
 
+/// A feature attribute value with the type it has in the tile.
+///
+/// Keeping the type lets style filters compare numbers with numbers and
+/// booleans with booleans, as MapLibre does. [`fmt::Display`] gives the
+/// value's text (`1.5`, `-3`, `true`).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum AttrValue {
+    /// `string_value`.
+    String(String),
+    /// `float_value`.
+    Float(f32),
+    /// `double_value`.
+    Double(f64),
+    /// `int_value` or `sint_value`.
+    Int(i64),
+    /// `uint_value`.
+    UInt(u64),
+    /// `bool_value`.
+    Bool(bool),
+}
+
+impl AttrValue {
+    /// The string, if this is a string value.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The value as a double, if it is numeric (64-bit integers beyond
+    /// 2^53 lose precision, as in JavaScript).
+    pub fn as_f64(&self) -> Option<f64> {
+        match *self {
+            Self::Float(v) => Some(f64::from(v)),
+            Self::Double(v) => Some(v),
+            Self::Int(v) => Some(v as f64),
+            Self::UInt(v) => Some(v as f64),
+            Self::String(_) | Self::Bool(_) => None,
+        }
+    }
+
+    /// The boolean, if this is a boolean value.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for AttrValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::String(s) => f.write_str(s),
+            Self::Float(v) => write!(f, "{v}"),
+            Self::Double(v) => write!(f, "{v}"),
+            Self::Int(v) => write!(f, "{v}"),
+            Self::UInt(v) => write!(f, "{v}"),
+            Self::Bool(v) => write!(f, "{v}"),
+        }
+    }
+}
+
+impl From<String> for AttrValue {
+    fn from(s: String) -> Self {
+        Self::String(s)
+    }
+}
+
+impl From<&str> for AttrValue {
+    fn from(s: &str) -> Self {
+        Self::String(s.to_string())
+    }
+}
+
+impl From<f64> for AttrValue {
+    fn from(v: f64) -> Self {
+        Self::Double(v)
+    }
+}
+
+impl From<i64> for AttrValue {
+    fn from(v: i64) -> Self {
+        Self::Int(v)
+    }
+}
+
+impl From<bool> for AttrValue {
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
+}
+
 /// A decoded feature in geographic coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFeature {
+    /// Name of the tile layer the feature belongs to.
     pub layer: String,
+    /// The feature id, if the tile has one.
     pub id: Option<u64>,
-    /// The `class` attribute, if present.
+    /// The `class` attribute, if present and a string.
     pub class: Option<String>,
-    /// The `name` attribute, if present.
+    /// The `name` attribute, if present and a string.
     pub name: Option<String>,
-    /// All other attributes.
-    pub tags: Vec<(String, String)>,
+    /// All other attributes, typed. (A non-string `class` or `name` is
+    /// kept here too.)
+    pub tags: Vec<(String, AttrValue)>,
     /// WGS84 geometry (polygon exteriors counter-clockwise).
     pub geometry: Geometry,
+}
+
+impl DecodedFeature {
+    /// The attribute `key` (including `class` and `name`), if present.
+    pub fn attribute(&self, key: &str) -> Option<AttrRef<'_>> {
+        let special = match key {
+            "class" => self.class.as_deref(),
+            "name" => self.name.as_deref(),
+            _ => None,
+        };
+        special.map(AttrRef::String).or_else(|| {
+            self.tags
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| AttrRef::from(v))
+        })
+    }
+}
+
+/// A borrowed attribute value, from [`DecodedFeature::attribute`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum AttrRef<'a> {
+    /// A string.
+    String(&'a str),
+    /// Any numeric value, as a double.
+    Number(f64),
+    /// A boolean.
+    Bool(bool),
+}
+
+impl<'a> From<&'a AttrValue> for AttrRef<'a> {
+    fn from(v: &'a AttrValue) -> Self {
+        match v {
+            AttrValue::String(s) => Self::String(s),
+            AttrValue::Bool(b) => Self::Bool(*b),
+            other => Self::Number(other.as_f64().unwrap_or(f64::NAN)),
+        }
+    }
 }
 
 struct RawLayer<'a> {
     name: String,
     extent: u32,
     keys: Vec<String>,
-    values: Vec<String>,
+    values: Vec<AttrValue>,
     features: Vec<&'a [u8]>,
 }
 
@@ -49,18 +188,18 @@ fn utf8(bytes: &[u8], what: &'static str) -> Result<String, DecodeError> {
     String::from_utf8(bytes.to_vec()).map_err(|e| invalid(what, e.to_string()))
 }
 
-fn decode_value(data: &[u8]) -> Result<String, DecodeError> {
+fn decode_value(data: &[u8]) -> Result<AttrValue, DecodeError> {
     let mut r = Reader::new(data);
     let mut out = None;
     while let Some((field, value)) = r.next_field()? {
         out = Some(match (field, value) {
-            (1, Field::Bytes(b)) => utf8(b, "string value")?,
-            (2, Field::Fixed32(bits)) => f32::from_bits(bits).to_string(),
-            (3, Field::Fixed64(bits)) => f64::from_bits(bits).to_string(),
-            (4, Field::Varint(v)) => (v as i64).to_string(),
-            (5, Field::Varint(v)) => v.to_string(),
-            (6, Field::Varint(v)) => ((v >> 1) as i64 ^ -((v & 1) as i64)).to_string(),
-            (7, Field::Varint(v)) => (v != 0).to_string(),
+            (1, Field::Bytes(b)) => AttrValue::String(utf8(b, "string value")?),
+            (2, Field::Fixed32(bits)) => AttrValue::Float(f32::from_bits(bits)),
+            (3, Field::Fixed64(bits)) => AttrValue::Double(f64::from_bits(bits)),
+            (4, Field::Varint(v)) => AttrValue::Int(v as i64),
+            (5, Field::Varint(v)) => AttrValue::UInt(v),
+            (6, Field::Varint(v)) => AttrValue::Int((v >> 1) as i64 ^ -((v & 1) as i64)),
+            (7, Field::Varint(v)) => AttrValue::Bool(v != 0),
             _ => continue,
         });
     }
@@ -149,7 +288,10 @@ fn decode_commands(geom_type: GeomType, data: &[u8]) -> Result<Vec<Vec<[i32; 2]>
     Ok(parts)
 }
 
-fn decode_feature(raw: &RawLayer<'_>, data: &[u8]) -> Result<Option<TileFeature>, DecodeError> {
+/// A feature's geometry (`attributes` left empty) and typed attributes.
+type RawFeature = (TileFeature, Vec<(String, AttrValue)>);
+
+fn decode_feature(raw: &RawLayer<'_>, data: &[u8]) -> Result<Option<RawFeature>, DecodeError> {
     let mut r = Reader::new(data);
     let (mut id, mut geom_type, mut geometry, mut tags) = (None, None, &[][..], &[][..]);
     while let Some((field, value)) = r.next_field()? {
@@ -180,15 +322,18 @@ fn decode_feature(raw: &RawLayer<'_>, data: &[u8]) -> Result<Option<TileFeature>
         }
     }
     let parts = decode_commands(geom_type, geometry)?;
-    Ok(Some(TileFeature {
+    let feature = TileFeature {
         id,
         geom_type,
         parts,
-        attributes,
-    }))
+        attributes: Vec::new(),
+    };
+    Ok(Some((feature, attributes)))
 }
 
-/// Decode an MVT tile into tile-local layers.
+/// Decode an MVT tile into tile-local layers. Attribute values become
+/// their text (see [`AttrValue`]'s `Display`); [`decode_tile`] keeps them
+/// typed.
 pub fn decode_layers(data: &[u8]) -> Result<Vec<TileLayer>, DecodeError> {
     raw_layers(data)?
         .into_iter()
@@ -197,6 +342,15 @@ pub fn decode_layers(data: &[u8]) -> Result<Vec<TileLayer>, DecodeError> {
                 .features
                 .iter()
                 .filter_map(|f| decode_feature(&raw, f).transpose())
+                .map(|f| {
+                    f.map(|(mut feature, attributes)| {
+                        feature.attributes = attributes
+                            .into_iter()
+                            .map(|(k, v)| (k, v.to_string()))
+                            .collect();
+                        feature
+                    })
+                })
                 .collect::<Result<_, _>>()?;
             Ok(TileLayer {
                 name: raw.name,
@@ -210,8 +364,11 @@ pub fn decode_layers(data: &[u8]) -> Result<Vec<TileLayer>, DecodeError> {
 /// A layer's attribute dictionaries, in encoded order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerTables {
+    /// The layer name.
     pub name: String,
+    /// The key table.
     pub keys: Vec<String>,
+    /// The value table, as text.
     pub values: Vec<String>,
 }
 
@@ -222,7 +379,7 @@ pub fn layer_tables(data: &[u8]) -> Result<Vec<LayerTables>, DecodeError> {
         .map(|l| LayerTables {
             name: l.name,
             keys: l.keys,
-            values: l.values,
+            values: l.values.iter().map(ToString::to_string).collect(),
         })
         .collect())
 }
@@ -305,23 +462,33 @@ pub fn to_geographic(feature: &TileFeature, extent: u32, tile: TileCoord) -> Opt
 /// Decode an MVT tile into WGS84 features.
 pub fn decode_tile(data: &[u8], tile: TileCoord) -> Result<Vec<DecodedFeature>, DecodeError> {
     let mut out = Vec::new();
-    for layer in decode_layers(data)? {
-        for f in layer.features {
-            let Some(geometry) = to_geographic(&f, layer.extent, tile) else {
+    for raw in raw_layers(data)? {
+        for data in &raw.features {
+            let Some((f, attributes)) = decode_feature(&raw, data)? else {
+                continue;
+            };
+            let Some(geometry) = to_geographic(&f, raw.extent, tile) else {
                 continue;
             };
             let mut class = None;
             let mut name = None;
-            let mut tags = Vec::new();
-            for (k, v) in f.attributes {
-                match k.as_str() {
-                    "class" => class = Some(v),
-                    "name" => name = Some(v),
-                    _ => tags.push((k, v)),
-                }
+            let mut tags = Vec::with_capacity(attributes.len());
+            for (k, v) in attributes {
+                let v = match (k.as_str(), v) {
+                    ("class", AttrValue::String(s)) => {
+                        class = Some(s);
+                        continue;
+                    }
+                    ("name", AttrValue::String(s)) => {
+                        name = Some(s);
+                        continue;
+                    }
+                    (_, v) => v,
+                };
+                tags.push((k, v));
             }
             out.push(DecodedFeature {
-                layer: layer.name.clone(),
+                layer: raw.name.clone(),
                 id: f.id,
                 class,
                 name,
@@ -418,8 +585,113 @@ mod tests {
     #[test]
     fn sint_values_are_zigzag_decoded() {
         // Value message with sint_value (field 6) = -3 → zigzag 5.
-        assert_eq!(decode_value(&[0x30, 5]), Ok("-3".to_string()));
-        assert_eq!(decode_value(&[0x38, 1]), Ok("true".to_string()));
+        assert_eq!(decode_value(&[0x30, 5]), Ok(AttrValue::Int(-3)));
+        assert_eq!(decode_value(&[0x38, 1]), Ok(AttrValue::Bool(true)));
+    }
+
+    /// One point feature whose attributes use every MVT value type.
+    fn typed_tile() -> Vec<u8> {
+        use crate::proto::{put_bytes_field, put_message, put_packed_varints, put_varint_field};
+        let values: Vec<Vec<u8>> = vec![
+            {
+                let mut v = Vec::new();
+                put_bytes_field(&mut v, 1, b"primary");
+                v
+            },
+            {
+                let mut v = Vec::new();
+                v.push((2 << 3) | 5); // float_value, fixed32
+                v.extend_from_slice(&1.5f32.to_bits().to_le_bytes());
+                v
+            },
+            {
+                let mut v = Vec::new();
+                crate::proto::put_fixed64_field(&mut v, 3, 2.25f64.to_bits());
+                v
+            },
+            {
+                let mut v = Vec::new();
+                put_varint_field(&mut v, 4, 2);
+                v
+            },
+            {
+                let mut v = Vec::new();
+                put_varint_field(&mut v, 5, 7);
+                v
+            },
+            {
+                let mut v = Vec::new();
+                put_varint_field(&mut v, 6, 5); // sint -3
+                v
+            },
+            {
+                let mut v = Vec::new();
+                put_varint_field(&mut v, 7, 1);
+                v
+            },
+            {
+                let mut v = Vec::new();
+                put_varint_field(&mut v, 4, 9); // a numeric `name`
+                v
+            },
+        ];
+        let keys = [
+            "class",
+            "width",
+            "area",
+            "admin_level",
+            "rank",
+            "offset",
+            "oneway",
+            "name",
+        ];
+        let mut tile = Vec::new();
+        put_message(&mut tile, 3, |layer| {
+            put_bytes_field(layer, 1, b"test");
+            put_message(layer, 2, |f| {
+                put_packed_varints(f, 2, (0..keys.len() as u64).flat_map(|i| [i, i]));
+                put_varint_field(f, 3, 1); // point
+                put_packed_varints(f, 4, [1 | (1 << 3), 2, 2]);
+            });
+            for k in keys {
+                put_bytes_field(layer, 3, k.as_bytes());
+            }
+            for v in &values {
+                put_bytes_field(layer, 4, v);
+            }
+            put_varint_field(layer, 5, 4096);
+        });
+        tile
+    }
+
+    #[test]
+    fn attribute_types_are_preserved() {
+        let decoded = decode_tile(&typed_tile(), TileCoord::new(0, 0, Zoom(0))).unwrap();
+        let f = &decoded[0];
+        assert_eq!(f.class.as_deref(), Some("primary"));
+        assert_eq!(f.name, None, "a numeric name stays a typed attribute");
+        let attr = |k: &str| f.attribute(k);
+        assert_eq!(attr("class"), Some(AttrRef::String("primary")));
+        assert_eq!(attr("width"), Some(AttrRef::Number(1.5)));
+        assert_eq!(attr("area"), Some(AttrRef::Number(2.25)));
+        assert_eq!(attr("admin_level"), Some(AttrRef::Number(2.0)));
+        assert_eq!(attr("rank"), Some(AttrRef::Number(7.0)));
+        assert_eq!(attr("offset"), Some(AttrRef::Number(-3.0)));
+        assert_eq!(attr("oneway"), Some(AttrRef::Bool(true)));
+        assert_eq!(attr("name"), Some(AttrRef::Number(9.0)));
+        assert_eq!(attr("missing"), None);
+        // The tile-local decoder and the tables still give text.
+        let layers = decode_layers(&typed_tile()).unwrap();
+        let text: Vec<&str> = layers[0].features[0]
+            .attributes
+            .iter()
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            text,
+            ["primary", "1.5", "2.25", "2", "7", "-3", "true", "9"]
+        );
+        assert_eq!(layer_tables(&typed_tile()).unwrap()[0].values[6], "true");
     }
 
     #[test]

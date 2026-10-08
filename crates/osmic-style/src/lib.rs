@@ -52,4 +52,4 @@ pub use property::{
     Alignment, LineCap, LineJoin, Property, PropertyValue, SymbolPlacement, TextAnchor,
     TextTransform,
 };
-pub use value::{EvalContext, PropertySource, Value};
+pub use value::{EvalContext, PropertySource, Value, ValueRef};

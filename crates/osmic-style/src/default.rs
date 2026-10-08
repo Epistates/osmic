@@ -258,7 +258,7 @@ impl<'a> Label<'a> {
                 .then_some(Property::Constant(self.placement)),
             sort_key: self.sort_key,
             text_field: Some(Property::Expr(Expr::get("name"))),
-            text_font: Some(Property::Constant(font.to_vec())),
+            text_font: Some(Property::Constant(font.into())),
             text_size: self.size,
             text_anchor: self
                 .below_point
