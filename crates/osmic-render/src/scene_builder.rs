@@ -213,7 +213,11 @@ fn build_layer(
                     continue;
                 }
                 let style = constant.unwrap_or_else(|| l.resolve(&ctx));
-                if style.radius <= 0.0 || (style.color.a <= 0.0 && style.stroke_width <= 0.0) {
+                // The stroke lies outside the radius, so a zero-radius
+                // circle with a stroke is still a (stroke-colored) dot.
+                let fill_visible = style.radius > 0.0 && style.color.a > 0.0;
+                let stroke_visible = style.stroke_width > 0.0 && style.stroke_color.a > 0.0;
+                if !(fill_visible || stroke_visible) {
                     continue;
                 }
                 let radius_next = match constant_next {

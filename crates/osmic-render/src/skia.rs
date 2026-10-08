@@ -411,18 +411,22 @@ fn draw_circle(
     (stroke_color, stroke_width): (&Color, f32),
     transform: Transform,
 ) -> RenderResult<()> {
-    let Some(path) = circle_path(center, radius) else {
-        return Ok(());
-    };
-    if color.a > 0.0 {
-        target.fill_path(&path, &paint(color)?, FillRule::Winding, transform, None);
+    if color.a > 0.0
+        && let Some(disc) = circle_path(center, radius)
+    {
+        target.fill_path(&disc, &paint(color)?, FillRule::Winding, transform, None);
     }
-    if stroke_width > 0.0 && stroke_color.a > 0.0 {
+    // MapLibre draws the stroke outside the radius, as a ring from `radius`
+    // to `radius + stroke_width`: the path is centred within the ring.
+    if stroke_width > 0.0
+        && stroke_color.a > 0.0
+        && let Some(ring) = circle_path(center, radius.max(0.0) + stroke_width / 2.0)
+    {
         let stroke = Stroke {
             width: stroke_width,
             ..Stroke::default()
         };
-        target.stroke_path(&path, &paint(stroke_color)?, &stroke, transform, None);
+        target.stroke_path(&ring, &paint(stroke_color)?, &stroke, transform, None);
     }
     Ok(())
 }
@@ -652,6 +656,40 @@ mod tests {
         assert_eq!(px(&b, 0, 0), [255, 255, 255, 255]);
         let edge = px(&b, 15, 10);
         assert!(edge[2] > edge[0], "outline is blue: {edge:?}");
+        // The stroke is the ring from 5 to 7 px: the pixel spanning about
+        // 5..6 px from the centre is fully stroke-colored, the one spanning
+        // 3..4 fully fill-colored.
+        assert_eq!(px(&b, 15, 9), [0, 0, 255, 255]);
+        assert_eq!(px(&b, 13, 10), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn circle_strokes_are_outside_and_independent_of_the_fill() {
+        let circle = |color: Color| RenderFeature::Circle {
+            center: [10.0, 10.0],
+            radius: 5.0,
+            radius_next_zoom: 5.0,
+            color,
+            stroke_color: Color::rgb(0.0, 0.0, 1.0),
+            stroke_width: 2.0,
+        };
+        // A hollow circle (transparent fill) still draws its ring.
+        let mut hollow = backend(20, 20, 1.0);
+        hollow
+            .render(&scene(vec![circle(Color::TRANSPARENT)]))
+            .unwrap();
+        assert_eq!(px(&hollow, 10, 10), [255, 255, 255, 255]);
+        assert_eq!(px(&hollow, 15, 9), [0, 0, 255, 255]);
+        // A translucent fill does not show the stroke through it.
+        let mut translucent = backend(20, 20, 1.0);
+        translucent
+            .render(&scene(vec![circle(Color::rgba(1.0, 0.0, 0.0, 0.5))]))
+            .unwrap();
+        let inside = px(&translucent, 12, 9);
+        assert!(
+            inside[0] == 255 && (126..=129).contains(&inside[2]),
+            "half red over white, no blue: {inside:?}"
+        );
     }
 
     #[test]

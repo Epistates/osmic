@@ -166,6 +166,7 @@ pub struct CircleLayer {
     pub opacity: Option<Property<f64>>,
     pub stroke_color: Option<Property<Color>>,
     pub stroke_width: Option<Property<f64>>,
+    pub stroke_opacity: Option<Property<f64>>,
 }
 
 /// `symbol` layer properties (text labels only; icons are unsupported).
@@ -289,12 +290,15 @@ impl LineLayer {
 }
 
 impl CircleLayer {
+    /// `circle-opacity` applies to the fill only and
+    /// `circle-stroke-opacity` to the stroke only, as in MapLibre.
     pub fn resolve(&self, ctx: &EvalContext<'_>) -> CircleStyle {
-        let op = opacity(&self.opacity, ctx);
         CircleStyle {
             radius: eval_or(&self.radius, ctx, 5.0).max(0.0) as f32,
-            color: eval_or(&self.color, ctx, Color::BLACK).with_opacity(op),
-            stroke_color: eval_or(&self.stroke_color, ctx, Color::BLACK).with_opacity(op),
+            color: eval_or(&self.color, ctx, Color::BLACK)
+                .with_opacity(opacity(&self.opacity, ctx)),
+            stroke_color: eval_or(&self.stroke_color, ctx, Color::BLACK)
+                .with_opacity(opacity(&self.stroke_opacity, ctx)),
             stroke_width: eval_or(&self.stroke_width, ctx, 0.0).max(0.0) as f32,
         }
     }
@@ -379,7 +383,7 @@ impl LayerKind {
                 any_property!(depends_on_feature; l.cap, l.join, l.color, l.width, l.opacity, l.dasharray)
             }
             Self::Circle(l) => {
-                any_property!(depends_on_feature; l.radius, l.color, l.opacity, l.stroke_color, l.stroke_width)
+                any_property!(depends_on_feature; l.radius, l.color, l.opacity, l.stroke_color, l.stroke_width, l.stroke_opacity)
             }
             Self::Symbol(l) => any_property!(
                 depends_on_feature; l.placement, l.sort_key, l.text_field, l.text_font, l.text_size,
@@ -841,6 +845,7 @@ fn write_props(kind: &LayerKind, layout: &mut JsonMap, paint: &mut JsonMap) {
             put(paint, "circle-opacity", &c.opacity);
             put(paint, "circle-stroke-color", &c.stroke_color);
             put(paint, "circle-stroke-width", &c.stroke_width);
+            put(paint, "circle-stroke-opacity", &c.stroke_opacity);
         }
         LayerKind::Symbol(s) => {
             put(layout, "symbol-placement", &s.placement);
@@ -984,6 +989,7 @@ fn parse_kind(
                     "circle-opacity" => l.opacity = prop(v, &pp(k))?,
                     "circle-stroke-color" => l.stroke_color = prop(v, &pp(k))?,
                     "circle-stroke-width" => l.stroke_width = prop(v, &pp(k))?,
+                    "circle-stroke-opacity" => l.stroke_opacity = prop(v, &pp(k))?,
                     _ => return Err(unsupported("paint", k)),
                 }
             }
@@ -1218,6 +1224,35 @@ mod tests {
                 .to_string()
                 .contains("source-layer")
         );
+    }
+
+    #[test]
+    fn circle_opacity_and_stroke_opacity_are_independent() {
+        let style = Style::from_value(&doc(json!([layer(json!({
+            "type": "circle",
+            "paint": {
+                "circle-color": "#ff0000",
+                "circle-opacity": 0,
+                "circle-stroke-color": "#0000ff",
+                "circle-stroke-width": 2,
+                "circle-stroke-opacity": 0.5,
+            }
+        }))])))
+        .unwrap();
+        let LayerKind::Circle(c) = &style.layers[0].kind else {
+            panic!()
+        };
+        let s = c.resolve(&EvalContext::at_zoom(10.0));
+        assert_eq!(s.color.a, 0.0, "hollow");
+        assert_eq!(
+            s.stroke_color.a, 0.5,
+            "circle-opacity does not dim the stroke"
+        );
+        // Unset, the stroke is opaque whatever circle-opacity says.
+        let mut c = c.clone();
+        c.stroke_opacity = None;
+        assert_eq!(c.resolve(&EvalContext::at_zoom(10.0)).stroke_color.a, 1.0);
+        assert_eq!(Style::from_json(&style.to_json()).unwrap(), style);
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //!   labels; no icons). `minzoom`, `maxzoom`, `filter`, `layout.visibility`.
 //! * **Properties**: `background-color/opacity`, `fill-color/opacity`,
 //!   `line-cap/join/color/width/opacity/dasharray`,
-//!   `circle-radius/color/opacity/stroke-color/stroke-width`,
+//!   `circle-radius/color/opacity/stroke-color/stroke-width/stroke-opacity`,
 //!   `symbol-placement` (`point`, `line`, `line-center`), `symbol-sort-key`,
 //!   `text-field/font/size/transform/anchor/offset/padding/allow-overlap/
 //!   max-angle/rotation-alignment`, `text-color/halo-color/halo-width/opacity`.

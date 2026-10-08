@@ -128,20 +128,19 @@ pub fn tessellate_scene(scene: &SceneGraph, options: &TessellationOptions) -> Me
                     stroke_color,
                     stroke_width,
                 } => {
-                    if *stroke_width > 0.0 && stroke_color.a > 0.0 {
-                        disc(
-                            &mut buffers,
-                            *center,
-                            [*radius + stroke_width, *radius_next_zoom + stroke_width],
-                            rgba(*stroke_color),
-                        );
-                    }
+                    let radii = [radius.max(0.0), radius_next_zoom.max(0.0)];
                     if color.a > 0.0 {
-                        disc(
+                        disc(&mut buffers, *center, radii, rgba(*color));
+                    }
+                    // The stroke is a ring outside the fill, as in MapLibre:
+                    // a translucent fill never shows it through.
+                    if *stroke_width > 0.0 && stroke_color.a > 0.0 {
+                        ring(
                             &mut buffers,
                             *center,
-                            [*radius, *radius_next_zoom],
-                            rgba(*color),
+                            radii,
+                            [radii[0] + stroke_width, radii[1] + stroke_width],
+                            rgba(*stroke_color),
                         );
                     }
                     true
@@ -269,6 +268,41 @@ fn tessellate_stroke(
     .is_ok()
 }
 
+/// Segments of a circle of `radius` screen pixels.
+fn circle_segments(radius: f32) -> u32 {
+    ((radius * 2.0).ceil() as u32).clamp(10, 40)
+}
+
+/// A ring (annulus) between radii `inner` and `outer` (screen px, at this
+/// zoom and the next) around `center`.
+fn ring(
+    out: &mut VertexBuffers<MeshVertex, u32>,
+    center: [f32; 2],
+    inner: [f32; 2],
+    outer: [f32; 2],
+    color: [u8; 4],
+) {
+    let segments = circle_segments(outer[0].max(outer[1]));
+    let base = out.vertices.len() as u32;
+    for i in 0..segments {
+        let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+        let extrude = [theta.cos(), theta.sin()];
+        for half_width in [inner, outer] {
+            out.vertices.push(MeshVertex {
+                position: center,
+                extrude,
+                half_width,
+                color,
+            });
+        }
+    }
+    for i in 0..segments {
+        let (a, b) = (base + 2 * i, base + 2 * ((i + 1) % segments));
+        // a/b: inner vertices; a+1/b+1: outer.
+        out.indices.extend([a, a + 1, b + 1, a, b + 1, b]);
+    }
+}
+
 /// A triangle-fan disc of radius `half_width` (screen px) around `center`.
 fn disc(
     out: &mut VertexBuffers<MeshVertex, u32>,
@@ -276,8 +310,7 @@ fn disc(
     half_width: [f32; 2],
     color: [u8; 4],
 ) {
-    let radius = half_width[0].max(half_width[1]);
-    let segments = ((radius * 2.0).ceil() as u32).clamp(10, 40);
+    let segments = circle_segments(half_width[0].max(half_width[1]));
     let base = out.vertices.len() as u32;
     out.vertices.push(MeshVertex {
         position: center,
@@ -590,7 +623,6 @@ mod tests {
             &scene_of(vec![circle(1.0)]),
             &TessellationOptions::default(),
         );
-        assert_eq!(outlined.vertices.len(), plain.vertices.len() * 2);
         assert!(plain.vertices.iter().all(|v| v.position == [5.0, 5.0]));
         let rim = plain
             .vertices
@@ -598,8 +630,43 @@ mod tests {
             .find(|v| v.extrude != [0.0, 0.0])
             .unwrap();
         assert_eq!(rim.half_width, [3.0, 4.0]);
-        // The outline is drawn first and is larger.
-        assert_eq!(outlined.vertices[1].half_width, [4.0, 5.0]);
+        // The outline is a ring outside the fill, drawn after it: no
+        // outline triangle reaches inside the fill radius, so a
+        // translucent fill never shows the stroke through it.
+        let outline = &outlined.vertices[plain.vertices.len()..];
+        assert_eq!(outline.len(), 2 * (plain.vertices.len() - 1));
+        assert!(outline.iter().all(|v| v.extrude != [0.0, 0.0]));
+        assert!(
+            outline
+                .iter()
+                .all(|v| v.half_width == [3.0, 4.0] || v.half_width == [4.0, 5.0])
+        );
+        let ring_area = |m: &Mesh, start: usize, t: usize| -> f32 {
+            (start / 3..m.indices.len() / 3)
+                .map(|i| {
+                    let p = |k: usize| {
+                        let v = m.vertices[m.indices[i * 3 + k] as usize];
+                        [
+                            v.position[0] + v.extrude[0] * v.half_width[t],
+                            v.position[1] + v.extrude[1] * v.half_width[t],
+                        ]
+                    };
+                    let (a, b, c) = (p(0), p(1), p(2));
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0
+                })
+                .sum()
+        };
+        let pi = std::f32::consts::PI;
+        let fill_indices = plain.indices.len();
+        for (t, (r, sw)) in [(3.0f32, 1.0f32), (4.0, 1.0)].into_iter().enumerate() {
+            // The 10-gon approximates the annulus area to a few percent.
+            let expected = pi * ((r + sw).powi(2) - r.powi(2));
+            let got = ring_area(&outlined, fill_indices, t);
+            assert!(
+                (got - expected).abs() < expected * 0.1,
+                "{got} vs {expected}"
+            );
+        }
     }
 
     #[test]
