@@ -9,6 +9,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
+// The pipelines allocate heavily from every core; mimalloc's per-thread
+// heaps avoid the contention of the platform allocators.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(name = "osmic", version, about, long_about = None, propagate_version = true)]
 struct Cli {

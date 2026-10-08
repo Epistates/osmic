@@ -6,14 +6,16 @@
 //! the pieces go to an [`ExternalSorter`] keyed by Hilbert tile id. Memory is
 //! bounded by the sort budget, not by the number of features.
 //!
-//! [`TileGenerator::finish`] then merges the sorted pieces tile by tile;
-//! a reader thread groups records while a rayon pool encodes and compresses
-//! batches of tiles, which are delivered in tile-id order — so archives are
-//! clustered and byte-for-byte reproducible.
+//! [`TileGenerator::finish`] then reads the sorted pieces back in
+//! key-range partitions: the rayon pool groups, encodes and compresses the
+//! tiles of several partitions at once while the calling thread delivers
+//! them in tile-id order — so archives are clustered and byte-for-byte
+//! reproducible.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -30,7 +32,7 @@ use crate::pmtiles::{
     ArchiveInfo, ArchiveOptions, LayerStats, PmTilesArchive, metadata_json, tile_coord, tile_id,
 };
 use crate::render::{RenderConfig, Renderer};
-use crate::sorter::{ExternalSorter, Record};
+use crate::sorter::{ExternalSorter, SortedRuns};
 
 /// Tile generation settings.
 #[derive(Debug, Clone)]
@@ -162,6 +164,16 @@ pub struct TileSummary {
 }
 
 impl TileSummary {
+    fn record(&mut self, t: &AssembledTile) {
+        self.tiles += 1;
+        self.features += t.features as u64;
+        self.dropped_features += t.dropped as u64;
+        self.budget_limited_tiles += u64::from(t.dropped > 0);
+        self.largest_tile_bytes = self.largest_tile_bytes.max(t.data.len());
+        self.total_bytes += t.data.len() as u64;
+        *self.tiles_per_zoom.entry(t.coord.z.0).or_default() += 1;
+    }
+
     /// Lowest and highest zoom with at least one tile.
     pub fn zoom_range(&self) -> Option<(u8, u8)> {
         Some((
@@ -169,6 +181,41 @@ impl TileSummary {
             *self.tiles_per_zoom.keys().last()?,
         ))
     }
+}
+
+/// What every partition worker needs to turn records into tiles.
+struct EncodeContext<'a> {
+    extent: u32,
+    encoder: &'a dyn TileEncoder,
+    compression: TileCompression,
+    max_bytes: usize,
+}
+
+/// Assemble every tile of partition `i`, in order, skipping empty tiles.
+fn encode_partition(
+    runs: &SortedRuns,
+    i: usize,
+    ctx: &EncodeContext<'_>,
+) -> Result<Vec<AssembledTile>, TileError> {
+    let part = runs.partition(i)?;
+    let mut tiles = Vec::new();
+    for (key, records) in part.groups() {
+        let features = records
+            .map(|(secondary, payload)| Ok((secondary, TileFeature::decode(payload)?)))
+            .collect::<Result<Vec<_>, TileError>>()?;
+        let tile = assemble(
+            tile_coord(key)?,
+            features,
+            ctx.extent,
+            ctx.encoder,
+            ctx.compression,
+            ctx.max_bytes,
+        )?;
+        if !tile.data.is_empty() {
+            tiles.push(tile);
+        }
+    }
+    Ok(tiles)
 }
 
 /// Streams features into tiles. See the module docs.
@@ -282,76 +329,53 @@ impl TileGenerator {
             secs = render_seconds,
             "Rendering complete; merging tiles"
         );
-        let records = self.sorter.finish()?;
-        let extent = self.config.render.extent;
-        let encoder = self.encoder.as_ref();
-        let compression = self.config.compression;
-        let max_bytes = self.config.max_tile_bytes;
+        let runs = self.sorter.finish()?;
+        let (parts, window) = (runs.partition_count(), runs.window());
+        let ctx = EncodeContext {
+            extent: self.config.render.extent,
+            encoder: self.encoder.as_ref(),
+            compression: self.config.compression,
+            max_bytes: self.config.max_tile_bytes,
+        };
+        let max_bytes = ctx.max_bytes;
 
-        type Batch = Vec<(u64, Vec<Record>)>;
-        std::thread::scope(|scope| -> Result<(), TileError> {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Batch, TileError>>(2);
-            scope.spawn(move || {
-                const BATCH_TILES: usize = 1024;
-                const BATCH_BYTES: usize = 64 << 20;
-                let mut batch: Batch = Vec::new();
-                let mut bytes = 0usize;
-                let mut current: Option<(u64, Vec<Record>)> = None;
-                for rec in records {
-                    let rec = match rec {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let _ = tx.send(Err(e.into()));
-                            return;
-                        }
-                    };
-                    bytes += rec.payload.len();
-                    match &mut current {
-                        Some((key, recs)) if *key == rec.key => recs.push(rec),
-                        _ => {
-                            if let Some(done) = current.take() {
-                                batch.push(done);
-                                if batch.len() >= BATCH_TILES || bytes >= BATCH_BYTES {
-                                    if tx.send(Ok(std::mem::take(&mut batch))).is_err() {
-                                        return; // consumer stopped (error)
-                                    }
-                                    bytes = 0;
-                                }
+        // Partitions are encoded on the rayon pool, at most `window` at a
+        // time, and written here strictly in order.
+        let abort = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel::<(usize, Result<Vec<AssembledTile>, TileError>)>();
+        rayon::in_place_scope(|scope| -> Result<(), TileError> {
+            let mut pending = BTreeMap::new();
+            let (mut spawned, mut written) = (0usize, 0usize);
+            let result = (|| {
+                while written < parts {
+                    while spawned < parts && spawned - written < window {
+                        let (tx, runs, ctx, abort) = (tx.clone(), &runs, &ctx, &abort);
+                        let i = spawned;
+                        scope.spawn(move |_| {
+                            if !abort.load(Ordering::Relaxed) {
+                                let _ = tx.send((i, encode_partition(runs, i, ctx)));
                             }
-                            current = Some((rec.key, vec![rec]));
+                        });
+                        spawned += 1;
+                    }
+                    let (i, tiles) = rx
+                        .recv()
+                        .map_err(|_| TileError::Config("tile encoder stopped".into()))?;
+                    pending.insert(i, tiles);
+                    while let Some(tiles) = pending.remove(&written) {
+                        for t in &tiles? {
+                            summary.record(t);
+                            write(t)?;
                         }
+                        written += 1;
                     }
                 }
-                batch.extend(current);
-                if !batch.is_empty() {
-                    let _ = tx.send(Ok(batch));
-                }
-            });
-
-            for batch in rx {
-                let tiles: Vec<AssembledTile> = batch?
-                    .into_par_iter()
-                    .map(|(key, recs)| {
-                        let coord = tile_coord(key)?;
-                        let features = recs
-                            .into_iter()
-                            .map(|r| Ok((r.secondary, TileFeature::decode(&r.payload)?)))
-                            .collect::<Result<Vec<_>, TileError>>()?;
-                        assemble(coord, features, extent, encoder, compression, max_bytes)
-                    })
-                    .collect::<Result<_, _>>()?;
-                for t in tiles.iter().filter(|t| !t.data.is_empty()) {
-                    summary.tiles += 1;
-                    summary.features += t.features as u64;
-                    summary.dropped_features += t.dropped as u64;
-                    summary.budget_limited_tiles += u64::from(t.dropped > 0);
-                    summary.largest_tile_bytes = summary.largest_tile_bytes.max(t.data.len());
-                    summary.total_bytes += t.data.len() as u64;
-                    *summary.tiles_per_zoom.entry(t.coord.z.0).or_default() += 1;
-                    write(t)?;
-                }
+                Ok(())
+            })();
+            if result.is_err() {
+                abort.store(true, Ordering::Relaxed);
             }
-            Ok(())
+            result
         })?;
         summary.encode_seconds = encode_start.elapsed().as_secs_f64();
         if summary.budget_limited_tiles > 0 {

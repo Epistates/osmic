@@ -31,6 +31,7 @@ osmic-tiles = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 ctrlc = { workspace = true }
+mimalloc = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true }

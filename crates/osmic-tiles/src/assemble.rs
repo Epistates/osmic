@@ -83,34 +83,41 @@ pub fn assemble(
     max_bytes: usize,
 ) -> Result<AssembledTile, TileError> {
     let total = features.len();
-    // Global priority order (indices into `features`).
+    // Rank of each feature in global priority order (lower = kept longer).
     let mut order: Vec<usize> = (0..total).collect();
     order.sort_by_key(|&i| (priority(features[i].0), i));
+    let mut rank = vec![0usize; total];
+    for (r, &i) in order.iter().enumerate() {
+        rank[i] = r;
+    }
+
+    // Features arrive sorted by secondary key, so each layer is one run.
+    // `ranks[l]` parallels `layers[l].features`.
+    let mut layers: Vec<TileLayer> = Vec::new();
+    let mut ranks: Vec<Vec<usize>> = Vec::new();
+    for (i, (secondary, f)) in features.into_iter().enumerate() {
+        let name = layer_of(secondary).map_or("unknown", Layer::as_str);
+        if layers.last().is_none_or(|l| l.name != name) {
+            layers.push(TileLayer {
+                name: name.to_string(),
+                extent,
+                features: Vec::new(),
+            });
+            ranks.push(Vec::new());
+        }
+        if let (Some(l), Some(r)) = (layers.last_mut(), ranks.last_mut()) {
+            l.features.push(f);
+            r.push(rank[i]);
+        }
+    }
+    for (l, r) in layers.iter_mut().zip(&mut ranks) {
+        // Least important first, so the most important draw on top.
+        l.features.reverse();
+        r.reverse();
+    }
 
     let mut keep = total;
     loop {
-        let mut kept = vec![false; total];
-        for &i in &order[..keep] {
-            kept[i] = true;
-        }
-        let mut layers: Vec<TileLayer> = Vec::new();
-        for (i, (secondary, f)) in features.iter().enumerate() {
-            if !kept[i] {
-                continue;
-            }
-            let name = layer_of(*secondary).map_or("unknown", Layer::as_str);
-            match layers.last_mut() {
-                Some(l) if l.name == name => l.features.push(f.clone()),
-                _ => layers.push(TileLayer {
-                    name: name.to_string(),
-                    extent,
-                    features: vec![f.clone()],
-                }),
-            }
-        }
-        for l in &mut layers {
-            l.features.reverse(); // least important first → drawn below
-        }
         let raw = encoder.encode(&layers)?;
         let data = if raw.is_empty() {
             Vec::new()
@@ -126,10 +133,24 @@ pub fn assemble(
                 raw_bytes: raw.len(),
             });
         }
-        // Scale down proportionally (with headroom) and retry.
+        // Scale down proportionally (with headroom) and retry with only the
+        // `keep` highest-priority features.
         let ratio = max_bytes as f64 / data.len() as f64;
         let next = ((keep as f64) * ratio * 0.9) as usize;
         keep = next.min(keep - 1);
+        for (l, r) in layers.iter_mut().zip(&mut ranks) {
+            let features = std::mem::take(&mut l.features);
+            let (kept, kept_ranks): (Vec<TileFeature>, Vec<usize>) = features
+                .into_iter()
+                .zip(r.iter().copied())
+                .filter(|&(_, rank)| rank < keep)
+                .unzip();
+            l.features = kept;
+            *r = kept_ranks;
+        }
+        let mut nonempty = layers.iter().map(|l| !l.features.is_empty());
+        ranks.retain(|_| nonempty.next().unwrap_or(false));
+        layers.retain(|l| !l.features.is_empty());
     }
 }
 

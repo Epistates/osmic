@@ -94,6 +94,7 @@ anyhow = "1"
 ctrlc = { version = "3.5", features = ["termination"] }
 unicode-normalization = "0.1"
 clap = { version = "4", features = ["derive"] }
+mimalloc = "0.1.52"
 
 [profile.release]
 lto = "thin"
