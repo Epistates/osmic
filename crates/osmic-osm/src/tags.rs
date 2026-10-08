@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
-use lasso::{Spur, ThreadedRodeo};
+use lasso::{Key, Spur, ThreadedRodeo};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
+use smol_str::SmolStr;
 
 /// Interned tag key (compact integer ID).
 pub type TagKey = Spur;
-/// Interned tag value (compact integer ID).
-pub type TagValue = Spur;
+/// Tag value, owned by its feature: stored inline up to 23 bytes, shared
+/// (cheap to clone) beyond.
+pub type TagValue = SmolStr;
 
 /// Well-known OSM tag keys that appear millions of times.
 /// Pre-interned for zero-cost matching in hot paths.
@@ -175,37 +178,65 @@ impl WellKnownKey {
     }
 }
 
-/// Shared string interner for tag keys and values.
+/// Interner for tag keys, shared by the threads of a pipeline.
 ///
-/// Thread-safe: multiple threads can intern simultaneously during parallel PBF parsing.
+/// Keys repeat across millions of elements, so each is stored once and
+/// features carry a 4-byte [`TagKey`]. The well-known and curated keys are
+/// interned up front and found and resolved without locking; other keys
+/// (with [`TagRetention::All`]) go through a concurrent interner. Values
+/// are mostly unique (names, addresses) and are owned by each feature's
+/// [`Tags`] instead, so they are freed with the feature.
 pub struct TagStore {
-    rodeo: ThreadedRodeo,
+    rodeo: ThreadedRodeo<Spur, FxBuildHasher>,
+    /// Keys interned at construction, by string.
+    preset: FxHashMap<&'static str, TagKey>,
+    /// Keys interned at construction, by key index.
+    preset_names: Vec<&'static str>,
     well_known: Vec<TagKey>,
 }
 
 impl TagStore {
     pub fn new() -> Self {
-        let rodeo = ThreadedRodeo::default();
-        let well_known: Vec<TagKey> = WellKnownKey::ALL
+        let rodeo: ThreadedRodeo<TagKey, FxBuildHasher> = ThreadedRodeo::with_hasher(FxBuildHasher);
+        let mut preset = FxHashMap::default();
+        let mut preset_names = Vec::new();
+        let names = WellKnownKey::ALL
             .iter()
-            .map(|wk| rodeo.get_or_intern(wk.as_str()))
+            .map(|wk| wk.as_str())
+            .chain(CURATED_KEYS.iter().copied());
+        for name in names {
+            let key = rodeo.get_or_intern_static(name);
+            if preset.insert(name, key).is_none() {
+                debug_assert_eq!(key.into_usize(), preset_names.len());
+                preset_names.push(name);
+            }
+        }
+        let well_known = WellKnownKey::ALL
+            .iter()
+            .map(|wk| preset[wk.as_str()])
             .collect();
-        Self { rodeo, well_known }
+        Self {
+            rodeo,
+            preset,
+            preset_names,
+            well_known,
+        }
     }
 
     /// Intern a tag key string, returning its compact ID.
     pub fn intern_key(&self, key: &str) -> TagKey {
-        self.rodeo.get_or_intern(key)
+        match self.preset.get(key) {
+            Some(&k) => k,
+            None => self.rodeo.get_or_intern(key),
+        }
     }
 
-    /// Intern a tag value string, returning its compact ID.
-    pub fn intern_value(&self, value: &str) -> TagValue {
-        self.rodeo.get_or_intern(value)
-    }
-
-    /// Resolve an interned key/value back to its string.
-    pub fn resolve(&self, key: Spur) -> &str {
-        self.rodeo.resolve(&key)
+    /// The string of an interned key.
+    pub fn resolve(&self, key: TagKey) -> &str {
+        match self.preset_names.get(key.into_usize()) {
+            Some(name) => name,
+            None => self.rodeo.resolve(&key),
+        }
     }
 
     /// Get the pre-interned key for a well-known OSM tag.
@@ -213,12 +244,12 @@ impl TagStore {
         self.well_known[wk as usize]
     }
 
-    /// Try to look up a string without interning it.
-    pub fn get(&self, key: &str) -> Option<Spur> {
-        self.rodeo.get(key)
+    /// Look up a key without interning it.
+    pub fn get(&self, key: &str) -> Option<TagKey> {
+        self.preset.get(key).copied().or_else(|| self.rodeo.get(key))
     }
 
-    /// Number of unique strings interned.
+    /// Number of distinct keys interned.
     pub fn len(&self) -> usize {
         self.rodeo.len()
     }
@@ -256,13 +287,16 @@ impl Tags {
         }
     }
 
-    pub fn push(&mut self, key: TagKey, value: TagValue) {
-        self.inner.push((key, value));
+    pub fn push(&mut self, key: TagKey, value: impl Into<TagValue>) {
+        self.inner.push((key, value.into()));
     }
 
     /// Look up a tag value by key. Linear scan (fast for small N).
-    pub fn get(&self, key: TagKey) -> Option<TagValue> {
-        self.inner.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+    pub fn get(&self, key: TagKey) -> Option<&str> {
+        self.inner
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn contains(&self, key: TagKey) -> bool {
@@ -335,8 +369,8 @@ pub const CURATED_KEYS: &[&str] = &[
 
 /// Which tags a pipeline keeps on the features it produces.
 ///
-/// Interned strings live for the whole run, so keeping only what the output
-/// needs bounds memory on large inputs.
+/// Keeping only what the output needs bounds per-feature memory and the
+/// number of distinct keys interned.
 #[derive(Debug, Clone, Default)]
 pub enum TagRetention {
     /// Keep every tag.
@@ -360,7 +394,7 @@ impl TagRetention {
 }
 
 impl TagStore {
-    /// Intern the retained subset of `tags`.
+    /// Keep the retained subset of `tags`, interning their keys.
     pub fn intern_tags<'a>(
         &self,
         tags: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -369,16 +403,15 @@ impl TagStore {
         let mut out = Tags::new();
         for (k, v) in tags {
             if retention.keeps(k) {
-                out.push(self.intern_key(k), self.intern_value(v));
+                out.push(self.intern_key(k), v);
             }
         }
         out
     }
 
-    /// Resolve every tag of `tags` to string slices.
-    pub fn resolve_tags<'s>(&'s self, tags: &Tags) -> impl Iterator<Item = (&'s str, &'s str)> {
-        tags.iter()
-            .map(|(k, v)| (self.resolve(*k), self.resolve(*v)))
+    /// Every tag of `tags` as string slices.
+    pub fn resolve_tags<'a>(&'a self, tags: &'a Tags) -> impl Iterator<Item = (&'a str, &'a str)> {
+        tags.iter().map(|(k, v)| (self.resolve(*k), v.as_str()))
     }
 }
 
@@ -424,10 +457,15 @@ mod tests {
     }
 
     #[test]
-    fn intern_value_resolve_roundtrip() {
+    fn curated_keys_resolve_without_the_interner() {
         let store = TagStore::new();
-        let val = store.intern_value("some_value");
-        assert_eq!(store.resolve(val), "some_value");
+        let before = store.len();
+        for key in CURATED_KEYS {
+            let k = store.intern_key(key);
+            assert_eq!(store.resolve(k), *key);
+            assert_eq!(store.get(key), Some(k));
+        }
+        assert_eq!(store.len(), before, "no new keys interned");
     }
 
     #[test]
@@ -457,7 +495,6 @@ mod tests {
     fn tags_get_and_contains() {
         let store = TagStore::new();
         let highway_key = store.well_known(WellKnownKey::Highway);
-        let motorway_val = store.intern_value("motorway");
 
         let mut tags = Tags::new();
         assert_eq!(tags.len(), 0);
@@ -465,11 +502,11 @@ mod tests {
         assert!(!tags.contains(highway_key));
         assert!(tags.get(highway_key).is_none());
 
-        tags.push(highway_key, motorway_val);
+        tags.push(highway_key, "motorway");
         assert_eq!(tags.len(), 1);
         assert!(!tags.is_empty());
         assert!(tags.contains(highway_key));
-        assert_eq!(tags.get(highway_key), Some(motorway_val));
+        assert_eq!(tags.get(highway_key), Some("motorway"));
     }
 
     #[test]
@@ -477,10 +514,9 @@ mod tests {
         let store = TagStore::new();
         let building_key = store.well_known(WellKnownKey::Building);
         let name_key = store.well_known(WellKnownKey::Name);
-        let yes_val = store.intern_value("yes");
 
         let mut tags = Tags::new();
-        tags.push(building_key, yes_val);
+        tags.push(building_key, "yes");
 
         // name was never pushed.
         assert!(tags.get(name_key).is_none());
@@ -522,10 +558,8 @@ mod tests {
             .take(8)
             .map(|wk| store.well_known(*wk))
             .collect();
-        let val = store.intern_value("test");
-
         for &k in &keys {
-            tags.push(k, val);
+            tags.push(k, "test");
         }
 
         assert_eq!(tags.len(), 8);
@@ -533,7 +567,7 @@ mod tests {
         // Every pushed key must be retrievable.
         for &k in &keys {
             assert!(tags.contains(k));
-            assert_eq!(tags.get(k), Some(val));
+            assert_eq!(tags.get(k), Some("test"));
         }
     }
 }

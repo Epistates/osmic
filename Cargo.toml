@@ -86,6 +86,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smallvec = { version = "1.16", features = ["serde"] }
+smol_str = "0.3.6"
 rustc-hash = "2"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 tempfile = "3"
