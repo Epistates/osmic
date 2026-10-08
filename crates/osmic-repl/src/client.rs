@@ -17,6 +17,7 @@ use crate::state::{ReplicationState, sequence_path};
 
 /// Client settings.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ClientOptions {
     pub allow_http: bool,
     pub connect_timeout: Duration,
@@ -39,6 +40,36 @@ impl Default for ClientOptions {
             attempts: 4,
             retry_delay: Duration::from_secs(2),
         }
+    }
+}
+
+impl ClientOptions {
+    /// Allow plain-HTTP servers (not recommended).
+    #[must_use]
+    pub fn allow_http(mut self, allow: bool) -> Self {
+        self.allow_http = allow;
+        self
+    }
+
+    /// Overall time limit for one request.
+    #[must_use]
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Largest (compressed) diff accepted.
+    #[must_use]
+    pub fn max_diff_bytes(mut self, bytes: u64) -> Self {
+        self.max_diff_bytes = bytes;
+        self
+    }
+
+    /// Attempts per request for transient failures.
+    #[must_use]
+    pub fn attempts(mut self, attempts: u32) -> Self {
+        self.attempts = attempts;
+        self
     }
 }
 
@@ -88,7 +119,10 @@ impl ReplicationClient {
         let attempts = self.options.attempts.max(1);
         for attempt in 1..=attempts {
             debug!(url, attempt, "GET");
-            let outcome: Result<(), String> = match self.agent.get(url).call() {
+            // Diffs are already gzip files; ask servers not to wrap them in a
+            // transfer encoding as well (both forms are accepted anyway).
+            let request = self.agent.get(url).header("Accept-Encoding", "identity");
+            let outcome: Result<(), String> = match request.call() {
                 Ok(mut resp) => {
                     let status = resp.status().as_u16();
                     match status {

@@ -64,8 +64,12 @@ impl ReplicationState {
                             ReplError::State(format!("invalid sequenceNumber {v:?}"))
                         })?);
                 }
-                // Properties files escape ':' as '\:'.
-                "timestamp" => timestamp = Some(v.trim().replace("\\:", ":")),
+                // Properties files escape ':' as '\:'. A timestamp that is
+                // not a valid instant is dropped rather than trusted.
+                "timestamp" => {
+                    let t = v.trim().replace("\\:", ":");
+                    timestamp = parse_iso8601(&t).is_some().then_some(t);
+                }
                 _ => {}
             }
         }
@@ -101,7 +105,15 @@ pub fn parse_iso8601(s: &str) -> Option<i64> {
     let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days_in_month = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1..=12 => 31,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
         return None;
     }
     // Days from civil (Howard Hinnant's algorithm).
@@ -167,6 +179,11 @@ mod tests {
         );
         assert!(ReplicationState::parse_state_txt("timestamp=x", "u").is_err());
         assert!(ReplicationState::parse_state_txt("sequenceNumber=-1", "u").is_err());
+        // Garbage timestamps (including control characters) are dropped.
+        let s =
+            ReplicationState::parse_state_txt("sequenceNumber=5\ntimestamp=\u{1b}[31mnow\n", "u")
+                .expect("valid");
+        assert_eq!(s.timestamp, None);
     }
 
     #[test]
@@ -181,6 +198,10 @@ mod tests {
         }
         assert_eq!(parse_iso8601("2026-10-08T12:00:00Z"), Some(1_791_460_800));
         assert_eq!(parse_iso8601("2026-13-08T12:00:00Z"), None);
+        assert_eq!(parse_iso8601("2026-02-31T12:00:00Z"), None);
+        assert_eq!(parse_iso8601("2026-02-29T12:00:00Z"), None);
+        assert!(parse_iso8601("2028-02-29T12:00:00Z").is_some());
+        assert_eq!(parse_iso8601("2026-04-31T00:00:00Z"), None);
         assert_eq!(parse_iso8601("garbage"), None);
     }
 }

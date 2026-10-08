@@ -2742,6 +2742,7 @@ dependencies = [
  "osmic-osm",
  "osmpbf",
  "quick-xml 0.42.0",
+ "rayon",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use clap::Args;
 
-use osmic_repl::{ClientOptions, OscLimits, UpdateOptions, update_pbf};
+use osmic_repl::{ClientOptions, UpdateOptions, update_pbf};
 
 use super::{check_output, fmt_count};
 
@@ -27,7 +27,8 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub server: Option<String>,
 
-    /// Starting sequence number when the PBF header has none
+    /// Sequence the data is current to; overrides the PBF header's
+    /// (required when --server is a different stream than the header's)
     #[arg(long)]
     pub sequence: Option<u64>,
 
@@ -69,18 +70,16 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
             args.input.clone()
         }
     };
-    let options = UpdateOptions {
-        server: args.server.clone(),
-        start_sequence: args.sequence,
-        max_diffs: args.max_diffs,
-        client: ClientOptions {
-            allow_http: args.allow_http,
-            request_timeout: Duration::from_secs(args.timeout),
-            max_diff_bytes: args.max_diff_mb.saturating_mul(1 << 20),
-            ..ClientOptions::default()
-        },
-        osc_limits: OscLimits::default(),
-    };
+    let options = UpdateOptions::default()
+        .server(args.server.clone())
+        .start_sequence(args.sequence)
+        .max_diffs(args.max_diffs)
+        .client(
+            ClientOptions::default()
+                .allow_http(args.allow_http)
+                .request_timeout(Duration::from_secs(args.timeout))
+                .max_diff_bytes(args.max_diff_mb.saturating_mul(1 << 20)),
+        );
     let report = update_pbf(&args.input, &output, &options)
         .with_context(|| format!("updating {}", args.input.display()))?;
 

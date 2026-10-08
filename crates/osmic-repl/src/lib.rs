@@ -28,18 +28,27 @@ pub use apply::{ApplyStats, apply_to_pbf};
 pub use changeset::ChangeSet;
 pub use client::{ClientOptions, ReplicationClient};
 pub use error::ReplError;
-pub use osc::{Change, ChangeAction, Element, Member, OscLimits, parse_osc, parse_osc_gz};
+pub use osc::{
+    Change, ChangeAction, Element, Member, OscLimits, parse_osc, parse_osc_auto_with, parse_osc_gz,
+    parse_osc_gz_with, parse_osc_with,
+};
 pub use state::ReplicationState;
 
 /// Options for [`update_pbf`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UpdateOptions {
-    /// Replication base URL; overrides the one in the PBF header.
+    /// Replication base URL; overrides the one in the PBF header. A server
+    /// for a different stream than the header's needs `start_sequence`,
+    /// since sequence numbers are per stream.
     pub server: Option<String>,
-    /// Starting sequence when the PBF header has none.
+    /// Sequence the data is current to; overrides the PBF header's.
     pub start_sequence: Option<u64>,
-    /// Most diffs applied in one run (bounds memory and run time).
+    /// Most diffs applied in one run.
     pub max_diffs: u64,
+    /// Stop fetching further diffs in this run once this many objects have
+    /// changed (bounds memory; the next run continues).
+    pub max_objects: usize,
     pub client: ClientOptions,
     pub osc_limits: OscLimits,
 }
@@ -50,14 +59,60 @@ impl Default for UpdateOptions {
             server: None,
             start_sequence: None,
             max_diffs: 1_440,
+            max_objects: 20_000_000,
             client: ClientOptions::default(),
             osc_limits: OscLimits::default(),
         }
     }
 }
 
+impl UpdateOptions {
+    /// Use `server` instead of the URL in the PBF header.
+    #[must_use]
+    pub fn server(mut self, server: Option<String>) -> Self {
+        self.server = server;
+        self
+    }
+
+    /// Start from `sequence` instead of the PBF header's.
+    #[must_use]
+    pub fn start_sequence(mut self, sequence: Option<u64>) -> Self {
+        self.start_sequence = sequence;
+        self
+    }
+
+    /// Apply at most `diffs` diffs per run.
+    #[must_use]
+    pub fn max_diffs(mut self, diffs: u64) -> Self {
+        self.max_diffs = diffs;
+        self
+    }
+
+    /// Stop fetching once `objects` objects have changed.
+    #[must_use]
+    pub fn max_objects(mut self, objects: usize) -> Self {
+        self.max_objects = objects;
+        self
+    }
+
+    /// HTTP client settings.
+    #[must_use]
+    pub fn client(mut self, client: ClientOptions) -> Self {
+        self.client = client;
+        self
+    }
+
+    /// Change-file limits.
+    #[must_use]
+    pub fn osc_limits(mut self, limits: OscLimits) -> Self {
+        self.osc_limits = limits;
+        self
+    }
+}
+
 /// What [`update_pbf`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UpdateReport {
     pub from: ReplicationState,
     pub to: ReplicationState,
@@ -74,8 +129,13 @@ impl UpdateReport {
     }
 }
 
+fn same_stream(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/')
+        .eq_ignore_ascii_case(b.trim_end_matches('/'))
+}
+
 /// Bring `input` up to date and write the result to `output` (which may be
-/// the same path).
+/// the same path). `output` is written even when there is nothing to apply.
 pub fn update_pbf(
     input: &Path,
     output: &Path,
@@ -92,6 +152,16 @@ pub fn update_pbf(
                 input.display()
             ))
         })?;
+    if options.start_sequence.is_none()
+        && let Some(header_url) = &header.replication_base_url
+        && !same_stream(header_url, &base_url)
+    {
+        return Err(ReplError::State(format!(
+            "{} was updated from {header_url}; sequence numbers differ between streams, \
+             so pass the starting sequence for {base_url}",
+            input.display()
+        )));
+    }
     let sequence = options
         .start_sequence
         .or(header
@@ -123,15 +193,25 @@ pub fn update_pbf(
 
     let mut changes = ChangeSet::default();
     let mut applied = sequence;
-    while applied < target {
+    while applied < target && changes.len() < options.max_objects {
         let next = applied + 1;
         let Some(bytes) = client.diff(next)? else {
             break; // published state.txt but diff not visible yet
         };
-        changes.extend(parse_osc_gz(&bytes[..], options.osc_limits)?);
+        osc::parse_osc_auto_with(&bytes, options.osc_limits, |c| {
+            changes.insert(c);
+            Ok(())
+        })
+        .map_err(|e| match e {
+            ReplError::Osc(m) => ReplError::Osc(format!("diff {next}: {m}")),
+            other => other,
+        })?;
         applied = next;
     }
     if applied == sequence {
+        if output != input {
+            copy_atomically(input, output)?;
+        }
         return Ok(UpdateReport {
             to: from.clone(),
             from,
@@ -141,10 +221,19 @@ pub fn update_pbf(
         });
     }
     let to = match client.state(applied)? {
+        Some(s) if s.sequence != applied => {
+            return Err(ReplError::State(format!(
+                "the server's state file for sequence {applied} says sequence {}",
+                s.sequence
+            )));
+        }
         Some(s) => s,
+        // Not published: the latest state's timestamp is right if we reached it.
         None => ReplicationState {
             sequence: applied,
-            timestamp: None,
+            timestamp: (applied == latest.sequence)
+                .then(|| latest.timestamp.clone())
+                .flatten(),
             base_url: base_url.clone(),
         },
     };
@@ -161,4 +250,12 @@ pub fn update_pbf(
         latest_sequence: latest.sequence,
         stats,
     })
+}
+
+/// Copy `input` to `output` through a temporary file and an atomic rename.
+fn copy_atomically(input: &Path, output: &Path) -> Result<(), ReplError> {
+    let mut temp = osmic_core::fs::temp_file_for(output)?;
+    std::io::copy(&mut std::fs::File::open(input)?, temp.as_file_mut())?;
+    osmic_core::fs::persist(temp, output, true)?;
+    Ok(())
 }
