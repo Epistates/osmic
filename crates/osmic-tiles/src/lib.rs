@@ -23,6 +23,8 @@ pub mod pipeline;
 #[cfg(feature = "native")]
 pub mod pmtiles;
 pub mod proto;
+#[cfg(feature = "reader")]
+pub mod reader;
 pub mod render;
 #[cfg(feature = "native")]
 pub mod sorter;

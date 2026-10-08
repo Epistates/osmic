@@ -62,6 +62,7 @@ rstar = "0.13"
 
 # Tile & format
 pmtiles = { version = "0.24", default-features = false }
+moka = { version = "0.12.16", features = ["future"] }
 
 # Rendering
 wgpu = "30"

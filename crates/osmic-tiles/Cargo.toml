@@ -17,6 +17,8 @@ native = ["dep:rayon", "dep:pmtiles", "dep:tempfile", "osmic-osm/native"]
 # MapLibre Tile output. `mlt-core` tracks the evolving MLT spec and needs
 # Rust 1.98, above this crate's MSRV.
 mlt = ["dep:mlt-core"]
+# Validated PMTiles reading with a bounded directory cache (`reader`).
+reader = ["dep:pmtiles", "pmtiles/mmap-async-tokio", "pmtiles/moka", "dep:moka"]
 
 [dependencies]
 osmic-core = { workspace = true }
@@ -26,12 +28,14 @@ geo-types = { workspace = true }
 mlt-core = { version = "0.19", optional = true }
 pmtiles = { workspace = true, features = ["write"], optional = true }
 rayon = { workspace = true, optional = true }
+moka = { workspace = true, optional = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true }
 geo = { workspace = true }
 bytes = { workspace = true }
 
