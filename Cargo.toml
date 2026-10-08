@@ -65,12 +65,15 @@ pmtiles = { version = "0.24", default-features = false }
 
 # Rendering
 wgpu = "28"
+naga = "28"
 lyon = "1.0"
 tiny-skia = "0.12"
 cosmic-text = "0.18"
 winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+csscolorparser = "0.6"
+lru = "0.16"
 
 # Server
 axum = "0.8"

@@ -15,7 +15,7 @@ pub mod simplify;
 pub mod tile;
 
 pub use bbox::BBox;
-pub use color::Color;
+pub use color::{Color, ColorParseError};
 pub use coord::{FixedCoord, LonLat};
 pub use error::{OsmicError, OsmicResult};
 pub use geometry::{Geometry, GeometryType};

@@ -18,6 +18,7 @@ tempfile = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 geo-types = { workspace = true }
+csscolorparser = { workspace = true }
 
 [dev-dependencies]
 geo = { workspace = true }
