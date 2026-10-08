@@ -28,7 +28,10 @@ pub mod skia;
 pub mod tessellate;
 
 pub use backend::{RenderBackend, RenderConfig};
-pub use camera::{Camera, PixelMapping, TILE_SIZE, TileTransform, VisibleTile};
+pub use camera::{
+    Camera, MAX_TILE_ZOOM, MAX_VISIBLE_TILES, MAX_ZOOM, MIN_ZOOM, PixelMapping, TILE_SIZE,
+    TileTransform, VisibleTile,
+};
 pub use error::{RenderError, RenderResult};
 pub use scene::{RenderFeature, RenderLayer, SceneGraph};
 pub use scene_builder::{SceneBuilder, SceneOptions, build_scene};

@@ -22,6 +22,15 @@ pub const MIN_ZOOM: f64 = 0.0;
 /// Highest zoom the camera allows.
 pub const MAX_ZOOM: f64 = 22.0;
 
+/// Highest tile zoom [`Camera::visible_tiles`] accepts (tile indices must
+/// fit in `u32`).
+pub const MAX_TILE_ZOOM: u8 = 30;
+
+/// Most tiles [`Camera::visible_tiles`] returns; a view that would need
+/// more gets none. A 4K screen at 2x needs about 70 tiles at the matching
+/// zoom, so the limit only stops requests far above the camera's zoom.
+pub const MAX_VISIBLE_TILES: usize = 4096;
+
 /// An affine map from the Mercator unit square to pixels:
 /// `px = (unit - origin) * scale`.
 ///
@@ -247,25 +256,40 @@ impl Camera {
 
     /// Tiles at `tile_zoom` intersecting the view grown by `margin_px`,
     /// nearest the center first.
+    ///
+    /// Returns an empty list for requests that cannot be served: a
+    /// `tile_zoom` above [`MAX_TILE_ZOOM`], a non-finite viewport or margin,
+    /// or a view needing more than [`MAX_VISIBLE_TILES`] tiles (a tile zoom
+    /// far above the camera zoom).
     pub fn visible_tiles(&self, tile_zoom: u8, margin_px: f64) -> Vec<VisibleTile> {
+        if tile_zoom > MAX_TILE_ZOOM {
+            return Vec::new();
+        }
         let n = i64::from(tiles_per_axis(tile_zoom));
         let world = self.world_size();
         let (hw, hh) = (
             (self.width / 2.0 + margin_px) / world,
             (self.height / 2.0 + margin_px) / world,
         );
-        let tile_range = |lo: f64, hi: f64| -> (i64, i64) {
-            (
-                (lo * n as f64).floor() as i64,
-                ((hi * n as f64).ceil() as i64 - 1).max((lo * n as f64).floor() as i64),
-            )
+        if !(hw.is_finite() && hh.is_finite()) {
+            return Vec::new();
+        }
+        // Tile indices as floats first: the counts are checked before any
+        // conversion or enumeration.
+        let tile_range = |lo: f64, hi: f64| -> (f64, f64) {
+            let first = (lo * n as f64).floor();
+            (first, ((hi * n as f64).ceil() - 1.0).max(first))
         };
         let (x0, x1) = tile_range(self.center[0] - hw, self.center[0] + hw);
         let (y0, y1) = tile_range(
             (self.center[1] - hh).max(0.0),
             (self.center[1] + hh).min(1.0),
         );
-        let (y0, y1) = (y0.clamp(0, n - 1), y1.clamp(0, n - 1));
+        let (y0, y1) = (y0.clamp(0.0, (n - 1) as f64), y1.clamp(0.0, (n - 1) as f64));
+        if (x1 - x0 + 1.0) * (y1 - y0 + 1.0) > MAX_VISIBLE_TILES as f64 {
+            return Vec::new();
+        }
+        let (x0, x1, y0, y1) = (x0 as i64, x1 as i64, y0 as i64, y1 as i64);
 
         let mut tiles = Vec::new();
         for y in y0..=y1 {
@@ -511,6 +535,25 @@ mod tests {
         let right = tiles.iter().find(|t| t.world == 1).unwrap();
         let tr = c.tile_transform(right.coord, right.world);
         assert!(tr.offset[0] > 1000.0);
+    }
+
+    #[test]
+    fn visible_tiles_rejects_unservable_requests_quickly() {
+        let start = std::time::Instant::now();
+        let c = Camera::new(0.0, 0.0, 2.0, 1024.0, 768.0);
+        // z30 tiles for a z2 view would be ~10^17 tiles.
+        assert!(c.visible_tiles(30, 0.0).is_empty());
+        assert!(c.visible_tiles(MAX_TILE_ZOOM + 1, 0.0).is_empty());
+        assert!(c.visible_tiles(u8::MAX, 0.0).is_empty());
+        let wide = Camera::new(0.0, 0.0, 2.0, f64::INFINITY, 768.0);
+        assert!(wide.visible_tiles(2, 0.0).is_empty());
+        assert!(c.visible_tiles(2, f64::INFINITY).is_empty());
+        assert!(c.visible_tiles(2, f64::NAN).is_empty());
+        assert!(start.elapsed().as_secs() < 1);
+        // The matching zoom still works, as does a few zooms above it.
+        assert!(!c.visible_tiles(2, 0.0).is_empty());
+        let deeper = c.visible_tiles(6, 0.0);
+        assert!(!deeper.is_empty() && deeper.len() <= MAX_VISIBLE_TILES);
     }
 
     #[test]
