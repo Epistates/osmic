@@ -5,8 +5,11 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Lifecycle phase in which a plugin failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Phase {
+    /// [`Plugin::build`](crate::Plugin::build).
     Build,
+    /// [`Plugin::finish`](crate::Plugin::finish).
     Finish,
 }
 
@@ -40,6 +43,11 @@ pub enum AppError {
     /// The app was used after [`App::cleanup`](crate::App::cleanup).
     #[error("the app has already been cleaned up")]
     CleanedUp,
+    /// [`App::run`](crate::App::run) or [`App::cleanup`](crate::App::cleanup)
+    /// was called from a plugin's `build` or `finish` hook, while the app
+    /// was still being built.
+    #[error("App::{method} was called from a plugin's build or finish hook")]
+    Reentrant { method: &'static str },
     /// The runner failed.
     #[error("runner failed: {0}")]
     Runner(#[source] BoxError),

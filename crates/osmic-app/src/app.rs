@@ -199,7 +199,7 @@ impl App {
             State::CleanedUp => return Err(AppError::CleanedUp),
         }
         if let Some(err) = self.deferred.take() {
-            self.cleanup();
+            self.cleanup_plugins();
             return Err(err);
         }
         self.state = State::Building;
@@ -220,7 +220,7 @@ impl App {
                 .map_err(|source| self.abort(Phase::Finish, &*plugin, source))?;
         }
         if let Some(err) = self.deferred.take() {
-            self.cleanup();
+            self.cleanup_plugins();
             return Err(err);
         }
         self.state = State::Built;
@@ -228,7 +228,7 @@ impl App {
     }
 
     fn abort(&mut self, phase: Phase, plugin: &dyn Plugin, source: BoxError) -> AppError {
-        self.cleanup();
+        self.cleanup_plugins();
         AppError::Plugin {
             plugin: plugin.name().to_string(),
             phase,
@@ -236,23 +236,48 @@ impl App {
         }
     }
 
+    /// Whether a plugin's `build` or `finish` hook is running.
+    fn building(&self) -> bool {
+        matches!(self.state, State::Building | State::Finishing)
+    }
+
     /// Build if needed, call the runner, then clean up — also on failure.
     ///
     /// # Errors
     ///
     /// The build error, or [`AppError::Runner`] wrapping the runner's error.
+    /// Called from a plugin's `build` or `finish` hook, it does nothing and
+    /// returns [`AppError::Reentrant`]; the build then fails with that
+    /// error too, even if the hook ignores it.
     pub fn run(&mut self) -> Result<(), AppError> {
+        if self.building() {
+            self.deferred
+                .get_or_insert(AppError::Reentrant { method: "run" });
+            return Err(AppError::Reentrant { method: "run" });
+        }
         let result = self.build().and_then(|()| match self.runner.take() {
             Some(runner) => runner(self).map_err(AppError::Runner),
             None => Ok(()),
         });
-        self.cleanup();
+        self.cleanup_plugins();
         result
     }
 
     /// Clean up every built plugin in reverse order. Runs at most once; also
     /// called by [`run`](Self::run) and on drop.
+    ///
+    /// Called from a plugin's `build` or `finish` hook it does nothing, and
+    /// the build fails with [`AppError::Reentrant`] (cleaning up then, once).
     pub fn cleanup(&mut self) {
+        if self.building() {
+            self.deferred
+                .get_or_insert(AppError::Reentrant { method: "cleanup" });
+            return;
+        }
+        self.cleanup_plugins();
+    }
+
+    fn cleanup_plugins(&mut self) {
         if self.state == State::CleanedUp {
             return;
         }
@@ -279,7 +304,7 @@ impl Default for App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        self.cleanup();
+        self.cleanup_plugins();
     }
 }
 
@@ -507,6 +532,113 @@ mod tests {
         app.add_plugin(Probe::<1>::new(&log));
         assert!(matches!(app.run(), Err(AppError::AddedAfterBuild { .. })));
         assert!(log.take().is_empty());
+    }
+
+    /// Calls `App::run` or `App::cleanup` from its `build` or `finish` hook.
+    struct Reenter {
+        log: Log,
+        phase: Phase,
+        call: &'static str,
+        propagate: bool,
+    }
+
+    impl Reenter {
+        fn hook(&self, app: &mut App, phase: Phase) -> Result<(), BoxError> {
+            self.log.push(format!("{phase} reenter"));
+            if phase != self.phase {
+                return Ok(());
+            }
+            if self.call == "run" {
+                let result = app.run();
+                assert!(matches!(result, Err(AppError::Reentrant { method: "run" })));
+                if self.propagate {
+                    result?;
+                }
+            } else {
+                app.cleanup();
+            }
+            Ok(())
+        }
+    }
+
+    impl Plugin for Reenter {
+        fn build(&self, app: &mut App) -> Result<(), BoxError> {
+            self.hook(app, Phase::Build)
+        }
+        fn finish(&self, app: &mut App) -> Result<(), BoxError> {
+            self.hook(app, Phase::Finish)
+        }
+        fn cleanup(&self, _app: &mut App) {
+            self.log.push("cleanup reenter");
+        }
+    }
+
+    #[test]
+    fn reentrant_calls_from_hooks_fail_the_build_and_clean_up_once() {
+        for phase in [Phase::Build, Phase::Finish] {
+            for call in ["run", "cleanup"] {
+                let log = Log::default();
+                let mut app = App::new();
+                app.add_plugin(Probe::<1>::new(&log))
+                    .add_plugin(Reenter {
+                        log: log.clone(),
+                        phase,
+                        call,
+                        propagate: false,
+                    })
+                    .add_plugin(Probe::<3>::new(&log));
+                let runner_log = log.clone();
+                app.set_runner(move |_| {
+                    runner_log.push("run");
+                    Ok(())
+                });
+                let err = app.run().expect_err("reentrant call");
+                assert!(
+                    matches!(err, AppError::Reentrant { method } if method == call),
+                    "{phase} {call}: {err:?}"
+                );
+                drop(app);
+                assert_eq!(
+                    log.take(),
+                    [
+                        "build 1",
+                        "build reenter",
+                        "build 3",
+                        "finish 1",
+                        "finish reenter",
+                        "finish 3",
+                        "cleanup 3",
+                        "cleanup reenter",
+                        "cleanup 1",
+                    ],
+                    "{phase} {call}: the build completes, the runner never runs, \
+                     and cleanup runs once"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_propagated_reentrant_run_aborts_the_build() {
+        let log = Log::default();
+        let mut app = App::new();
+        app.add_plugin(Probe::<1>::new(&log)).add_plugin(Reenter {
+            log: log.clone(),
+            phase: Phase::Build,
+            call: "run",
+            propagate: true,
+        });
+        let err = app.build().expect_err("propagated");
+        let AppError::Plugin { phase, source, .. } = err else {
+            panic!("unexpected {err:?}");
+        };
+        assert_eq!(phase, Phase::Build);
+        assert_eq!(
+            source.to_string(),
+            "App::run was called from a plugin's build or finish hook"
+        );
+        drop(app);
+        assert_eq!(log.take(), ["build 1", "build reenter", "cleanup 1"]);
     }
 
     #[test]

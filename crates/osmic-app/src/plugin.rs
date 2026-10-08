@@ -16,7 +16,12 @@ use crate::error::BoxError;
 ///    [`App::resource`]).
 /// 3. The runner (see [`App::set_runner`]).
 /// 4. [`cleanup`](Self::cleanup), in reverse order, exactly once for every
-///    plugin whose `build` ran — also when a later step fails.
+///    plugin whose `build` succeeded — also when a later step fails. A
+///    plugin whose `build` fails is not cleaned up, so it should release
+///    what it acquired before returning the error.
+///
+/// Hooks must not call [`App::run`] or [`App::cleanup`]; doing so makes the
+/// build fail with [`AppError::Reentrant`](crate::AppError::Reentrant).
 ///
 /// A plugin type is registered at most once per app; later instances of the
 /// same type are ignored.
