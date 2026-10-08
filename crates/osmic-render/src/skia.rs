@@ -10,7 +10,7 @@ use osmic_text::{Canvas, LabelCandidate, LabelPlacer, Rect, TextEngine, unpremul
 use crate::backend::{RenderBackend, RenderConfig};
 use crate::error::{RenderError, RenderResult};
 use crate::scene::{LineCap, LineJoin, RenderFeature, RenderLayer, SceneGraph};
-use crate::tessellate::{dash_is_drawable, polyline_length};
+use crate::tessellate::{MITER_LIMIT, dash_is_drawable, polyline_length};
 
 /// Software rendering backend: tiny-skia for geometry, [`osmic_text`] for
 /// labels.
@@ -391,13 +391,13 @@ fn draw_stroke(
             LineJoin::Round => SkiaJoin::Round,
             LineJoin::Bevel => SkiaJoin::Bevel,
         },
+        miter_limit: MITER_LIMIT,
         // The dash is applied in path space, before `transform`, so its
         // lengths scale with the pixel ratio like the width does.
         // Patterns too fine (or too numerous) to draw are solid.
         dash: dash_is_drawable(dash, polyline_length(coords))
             .then(|| StrokeDash::new(dash.to_vec(), 0.0))
             .flatten(),
-        ..Stroke::default()
     };
     target.stroke_path(&path, &paint(color)?, &stroke, transform, None);
     Ok(())
@@ -590,6 +590,25 @@ mod tests {
         let mut solid = backend(40, 10, 1.0);
         solid.render(&scene(vec![line(vec![], 4.0)])).unwrap();
         assert_eq!(px(&solid, 12, 5)[0], 0);
+    }
+
+    #[test]
+    fn sharp_miters_are_beveled_at_maplibres_limit() {
+        // A 37 degree apex: its miter is 3.16 half-widths long, inside
+        // tiny-skia's default limit of 4 but beyond MapLibre's 2.
+        let apex = RenderFeature::Stroke {
+            coords: vec![[10.0, 40.0], [20.0, 10.0], [30.0, 40.0]],
+            color: Color::BLACK,
+            width: 4.0,
+            width_next_zoom: 4.0,
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            dash: vec![],
+        };
+        let mut b = backend(40, 45, 1.0);
+        b.render(&scene(vec![apex])).unwrap();
+        assert_eq!(px(&b, 20, 5), [255, 255, 255, 255], "miter tip cut off");
+        assert_eq!(px(&b, 20, 10), [0, 0, 0, 255], "bevel present");
     }
 
     #[test]

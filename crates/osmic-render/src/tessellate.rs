@@ -71,6 +71,10 @@ impl Default for TessellationOptions {
 /// Curve flattening tolerance, in scene pixels.
 const TOLERANCE: f32 = 0.1;
 
+/// Miter joins longer than this many half-widths become bevels:
+/// MapLibre's `line-miter-limit` default, used by every backend.
+pub(crate) const MITER_LIMIT: f32 = 2.0;
+
 fn rgba(c: Color) -> [u8; 4] {
     c.to_rgba8()
 }
@@ -254,7 +258,7 @@ fn tessellate_stroke(
             .with_line_width(nominal)
             .with_line_cap(cap)
             .with_line_join(join)
-            .with_miter_limit(2.0),
+            .with_miter_limit(MITER_LIMIT),
         &mut BuffersBuilder::new(out, |v: StrokeVertex<'_, '_>| MeshVertex {
             position: v.position_on_path().to_array(),
             extrude: v.normal().to_array(),
