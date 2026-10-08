@@ -63,6 +63,11 @@ fn slot_bytes(max_node_id: i64) -> Result<(usize, usize), NodeStoreError> {
 
 impl DenseNodeStore {
     /// An anonymous-memory store for ids `0..=max_node_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeStoreError::InvalidCapacity`] for a negative or oversized
+    /// `max_node_id`; [`NodeStoreError::Io`] if the mapping fails.
     pub fn in_memory(max_node_id: i64) -> Result<Self, NodeStoreError> {
         let (capacity, bytes) = slot_bytes(max_node_id)?;
         info!(
@@ -82,6 +87,12 @@ impl DenseNodeStore {
     }
 
     /// Create (or truncate) a file-backed store for ids `0..=max_node_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeStoreError::InvalidCapacity`] for a negative or oversized
+    /// `max_node_id`; [`NodeStoreError::Io`] if the file cannot be created,
+    /// sized or mapped.
     pub fn create(path: &Path, max_node_id: i64) -> Result<Self, NodeStoreError> {
         let (capacity, bytes) = slot_bytes(max_node_id)?;
         let total = bytes
@@ -119,6 +130,12 @@ impl DenseNodeStore {
     ///
     /// The file must not be truncated or rewritten by another process while
     /// it is open: it is memory-mapped.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeStoreError::Io`] if the file cannot be opened read-write or
+    /// mapped; [`NodeStoreError::InvalidFile`] if it is not a store written
+    /// by [`DenseNodeStore::create`] in this format version.
     pub fn open(path: &Path) -> Result<Self, NodeStoreError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let len = usize::try_from(file.metadata()?.len())
@@ -194,18 +211,32 @@ impl DenseNodeStore {
 
     /// Store a node location. Errors if `node_id` is negative or beyond the
     /// capacity — never silently drops the node.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeStoreError::IdOutOfRange`] if `node_id` is not in
+    /// `0..capacity()`.
     pub fn set(&self, node_id: i64, coord: FixedCoord) -> Result<(), NodeStoreError> {
         self.slot(node_id)?.store(coord.pack(), Ordering::Relaxed);
         Ok(())
     }
 
     /// Remove a node (e.g. deleted by a replication diff).
+    ///
+    /// # Errors
+    ///
+    /// [`NodeStoreError::IdOutOfRange`] if `node_id` is not in
+    /// `0..capacity()`.
     pub fn remove(&self, node_id: i64) -> Result<(), NodeStoreError> {
         self.slot(node_id)?.store(0, Ordering::Relaxed);
         Ok(())
     }
 
     /// Flush a file-backed store to disk (no-op for in-memory stores).
+    ///
+    /// # Errors
+    ///
+    /// [`NodeStoreError::Io`] if the flush fails.
     pub fn flush(&self) -> Result<(), NodeStoreError> {
         if self.offset > 0 {
             self.map.flush()?;

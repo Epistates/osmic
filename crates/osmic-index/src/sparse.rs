@@ -195,20 +195,25 @@ pub struct NodeRun {
 }
 
 impl NodeRun {
+    /// An empty run with room for `capacity` nodes.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: Vec::with_capacity(capacity),
         }
     }
 
+    /// Record the location of node `id`. Ids may arrive in any order and
+    /// repeat; the last location pushed for an id wins.
     pub fn push(&mut self, id: i64, coord: FixedCoord) {
         self.entries.push((id, coord.pack()));
     }
 
+    /// Number of nodes pushed, counting repeated ids each time.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether nothing has been pushed.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -299,6 +304,7 @@ impl SparseNodeIndex {
         self.len
     }
 
+    /// Whether the index holds no nodes.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

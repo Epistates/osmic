@@ -10,6 +10,8 @@
 //! OSM's native 1e-7° precision, so lookups return exactly what the input
 //! contained.
 
+#![warn(missing_docs)]
+
 mod dense;
 mod error;
 mod sparse;
@@ -22,7 +24,9 @@ use osmic_core::{FixedCoord, NodeLocationStore};
 
 /// Either kind of node store, for callers that choose at runtime.
 pub enum NodeIndex {
+    /// A read-only [`SparseNodeIndex`] built from the input.
     Sparse(SparseNodeIndex),
+    /// A [`DenseNodeStore`], in memory or file-backed.
     Dense(DenseNodeStore),
 }
 
