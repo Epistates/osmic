@@ -1,4 +1,4 @@
-use osmic_core::error::OsmicResult;
+use crate::error::RenderResult;
 
 use crate::scene::SceneGraph;
 
@@ -31,12 +31,12 @@ impl Default for RenderConfig {
 /// Abstraction over rendering backends (software, GPU).
 pub trait RenderBackend {
     /// Initialize the backend with the given configuration.
-    fn init(config: &RenderConfig) -> OsmicResult<Self>
+    fn init(config: &RenderConfig) -> RenderResult<Self>
     where
         Self: Sized;
 
     /// Render a scene graph to the internal buffer.
-    fn render(&mut self, scene: &SceneGraph) -> OsmicResult<()>;
+    fn render(&mut self, scene: &SceneGraph) -> RenderResult<()>;
 
     /// The rendered pixels as **straight (non-premultiplied)** RGBA8, rows
     /// top to bottom, in physical pixels.

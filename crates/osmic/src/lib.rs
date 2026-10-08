@@ -38,8 +38,7 @@ pub use osmic_repl as repl;
 pub mod prelude {
     // Core types
     pub use osmic_core::{
-        BBox, Color, FixedCoord, Geometry, LonLat, OsmId, OsmType, OsmicError, OsmicResult,
-        TileCoord, Zoom,
+        BBox, Color, FixedCoord, Geometry, LonLat, OsmId, OsmType, TileCoord, Zoom,
     };
 
     // OSM data model

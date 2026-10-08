@@ -1,12 +1,11 @@
 //! Shared types for osmic: coordinates, typed OSM ids, geometry, bounding
-//! boxes, tile coordinates, Web Mercator projection, clipping,
-//! simplification and errors.
+//! boxes, tile coordinates, Web Mercator projection, clipping and
+//! simplification.
 
 pub mod bbox;
 pub mod clip;
 pub mod color;
 pub mod coord;
-pub mod error;
 pub mod fs;
 pub mod geometry;
 pub mod mercator;
@@ -17,7 +16,6 @@ pub mod tile;
 pub use bbox::BBox;
 pub use color::{Color, ColorParseError};
 pub use coord::{FixedCoord, LonLat};
-pub use error::{OsmicError, OsmicResult};
 pub use geometry::{Geometry, GeometryType};
 pub use osm_id::{OsmId, OsmType};
 pub use tile::{TileCoord, Zoom};

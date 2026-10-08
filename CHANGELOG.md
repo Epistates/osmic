@@ -27,6 +27,8 @@ dense node store alone reserved 97 GB).
   expression evaluator; scene building, tessellation and label placement
   APIs replace the previous placeholders.
 - The `mlt` feature needs Rust 1.98 (`mlt-core` 0.19).
+- `osmic_core::OsmicError`/`OsmicResult` were removed; every crate has its
+  own typed error (`osmic-render` gained `RenderError`).
 
 ### Added
 

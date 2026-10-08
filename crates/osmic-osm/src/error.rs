@@ -87,22 +87,3 @@ impl OsmError {
         }
     }
 }
-
-impl From<OsmError> for osmic_core::OsmicError {
-    fn from(e: OsmError) -> Self {
-        match e {
-            OsmError::Io(io) => Self::Io(io),
-            other => {
-                // Keep the full cause chain in the message.
-                let mut msg = other.to_string();
-                let mut source = std::error::Error::source(&other);
-                while let Some(s) = source {
-                    msg.push_str(": ");
-                    msg.push_str(&s.to_string());
-                    source = s.source();
-                }
-                Self::Pbf(msg)
-            }
-        }
-    }
-}

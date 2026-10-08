@@ -7,10 +7,10 @@ use tiny_skia::{
 use tracing::info;
 
 use osmic_core::Color;
-use osmic_core::error::{OsmicError, OsmicResult};
 use osmic_text::{Canvas, LabelCandidate, LabelPlacer, Rect, TextEngine, unpremultiply};
 
 use crate::backend::{RenderBackend, RenderConfig};
+use crate::error::{RenderError, RenderResult};
 use crate::scene::{LineCap, LineJoin, RenderFeature, RenderLayer, SceneGraph};
 
 /// Software rendering backend: tiny-skia for geometry, [`osmic_text`] for
@@ -24,13 +24,11 @@ pub struct SkiaBackend {
     text: TextEngine,
 }
 
-fn validate_ratio(ratio: f32) -> OsmicResult<()> {
+fn validate_ratio(ratio: f32) -> RenderResult<()> {
     if ratio.is_finite() && ratio > 0.0 {
         Ok(())
     } else {
-        Err(OsmicError::Render(format!(
-            "pixel_ratio must be a positive number, got {ratio}"
-        )))
+        Err(RenderError::InvalidPixelRatio(ratio))
     }
 }
 
@@ -42,11 +40,11 @@ fn scaled_dim(logical: u32, ratio: f32) -> u32 {
 impl RenderBackend for SkiaBackend {
     /// Uses the system fonts for text; see [`SkiaBackend::with_text_engine`]
     /// to supply fonts explicitly.
-    fn init(config: &RenderConfig) -> OsmicResult<Self> {
+    fn init(config: &RenderConfig) -> RenderResult<Self> {
         Self::with_text_engine(config, TextEngine::system())
     }
 
-    fn render(&mut self, scene: &SceneGraph) -> OsmicResult<()> {
+    fn render(&mut self, scene: &SceneGraph) -> RenderResult<()> {
         self.pixmap.fill(to_skia_color(&scene.background)?);
 
         let ratio = self.config.pixel_ratio;
@@ -135,12 +133,14 @@ impl SkiaBackend {
     /// Create a backend that shapes text with `text` — for example
     /// [`TextEngine::with_fonts`] with bundled fonts for output that does
     /// not depend on the machine.
-    pub fn with_text_engine(config: &RenderConfig, text: TextEngine) -> OsmicResult<Self> {
+    pub fn with_text_engine(config: &RenderConfig, text: TextEngine) -> RenderResult<Self> {
         validate_ratio(config.pixel_ratio)?;
         let w = scaled_dim(config.width, config.pixel_ratio);
         let h = scaled_dim(config.height, config.pixel_ratio);
-        let mut pixmap = Pixmap::new(w, h)
-            .ok_or_else(|| OsmicError::Render(format!("failed to create a {w}x{h} pixmap")))?;
+        let mut pixmap = Pixmap::new(w, h).ok_or(RenderError::Target {
+            width: w,
+            height: h,
+        })?;
         pixmap.fill(to_skia_color(&config.background)?);
 
         info!(width = w, height = h, "SkiaBackend initialized");
@@ -162,10 +162,10 @@ impl SkiaBackend {
     }
 
     /// Encode the pixmap as PNG bytes.
-    pub fn to_png(&self) -> OsmicResult<Vec<u8>> {
+    pub fn to_png(&self) -> RenderResult<Vec<u8>> {
         self.pixmap
             .encode_png()
-            .map_err(|e| OsmicError::Render(format!("PNG encode failed: {e}")))
+            .map_err(|e| RenderError::Png(Box::new(e)))
     }
 
     /// A clip rectangle in whole physical pixels, grown outward so adjacent
@@ -224,7 +224,7 @@ impl SkiaBackend {
         color: &Color,
         transform: Transform,
         mask: Option<&Mask>,
-    ) -> OsmicResult<()> {
+    ) -> RenderResult<()> {
         let mut pb = PathBuilder::new();
         for ring in rings.iter().filter(|r| r.len() >= 3) {
             pb.move_to(ring[0][0], ring[0][1]);
@@ -253,7 +253,7 @@ impl SkiaBackend {
         dash: &[f32],
         transform: Transform,
         mask: Option<&Mask>,
-    ) -> OsmicResult<()> {
+    ) -> RenderResult<()> {
         if coords.len() < 2 || width.is_nan() || width <= 0.0 {
             return Ok(());
         }
@@ -309,7 +309,7 @@ impl SkiaBackend {
         stroke_width: f32,
         transform: Transform,
         mask: Option<&Mask>,
-    ) -> OsmicResult<()> {
+    ) -> RenderResult<()> {
         let Some(path) = circle_path(center, radius) else {
             return Ok(());
         };
@@ -335,7 +335,7 @@ fn circle_path(center: [f32; 2], radius: f32) -> Option<Path> {
         .flatten()
 }
 
-fn paint(color: &Color) -> OsmicResult<Paint<'static>> {
+fn paint(color: &Color) -> RenderResult<Paint<'static>> {
     let mut paint = Paint::default();
     paint.set_color(to_skia_color(color)?);
     paint.anti_alias = true;
@@ -344,9 +344,9 @@ fn paint(color: &Color) -> OsmicResult<Paint<'static>> {
 
 /// Convert, rejecting non-finite components; finite ones are clamped to
 /// `[0, 1]`.
-fn to_skia_color(c: &Color) -> OsmicResult<SkiaColor> {
+fn to_skia_color(c: &Color) -> RenderResult<SkiaColor> {
     if ![c.r, c.g, c.b, c.a].iter().all(|v| v.is_finite()) {
-        return Err(OsmicError::Render(format!("invalid color {c:?}")));
+        return Err(RenderError::InvalidColor(*c));
     }
     SkiaColor::from_rgba(
         c.r.clamp(0.0, 1.0),
@@ -354,7 +354,7 @@ fn to_skia_color(c: &Color) -> OsmicResult<SkiaColor> {
         c.b.clamp(0.0, 1.0),
         c.a.clamp(0.0, 1.0),
     )
-    .ok_or_else(|| OsmicError::Render(format!("invalid color {c:?}")))
+    .ok_or(RenderError::InvalidColor(*c))
 }
 
 #[cfg(test)]

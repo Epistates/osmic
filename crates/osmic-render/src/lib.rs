@@ -21,6 +21,7 @@
 
 pub mod backend;
 pub mod camera;
+mod error;
 pub mod scene;
 pub mod scene_builder;
 pub mod skia;
@@ -28,6 +29,7 @@ pub mod tessellate;
 
 pub use backend::{RenderBackend, RenderConfig};
 pub use camera::{Camera, PixelMapping, TILE_SIZE, TileTransform, VisibleTile};
+pub use error::{RenderError, RenderResult};
 pub use scene::{RenderFeature, RenderLayer, SceneGraph};
 pub use scene_builder::{SceneBuilder, SceneOptions, build_scene};
 pub use skia::SkiaBackend;

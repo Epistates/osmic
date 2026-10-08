@@ -18,12 +18,3 @@ pub enum NodeStoreError {
     #[error("invalid node store file: {0}")]
     InvalidFile(String),
 }
-
-impl From<NodeStoreError> for osmic_core::OsmicError {
-    fn from(e: NodeStoreError) -> Self {
-        match e {
-            NodeStoreError::Io(io) => Self::Io(io),
-            other => Self::Index(other.to_string()),
-        }
-    }
-}
