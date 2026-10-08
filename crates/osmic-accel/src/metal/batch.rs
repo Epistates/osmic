@@ -364,8 +364,13 @@ mod tests {
 
     use super::*;
 
+    /// The shared context, or `None` (skip) on a machine without Metal.
     fn context() -> Option<Arc<MetalContext>> {
-        MetalContext::get().ok()
+        match MetalContext::get() {
+            Ok(ctx) => Some(ctx),
+            Err(AccelError::NotAvailable) => None,
+            Err(e) => panic!("Metal initialisation failed: {e}"),
+        }
     }
 
     fn square_bounds() -> Bounds {

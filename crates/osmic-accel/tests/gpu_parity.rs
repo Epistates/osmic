@@ -1,24 +1,14 @@
 //! GPU vs CPU parity. Every test skips (passes with a note) when Metal is not
-//! available in this build or on this machine.
+//! available in this build or on this machine. Any other initialisation
+//! failure (a broken shader library, ...) fails the tests.
 
 mod common;
 
 use geo_types::MultiPolygon;
-use osmic_accel::{AccelError, Backend, ClipOptions, Clipper, GpuAccelerator, clip_batch_cpu};
+use osmic_accel::{AccelError, Backend, ClipOptions, Clipper, clip_batch_cpu};
 use osmic_core::geometry::Geometry;
 
 use common::*;
-
-fn gpu(options: ClipOptions) -> Option<GpuAccelerator> {
-    match GpuAccelerator::with_options(options) {
-        Ok(g) => Some(g),
-        Err(AccelError::NotAvailable | AccelError::MetalInit(_)) => {
-            eprintln!("skipping: Metal GPU backend unavailable");
-            None
-        }
-        Err(e) => panic!("unexpected GPU init error: {e}"),
-    }
-}
 
 fn compare(geoms: &[Geometry], options: ClipOptions, label: &str) {
     let Some(gpu) = gpu(options.clone()) else {

@@ -87,7 +87,7 @@
 mod accelerator;
 mod clip;
 mod cpu;
-pub mod error;
+mod error;
 #[cfg(osmic_metallib)]
 mod metal;
 mod prepare;

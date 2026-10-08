@@ -157,7 +157,12 @@ impl Clipper {
     fn auto(options: ClipOptions) -> Self {
         let gpu = match GpuAccelerator::with_options(options.clone()) {
             Ok(gpu) => Some(gpu),
-            Err(AccelError::NotAvailable) => None,
+            // Expected on machines without Metal: not worth a warning on
+            // every construction.
+            Err(AccelError::NotAvailable) => {
+                tracing::debug!("GPU backend not available; using the CPU path");
+                None
+            }
             Err(error) => {
                 tracing::warn!(%error, "GPU backend failed to initialise; using the CPU path");
                 None

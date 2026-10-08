@@ -9,7 +9,8 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum AccelError {
-    /// The Metal device or shader library could not be initialised.
+    /// A Metal device exists but could not be set up (for example no
+    /// command queue could be created).
     #[error("Metal initialization failed: {0}")]
     MetalInit(String),
 
@@ -17,7 +18,8 @@ pub enum AccelError {
     #[error("Buffer creation failed: {0}")]
     BufferCreation(String),
 
-    /// A shader function could not be found or turned into a pipeline.
+    /// The embedded shader library could not be loaded, or its kernel could
+    /// not be found or turned into a pipeline.
     #[error("Shader compilation failed: {0}")]
     ShaderCompilation(String),
 

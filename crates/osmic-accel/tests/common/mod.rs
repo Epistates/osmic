@@ -3,8 +3,21 @@
 #![allow(dead_code)]
 
 use geo_types::{Coord, LineString, MultiPolygon, Point, Polygon};
-use osmic_accel::{ClippedGeometry, WorkItem};
+use osmic_accel::{AccelError, ClipOptions, ClippedGeometry, GpuAccelerator, WorkItem};
 use osmic_core::geometry::Geometry;
+
+/// The GPU backend, or `None` (the test skips) when this build or machine
+/// has no Metal. Any other initialisation failure fails the test.
+pub fn gpu(options: ClipOptions) -> Option<GpuAccelerator> {
+    match GpuAccelerator::with_options(options) {
+        Ok(g) => Some(g),
+        Err(AccelError::NotAvailable) => {
+            eprintln!("skipping: Metal GPU backend unavailable");
+            None
+        }
+        Err(e) => panic!("unexpected GPU init error: {e}"),
+    }
+}
 
 pub const ZOOM: u8 = 8;
 pub const TILE_X: u32 = 135;

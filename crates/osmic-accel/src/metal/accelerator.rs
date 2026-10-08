@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::clip::{
     ClipOptions, ClippedGeometry, UnitResults, UnitView, WorkItem, assemble, clip_item_cpu,
@@ -50,7 +50,8 @@ impl Accelerator {
     pub(crate) fn new(options: ClipOptions) -> AccelResult<Self> {
         options.validate()?;
         let ctx = MetalContext::get()?;
-        info!("GPU accelerator initialized");
+        // The shared context logs its one-time initialisation at info.
+        debug!("GPU accelerator created");
         Ok(Self { ctx, options })
     }
 
