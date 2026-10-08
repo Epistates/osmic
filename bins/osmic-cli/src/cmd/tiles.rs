@@ -85,7 +85,7 @@ pub struct TilesArgs {
     pub tmp_dir: Option<PathBuf>,
 
     /// Node location storage: sparse, dense[:MAX_ID] or file:PATH[:MAX_ID]
-    /// (a file store can be reused by `osmic update`)
+    /// (a memory-mapped file instead of RAM, recreated on every run)
     #[arg(long, default_value = "sparse", value_parser = parse_node_store)]
     pub node_store: NodeStorage,
 

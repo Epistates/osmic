@@ -52,7 +52,8 @@ pub enum NodeStorage {
     /// Dense in-memory array indexed by node id (8 bytes per possible id;
     /// only pages that receive nodes use RAM).
     DenseMemory { max_node_id: i64 },
-    /// Dense persistent file, reusable for replication updates.
+    /// Dense memory-mapped file, for node locations that do not fit in
+    /// RAM. Created (or truncated) on every run.
     DenseFile { path: PathBuf, max_node_id: i64 },
 }
 
