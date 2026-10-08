@@ -32,6 +32,18 @@ dense node store alone reserved 97 GB).
 - `osmic-accel`: the error types are only exported at the crate root (the
   `error` module is private); a machine without a Metal device reports
   `NotAvailable` instead of `MetalInit`.
+- `osmic-extract`: `Entity::osm_type` is an `OsmType` (serialized as
+  before), `Entity::richness` returns a `Richness`, and the public option,
+  result and entity structs are `#[non_exhaustive]` (start options from
+  `Default`).
+- `osmic::prelude` exports the tile renderer's settings as
+  `TileRenderConfig`; the raster backend's `RenderConfig` is no longer in
+  the prelude (`osmic::render::RenderConfig`).
+- `osmic-app`: `Phase` is `#[non_exhaustive]`; calling `App::run` or
+  `App::cleanup` from a plugin hook fails the build with
+  `AppError::Reentrant`.
+- An interrupted CLI command exits with 128 + the signal number (130 for
+  Ctrl-C, 143 for SIGTERM); `osmic serve` drains and exits 0.
 
 ### Added
 
