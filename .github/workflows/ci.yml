@@ -92,6 +92,26 @@ jobs:
         with:
           command: check all
 
+  fuzz:
+    name: fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-fuzz
+      - name: run every target for 60 s
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            cargo +nightly fuzz run -O "$target" -- -max_total_time=60 -rss_limit_mb=2048
+          done
+
   coverage:
     runs-on: ubuntu-latest
     steps:

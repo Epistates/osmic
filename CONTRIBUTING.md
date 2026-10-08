@@ -20,6 +20,20 @@ other feature builds with the MSRV.
 `deny.toml`). CI runs all of the above on Linux, macOS and Windows, plus an
 MSRV check, `cargo doc` with warnings denied and coverage.
 
+## Fuzzing
+
+Parsers of untrusted input (vector tiles, change files, replication state,
+style JSON) have [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+targets in `fuzz/` (not part of the workspace; nightly only):
+
+```sh
+cargo +nightly fuzz list
+cargo +nightly fuzz run -O mvt_decode -- -max_total_time=300
+```
+
+CI runs each target briefly. Add a target when you add a parser, and add
+any crashing input it finds as a regression test.
+
 ## Minimum supported Rust version
 
 The MSRV is **1.94** (see `rust-version` in `Cargo.toml`). Raising it is a

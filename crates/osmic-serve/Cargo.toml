@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 categories = ["web-programming::http-server", "science::geo"]
 keywords = ["tile-server", "mvt", "pmtiles", "axum", "map"]

@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["fuzz"]
 members = [
     "crates/osmic-core",
     "crates/osmic-osm",
@@ -29,7 +30,6 @@ edition = "2024"
 rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/epistates/osmic"
-homepage = "https://github.com/epistates/osmic"
 authors = ["Nick Paterno"]
 readme = "README.md"
 

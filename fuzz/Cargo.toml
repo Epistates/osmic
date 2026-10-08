@@ -1,0 +1,47 @@
+[package]
+name = "osmic-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the main workspace: build with `cargo +nightly fuzz`.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+flate2 = "1.1"
+osmic-core = { path = "../crates/osmic-core" }
+osmic-repl = { path = "../crates/osmic-repl" }
+osmic-style = { path = "../crates/osmic-style" }
+osmic-tiles = { path = "../crates/osmic-tiles", default-features = false }
+
+[[bin]]
+name = "mvt_decode"
+path = "fuzz_targets/mvt_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "osc_parse"
+path = "fuzz_targets/osc_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_txt"
+path = "fuzz_targets/state_txt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "style_json"
+path = "fuzz_targets/style_json.rs"
+test = false
+doc = false
+bench = false
