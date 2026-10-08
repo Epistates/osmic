@@ -127,13 +127,8 @@ impl Color {
         })?;
         // Channels are quantised to 8 bits, as in CSS; this keeps
         // `parse(c.to_css()) == c` exact.
-        let q = |v: f64| ((v.clamp(0.0, 1.0) * 255.0).round() / 255.0) as f32;
-        Ok(Self::rgba(
-            q(c.r),
-            q(c.g),
-            q(c.b),
-            c.a.clamp(0.0, 1.0) as f32,
-        ))
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+        Ok(Self::rgba(q(c.r), q(c.g), q(c.b), c.a.clamp(0.0, 1.0)))
     }
 
     /// The color as straight (non-premultiplied) 8-bit RGBA.

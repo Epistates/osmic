@@ -157,7 +157,7 @@ impl Renderer {
         });
         let map_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("map pipeline layout"),
-            bind_group_layouts: &[&draw_layout],
+            bind_group_layouts: &[Some(&draw_layout)],
             immediate_size: 0,
         });
         let vertex_attributes = [
@@ -188,11 +188,11 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &map_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<MeshVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &vertex_attributes,
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -249,7 +249,7 @@ impl Renderer {
         let overlay_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("overlay pipeline layout"),
-                bind_group_layouts: &[&overlay_layout],
+                bind_group_layouts: &[Some(&overlay_layout)],
                 immediate_size: 0,
             });
         let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -307,7 +307,6 @@ impl Renderer {
         &self.device
     }
 
-    #[cfg(test)]
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
     }
@@ -744,7 +743,7 @@ mod tests {
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll");
         rx.recv().expect("map callback").expect("map");
-        let data = buffer.slice(..).get_mapped_range().to_vec();
+        let data = buffer.slice(..).get_mapped_range().expect("mapped").to_vec();
         buffer.unmap();
         data
     }

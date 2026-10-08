@@ -269,8 +269,8 @@ impl App {
         match gpu.render(background_color(&self.style, camera.zoom()), &draws) {
             FrameOutcome::Presented | FrameOutcome::Skipped => {}
             FrameOutcome::Reconfigured => gpu.window().request_redraw(),
-            FrameOutcome::OutOfMemory => {
-                self.fail(event_loop, "the GPU ran out of memory".to_string());
+            FrameOutcome::Lost => {
+                self.fail(event_loop, "the window surface was lost".to_string());
             }
         }
     }

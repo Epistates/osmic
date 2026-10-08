@@ -184,7 +184,7 @@ fn a_loaded_tile_renders_with_style_colors_and_labels() {
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll");
     rx.recv().unwrap().unwrap();
-    let pixels = buffer.slice(..).get_mapped_range().to_vec();
+    let pixels = buffer.slice(..).get_mapped_range().expect("mapped").to_vec();
 
     if let Some(path) = std::env::var_os("OSMIC_DUMP_FRAME") {
         let pixmap = tiny_skia::Pixmap::from_vec(

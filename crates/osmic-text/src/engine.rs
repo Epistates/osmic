@@ -178,10 +178,9 @@ impl TextEngine {
     fn shape_uncached(&mut self, text: &str, font_size: f32) -> ShapedText {
         let fs = &mut self.font_system;
         let mut buffer = Buffer::new(fs, Metrics::new(font_size, font_size * LINE_HEIGHT));
-        buffer.set_size(fs, None, None);
+        buffer.set_size(None, None);
         let single_line = text.replace(['\n', '\r'], " ");
         buffer.set_text(
-            fs,
             &single_line,
             &Attrs::new().family(Family::SansSerif),
             Shaping::Advanced,

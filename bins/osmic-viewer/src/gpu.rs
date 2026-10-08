@@ -20,12 +20,14 @@ pub const MSAA_SAMPLES: u32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameOutcome {
     Presented,
-    /// Nothing to draw now (zero-sized, timed out); try again later.
+    /// Nothing to draw now (timed out, occluded, validation error); try
+    /// again later.
     Skipped,
     /// The surface was stale and has been reconfigured; draw again.
     Reconfigured,
-    /// The GPU is out of memory; the application should exit.
-    OutOfMemory,
+    /// The surface is gone and cannot be drawn to; the application should
+    /// exit.
+    Lost,
 }
 
 /// Prefer a non-sRGB surface format; otherwise take the first one and
@@ -159,15 +161,17 @@ impl Gpu {
 
     /// Draw one frame.
     pub fn render(&mut self, clear: Color, draws: &[TileDraw<'_>]) -> FrameOutcome {
-        let frame = match self.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+        use wgpu::CurrentSurfaceTexture as Acquired;
+        let (frame, suboptimal) = match self.surface.get_current_texture() {
+            Acquired::Success(frame) => (frame, false),
+            Acquired::Suboptimal(frame) => (frame, true),
+            Acquired::Outdated => {
                 self.surface.configure(self.renderer.device(), &self.config);
                 return FrameOutcome::Reconfigured;
             }
-            Err(wgpu::SurfaceError::OutOfMemory) => return FrameOutcome::OutOfMemory,
-            Err(e @ (wgpu::SurfaceError::Timeout | wgpu::SurfaceError::Other)) => {
-                debug!("skipping frame: {e}");
+            Acquired::Lost => return FrameOutcome::Lost,
+            status @ (Acquired::Timeout | Acquired::Occluded | Acquired::Validation) => {
+                debug!("skipping frame: {status:?}");
                 return FrameOutcome::Skipped;
             }
         };
@@ -175,8 +179,7 @@ impl Gpu {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.renderer.draw(&view, clear, draws);
-        let suboptimal = frame.suboptimal;
-        frame.present();
+        self.renderer.queue().present(frame);
         if suboptimal {
             self.surface.configure(self.renderer.device(), &self.config);
         }

@@ -64,16 +64,16 @@ rstar = "0.13"
 pmtiles = { version = "0.24", default-features = false }
 
 # Rendering
-wgpu = "28"
-naga = "28"
+wgpu = "30"
+naga = "30"
 lyon = "1.0"
 tiny-skia = "0.12"
-cosmic-text = "0.18"
+cosmic-text = "0.19"
 winit = "0.30"
-pollster = "0.4"
+pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
-csscolorparser = "0.6"
-lru = "0.16"
+csscolorparser = "0.9"
+lru = "0.18"
 
 # Server
 axum = "0.8"
