@@ -86,6 +86,30 @@ fn has_name(tags: &[(&str, &str)]) -> bool {
     tags.iter().any(|(k, v)| *k == "name" && !v.is_empty())
 }
 
+/// Append the valid locations of a way's nodes (from a LocationsOnWays
+/// file) to `coords`; returns whether every node had one. Writers such as
+/// osmium store a node missing from their input as an out-of-range
+/// coordinate (`i32::MAX`), which must not be taken for a location.
+fn push_locations(
+    coords: &mut Vec<FixedCoord>,
+    locations: impl Iterator<Item = FixedCoord>,
+) -> bool {
+    let mut complete = true;
+    for c in locations {
+        if c.is_valid() {
+            coords.push(c);
+        } else {
+            complete = false;
+        }
+    }
+    complete
+}
+
+/// A node's location, unless its coordinate is out of range.
+fn node_location(c: FixedCoord) -> Option<Coord<f64>> {
+    c.is_valid().then(|| c.to_coord())
+}
+
 /// A representative point for a way.
 fn way_location(coords: &[FixedCoord], closed: bool) -> Option<Coord<f64>> {
     let line = LineString(coords.iter().map(|c| c.to_coord()).collect());
@@ -179,7 +203,7 @@ impl Extractor {
                                 OsmType::Node,
                                 n.id(),
                                 &tags,
-                                Some(c.to_coord()),
+                                node_location(c),
                             ));
                         }
                     }
@@ -192,7 +216,7 @@ impl Extractor {
                                 OsmType::Node,
                                 n.id(),
                                 &tags,
-                                Some(c.to_coord()),
+                                node_location(c),
                             ));
                         }
                     }
@@ -217,11 +241,11 @@ impl Extractor {
                             }
                         }
                         if index.is_none() {
-                            coords
-                                .extend(w.node_locations().map(|l| {
-                                    FixedCoord::new(l.decimicro_lon(), l.decimicro_lat())
-                                }));
-                            complete = true;
+                            complete = push_locations(
+                                &mut coords,
+                                w.node_locations()
+                                    .map(|l| FixedCoord::new(l.decimicro_lon(), l.decimicro_lat())),
+                            );
                         }
                         if needed && complete {
                             out.cached.push((w.id(), coords.clone()));
@@ -351,6 +375,34 @@ mod tests {
         let poly = Polygon::new(LineString(c.iter().map(|x| x.to_coord()).collect()), vec![]);
         use geo::Contains;
         assert!(poly.contains(&Point(p)), "{p:?} not inside");
+    }
+
+    #[test]
+    fn missing_locations_on_ways_are_not_coordinates() {
+        // osmium's encoding of "node not in the input" on a way.
+        let missing = f(i32::MAX, i32::MAX);
+        let mut coords = Vec::new();
+        assert!(!push_locations(
+            &mut coords,
+            [f(0, 0), missing, f(10, 10)].into_iter()
+        ));
+        assert_eq!(coords, [f(0, 0), f(10, 10)]);
+        let location = way_location(&coords, false).expect("location");
+        assert!(
+            location.x.abs() < 1e-5 && location.y.abs() < 1e-5,
+            "{location:?}"
+        );
+
+        coords.clear();
+        assert!(push_locations(
+            &mut coords,
+            [f(0, 0), f(10, 10)].into_iter()
+        ));
+        coords.clear();
+        assert!(!push_locations(&mut coords, [missing].into_iter()));
+        assert_eq!(way_location(&coords, false), None);
+        assert_eq!(node_location(missing), None);
+        assert!(node_location(f(-1_800_000_000, 900_000_000)).is_some());
     }
 
     #[test]
