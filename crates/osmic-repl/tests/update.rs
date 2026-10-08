@@ -177,7 +177,7 @@ fn http_is_refused_by_default() {
     write_base(&pbf, "http://127.0.0.1:9/");
     let err = update_pbf(&pbf, &pbf, &UpdateOptions::default()).expect_err("http must fail");
     assert!(
-        matches!(err, ReplError::State(ref m) if m.contains("https")),
+        matches!(err, ReplError::InsecureUrl { ref url } if url.starts_with("http://")),
         "{err}"
     );
 }

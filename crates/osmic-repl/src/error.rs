@@ -33,11 +33,29 @@ pub enum ReplError {
         message: String,
     },
 
-    /// The replication state is missing, invalid or inconsistent, or the
-    /// requested operation does not fit it: no URL or sequence to start
-    /// from, a mismatched stream, an unsorted input, a non-HTTPS URL.
+    /// The replication state is missing, invalid or inconsistent: no URL or
+    /// sequence to start from, a mismatched stream, or a server state file
+    /// for another sequence.
     #[error("replication state: {0}")]
     State(String),
+
+    /// A replication URL is not `https://` and plain HTTP was not allowed
+    /// (see [`ClientOptions::allow_http`](crate::ClientOptions::allow_http)).
+    #[error("replication URL must use https:// (got {url}); pass allow_http to override")]
+    InsecureUrl {
+        /// The rejected URL.
+        url: String,
+    },
+
+    /// The input PBF cannot be updated as it is: it is not sorted, or it
+    /// stores node locations on ways.
+    #[error("{} cannot be updated: {reason}", path.display())]
+    UnsupportedInput {
+        /// The input file.
+        path: std::path::PathBuf,
+        /// Why, and how to prepare the file.
+        reason: &'static str,
+    },
 
     /// Reading or writing the PBF failed.
     #[error("OSM data")]

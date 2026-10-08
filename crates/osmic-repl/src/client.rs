@@ -94,15 +94,15 @@ impl ReplicationClient {
     ///
     /// # Errors
     ///
-    /// [`ReplError::State`] if `base_url` is not `https://` (or `http://`
+    /// [`ReplError::InsecureUrl`] if `base_url` is not `https://` (or `http://`
     /// with [`ClientOptions::allow_http`]).
     pub fn new(base_url: &str, options: ClientOptions) -> Result<Self, ReplError> {
         let lower = base_url.to_ascii_lowercase();
         if !(lower.starts_with("https://") || (options.allow_http && lower.starts_with("http://")))
         {
-            return Err(ReplError::State(format!(
-                "replication URL must use https:// (got {base_url}); pass allow_http to override"
-            )));
+            return Err(ReplError::InsecureUrl {
+                url: base_url.to_string(),
+            });
         }
         let agent = ureq::Agent::config_builder()
             .https_only(!options.allow_http)

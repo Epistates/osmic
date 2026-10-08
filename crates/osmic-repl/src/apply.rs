@@ -384,8 +384,8 @@ impl<W: std::io::Write> Merge<'_, W> {
 ///
 /// # Errors
 ///
-/// - [`ReplError::State`] if the header does not declare the input sorted,
-///   or declares node locations on ways.
+/// - [`ReplError::UnsupportedInput`] if the header does not declare the
+///   input sorted, or declares node locations on ways.
 /// - [`ReplError::Osm`] if the input cannot be read or decoded, or turns
 ///   out not to be sorted after all.
 /// - [`ReplError::Io`] if reading the input or writing the output fails.
@@ -398,17 +398,18 @@ pub fn apply_to_pbf(
 ) -> Result<ApplyStats, ReplError> {
     let header = read_header(input)?;
     if !header.is_sorted() {
-        return Err(ReplError::State(format!(
-            "{} is not sorted by type and id; sort it first (osmium sort)",
-            input.display()
-        )));
+        return Err(ReplError::UnsupportedInput {
+            path: input.to_path_buf(),
+            reason: "it is not sorted by type and id; sort it first (osmium sort)",
+        });
     }
     if header.has_locations_on_ways() {
-        return Err(ReplError::State(format!(
-            "{} stores node locations on ways, which changed ways cannot be given here; \
-             update a file without them and add them afterwards (osmium add-locations-to-ways)",
-            input.display()
-        )));
+        return Err(ReplError::UnsupportedInput {
+            path: input.to_path_buf(),
+            reason: "it stores node locations on ways, which changed ways cannot be given \
+                     here; update a file without them and add them afterwards \
+                     (osmium add-locations-to-ways)",
+        });
     }
     let ranges = blob_ranges(input)?;
     let temp = osmic_core::fs::temp_file_for(output)?;

@@ -150,10 +150,11 @@ fn same_stream(a: &str, b: &str) -> bool {
 ///
 /// - [`ReplError::State`] if the input has no replication URL or sequence
 ///   and `options` supplies none, if `options.server` names a different
-///   stream than the header without a `start_sequence`, if the server's
-///   state is inconsistent, or as for [`apply_to_pbf`].
-/// - [`ReplError::Http`] or [`ReplError::TooLarge`] from the
-///   [`ReplicationClient`].
+///   stream than the header without a `start_sequence`, or if the server's
+///   state is inconsistent.
+/// - [`ReplError::UnsupportedInput`] as for [`apply_to_pbf`].
+/// - [`ReplError::InsecureUrl`], [`ReplError::Http`] or
+///   [`ReplError::TooLarge`] from the [`ReplicationClient`].
 /// - [`ReplError::Osc`] for an invalid diff (the message names its
 ///   sequence).
 /// - [`ReplError::Io`] or [`ReplError::Osm`] reading the input or writing
