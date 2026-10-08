@@ -1,3 +1,5 @@
+//! Typed resource storage.
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
@@ -10,6 +12,7 @@ pub struct Resources {
 }
 
 impl Resources {
+    /// An empty container.
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),

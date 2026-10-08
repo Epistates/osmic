@@ -6,6 +6,8 @@
 //! up — also when a step fails. See [`Plugin`] for the lifecycle and
 //! [`App`] for an example.
 
+#![warn(missing_docs)]
+
 pub mod app;
 mod error;
 pub mod event;

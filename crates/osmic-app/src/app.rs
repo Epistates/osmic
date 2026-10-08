@@ -1,3 +1,5 @@
+//! The [`App`] container and its build, run and cleanup lifecycle.
+
 use std::any::TypeId;
 use std::sync::Arc;
 
@@ -57,6 +59,7 @@ pub struct App {
 }
 
 impl App {
+    /// An empty app: no plugins, resources, subscribers or runner.
     pub fn new() -> Self {
         Self {
             resources: Resources::new(),
@@ -121,10 +124,13 @@ impl App {
         self
     }
 
+    /// The resource of type `R`, if present. Use
+    /// [`resource`](Self::resource) when its absence is an error.
     pub fn get_resource<R: Send + Sync + 'static>(&self) -> Option<&R> {
         self.resources.get::<R>()
     }
 
+    /// Mutable form of [`get_resource`](Self::get_resource).
     pub fn get_resource_mut<R: Send + Sync + 'static>(&mut self) -> Option<&mut R> {
         self.resources.get_mut::<R>()
     }
@@ -147,10 +153,12 @@ impl App {
         self.resources.get_mut::<R>().ok_or_else(missing::<R>)
     }
 
+    /// Take the resource of type `R` out of the app, if present.
     pub fn remove_resource<R: Send + Sync + 'static>(&mut self) -> Option<R> {
         self.resources.remove::<R>()
     }
 
+    /// Whether a resource of type `R` is present.
     pub fn contains_resource<R: Send + Sync + 'static>(&self) -> bool {
         self.resources.contains::<R>()
     }

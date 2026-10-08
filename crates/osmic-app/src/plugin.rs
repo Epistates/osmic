@@ -1,3 +1,5 @@
+//! The [`Plugin`] trait and plugin groups.
+
 use std::any::TypeId;
 use std::sync::Arc;
 
@@ -68,6 +70,7 @@ impl Registered {
 
 /// A set of plugins added together with [`App::add_plugins`].
 pub trait PluginGroup {
+    /// The group's plugins, in the order they should be registered.
     fn build(self) -> PluginGroupBuilder;
 }
 
@@ -78,6 +81,7 @@ pub struct PluginGroupBuilder {
 }
 
 impl PluginGroupBuilder {
+    /// An empty group.
     pub fn new() -> Self {
         Self::default()
     }

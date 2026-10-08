@@ -29,17 +29,26 @@ pub enum AppError {
     /// A plugin's `build` or `finish` hook failed.
     #[error("plugin {plugin} failed during {phase}: {source}")]
     Plugin {
+        /// The plugin's [`Plugin::name`](crate::Plugin::name).
         plugin: String,
+        /// The hook that failed.
         phase: Phase,
+        /// The error the hook returned.
         #[source]
         source: BoxError,
     },
     /// A resource that a plugin depends on was never inserted.
     #[error("missing resource {resource}; add the plugin that provides it")]
-    MissingResource { resource: &'static str },
+    MissingResource {
+        /// Type name of the resource ([`std::any::type_name`]).
+        resource: &'static str,
+    },
     /// A plugin was added after the build phase, so it would never run.
     #[error("plugin {plugin} was added after the app was built")]
-    AddedAfterBuild { plugin: String },
+    AddedAfterBuild {
+        /// The plugin's [`Plugin::name`](crate::Plugin::name).
+        plugin: String,
+    },
     /// The app was used after [`App::cleanup`](crate::App::cleanup).
     #[error("the app has already been cleaned up")]
     CleanedUp,
@@ -47,7 +56,10 @@ pub enum AppError {
     /// was called from a plugin's `build` or `finish` hook, while the app
     /// was still being built.
     #[error("App::{method} was called from a plugin's build or finish hook")]
-    Reentrant { method: &'static str },
+    Reentrant {
+        /// The method called: `"run"` or `"cleanup"`.
+        method: &'static str,
+    },
     /// The runner failed.
     #[error("runner failed: {0}")]
     Runner(#[source] BoxError),

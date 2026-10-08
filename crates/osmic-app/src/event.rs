@@ -1,3 +1,5 @@
+//! Typed, synchronous events between plugins.
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
@@ -7,11 +9,16 @@ pub trait Event: Send + Sync + 'static {}
 type HandlerFn = Box<dyn Fn(&dyn Any) + Send + Sync>;
 
 /// Type-safe event bus for decoupled communication between plugins.
+///
+/// Delivery is synchronous: [`emit`](Self::emit) calls each handler for the
+/// event's type on the calling thread, in subscription order, before
+/// returning. Handlers cannot be removed.
 pub struct EventBus {
     handlers: HashMap<TypeId, Vec<HandlerFn>>,
 }
 
 impl EventBus {
+    /// A bus with no subscribers.
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
