@@ -64,10 +64,6 @@ impl<'a> Reader<'a> {
 
     /// Read exactly `n` raw bytes.
     pub fn bytes(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
-        self.take(n)
-    }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
         let end = self
             .pos
             .checked_add(n)
@@ -89,7 +85,7 @@ impl<'a> Reader<'a> {
         let value = match (key & 7) as u8 {
             0 => Field::Varint(self.varint()?),
             1 => {
-                let b = self.take(8)?;
+                let b = self.bytes(8)?;
                 Field::Fixed64(u64::from_le_bytes(
                     b.try_into().map_err(|_| DecodeError::Truncated(at))?,
                 ))
@@ -97,10 +93,10 @@ impl<'a> Reader<'a> {
             2 => {
                 let len =
                     usize::try_from(self.varint()?).map_err(|_| DecodeError::Truncated(at))?;
-                Field::Bytes(self.take(len)?)
+                Field::Bytes(self.bytes(len)?)
             }
             5 => {
-                let b = self.take(4)?;
+                let b = self.bytes(4)?;
                 Field::Fixed32(u32::from_le_bytes(
                     b.try_into().map_err(|_| DecodeError::Truncated(at))?,
                 ))
@@ -148,11 +144,6 @@ pub fn put_bytes_field(buf: &mut Vec<u8>, field: u32, bytes: &[u8]) {
     put_key(buf, field, 2);
     put_varint(buf, bytes.len() as u64);
     buf.extend_from_slice(bytes);
-}
-
-pub fn put_fixed64_field(buf: &mut Vec<u8>, field: u32, v: u64) {
-    put_key(buf, field, 1);
-    buf.extend_from_slice(&v.to_le_bytes());
 }
 
 /// Write a length-delimited field whose body is produced by `body`.

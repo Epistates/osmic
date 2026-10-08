@@ -3,8 +3,8 @@
 //! [`TileGenerator`] implements [`FeatureSink`], so the PBF pipeline can
 //! stream features straight into it: every feature is rendered for every
 //! zoom and tile as it arrives (in parallel, on the PBF worker threads) and
-//! the pieces go to an [`ExternalSorter`] keyed by Hilbert tile id. Memory is
-//! bounded by the sort budget, not by the number of features.
+//! the pieces go to a parallel external sort keyed by Hilbert tile id.
+//! Memory is bounded by the sort budget, not by the number of features.
 //!
 //! [`TileGenerator::finish`] then reads the sorted pieces back in
 //! key-range partitions: the rayon pool groups, encodes and compresses the
@@ -28,10 +28,10 @@ use osmic_osm::{Feature, FeatureSink, Layer, TagStore};
 use crate::assemble::{AssembledTile, TileCompression, assemble, secondary_key};
 use crate::encode::TileEncoder;
 use crate::error::TileError;
-use crate::model::{TileFeature, encode_record_attributes, encode_record_geometry};
 use crate::pmtiles::{
     ArchiveInfo, ArchiveOptions, LayerStats, PmTilesArchive, metadata_json, tile_coord, tile_id,
 };
+use crate::record;
 use crate::render::{RenderConfig, Renderer};
 use crate::sorter::{ExternalSorter, SortedRuns};
 
@@ -224,7 +224,7 @@ fn encode_partition(
     let mut tiles = Vec::new();
     for (key, records) in part.groups() {
         let features = records
-            .map(|(secondary, payload)| Ok((secondary, TileFeature::decode(payload)?)))
+            .map(|(secondary, payload)| Ok((secondary, record::decode(payload)?)))
             .collect::<Result<Vec<_>, TileError>>()?;
         let tile = assemble(
             tile_coord(key)?,
@@ -398,11 +398,11 @@ impl TileGenerator {
                     first_piece = false;
                     layer.record_fields(piece.attributes.iter().map(|(k, _)| k));
                     attributes.clear();
-                    encode_record_attributes(piece.attributes, &mut attributes);
+                    record::encode_attributes(piece.attributes, &mut attributes);
                 }
                 let secondary = secondary_key(piece.layer, piece.importance, piece.size_class);
                 let pushed = writer.push_with(key, secondary, |buf| {
-                    encode_record_geometry(piece.id, piece.geom_type, &piece.parts, buf);
+                    record::encode_geometry(piece.id, piece.geom_type, &piece.parts, buf);
                     buf.extend_from_slice(&attributes);
                 });
                 if let Err(e) = pushed {

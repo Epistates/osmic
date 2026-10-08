@@ -7,7 +7,7 @@
 //!   decoder that is safe on untrusted input.
 //! - [`assemble`]: size-budgeted tile assembly and compression.
 //! - [`pipeline`] (`native`): [`TileGenerator`], a streaming,
-//!   memory-bounded generator built on an external sort ([`sorter`]).
+//!   memory-bounded generator built on a parallel external sort.
 //! - [`pmtiles`] (`native`): clustered, atomically written PMTiles archives.
 
 pub mod assemble;
@@ -22,12 +22,14 @@ pub mod mvt_decode;
 pub mod pipeline;
 #[cfg(feature = "native")]
 pub mod pmtiles;
-pub mod proto;
+mod proto;
 #[cfg(feature = "reader")]
 pub mod reader;
+#[cfg(feature = "native")]
+mod record;
 pub mod render;
 #[cfg(feature = "native")]
-pub mod sorter;
+mod sorter;
 
 pub use assemble::TileCompression;
 pub use encode::{MvtEncoder, TileEncoder, TileFormat};

@@ -31,7 +31,8 @@ const HEADER: usize = 20;
 /// Spill files are indexed at the first key run after every this many bytes.
 const INDEX_STRIDE: u64 = 16 << 10;
 
-/// A sorted record.
+/// A sorted record (owned; for tests).
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub key: u64,
@@ -134,6 +135,7 @@ impl ExternalSorter {
     }
 
     /// Directory holding temporary files (removed on drop).
+    #[cfg(test)]
     pub fn temp_dir(&self) -> &Path {
         self.dir.path()
     }
@@ -305,6 +307,7 @@ impl SortWriter<'_> {
     }
 
     /// Add a record.
+    #[cfg(test)]
     pub fn push(&mut self, key: u64, secondary: u64, payload: &[u8]) -> io::Result<()> {
         self.push_with(key, secondary, |buf| buf.extend_from_slice(payload))
     }
@@ -491,6 +494,7 @@ impl SortedRuns {
     }
 
     /// Every record in order, reading one partition at a time.
+    #[cfg(test)]
     pub fn records(&self) -> impl Iterator<Item = io::Result<Record>> + '_ {
         let mut failed = false;
         (0..self.partition_count())
@@ -518,10 +522,13 @@ pub struct Partition<'a> {
 
 impl Partition<'_> {
     /// Number of records.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the partition holds no records.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -540,6 +547,7 @@ impl Partition<'_> {
     }
 
     /// Owned copies of the records, in order.
+    #[cfg(test)]
     pub fn records(&self) -> impl Iterator<Item = Record> + '_ {
         self.entries.iter().map(|e| Record {
             key: e.key,
