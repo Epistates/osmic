@@ -8,12 +8,16 @@ use serde::{Deserialize, Serialize};
 use osmic_core::OsmType;
 
 /// A named business entity extracted from OSM data with contact metadata.
+///
+/// Built with [`Entity::new`]; serializes with `osm_type` as `"node"`,
+/// `"way"` or `"relation"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Entity {
     /// Entity name (from `name` tag)
     pub name: String,
-    /// OSM element type: "node", "way", or "relation"
-    pub osm_type: String,
+    /// OSM element type
+    pub osm_type: OsmType,
     /// OSM element ID
     pub osm_id: i64,
     /// Latitude (WGS84), `None` if no location could be determined
@@ -62,7 +66,7 @@ impl Entity {
     ) -> Self {
         Self {
             name: get(tags, "name").to_string(),
-            osm_type: osm_type.as_str().to_string(),
+            osm_type,
             osm_id,
             lat: location.map(|c| c.y),
             lon: location.map(|c| c.x),
@@ -75,18 +79,9 @@ impl Entity {
         }
     }
 
-    /// Sort rank of the element type (node, way, relation).
-    pub fn osm_type_order(&self) -> u8 {
-        match self.osm_type.as_str() {
-            "node" => 0,
-            "way" => 1,
-            _ => 2,
-        }
-    }
-
-    /// Canonical output order: element type, then id.
-    pub fn sort_key(&self) -> (u8, i64) {
-        (self.osm_type_order(), self.osm_id)
+    /// Canonical output order: element type (node, way, relation), then id.
+    pub fn sort_key(&self) -> (OsmType, i64) {
+        (self.osm_type, self.osm_id)
     }
 
     /// Build a formatted address from OSM addr:* tags.
@@ -309,6 +304,7 @@ mod tests {
         assert_eq!(e.operator, "Midas Inc");
         let v: serde_json::Value = serde_json::to_value(&e).expect("serialize");
         assert_eq!(v["addr_city"], "Phoenix");
+        assert_eq!(v["osm_type"], "way", "serialized as before the typed field");
         assert!(v.get("address").is_some());
     }
 }

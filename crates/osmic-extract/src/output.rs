@@ -16,18 +16,23 @@ use crate::entity::Entity;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OutputError {
+    /// The destination exists and `overwrite` is off.
     #[error("{} already exists (refusing to overwrite)", .0.display())]
     Exists(std::path::PathBuf),
+    /// Creating, writing or renaming the file failed.
     #[error("I/O error writing output")]
     Io(#[from] io::Error),
+    /// CSV encoding failed.
     #[error("CSV encoding failed")]
     Csv(#[from] csv::Error),
+    /// JSON encoding failed.
     #[error("JSON encoding failed")]
     Json(#[from] serde_json::Error),
 }
 
-/// Output options.
+/// Output options. Start from [`Default`] and set the fields you need.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct OutputOptions {
     /// Replace an existing destination file.
     pub overwrite: bool,
@@ -91,7 +96,7 @@ pub fn write_csv(
             let lon = e.lon.map(|v| format!("{v:.7}")).unwrap_or_default();
             csv.write_record([
                 sanitize(&e.name, s).as_ref(),
-                &e.osm_type,
+                e.osm_type.as_str(),
                 &e.osm_id.to_string(),
                 &lat,
                 &lon,
@@ -151,7 +156,7 @@ fn geojson_feature(e: &Entity) -> serde_json::Value {
     };
     let mut props = serde_json::Map::new();
     props.insert("name".into(), e.name.clone().into());
-    props.insert("osm_type".into(), e.osm_type.clone().into());
+    props.insert("osm_type".into(), e.osm_type.as_str().into());
     props.insert("osm_id".into(), e.osm_id.into());
     for (k, v) in [
         ("address", &e.address),
@@ -218,6 +223,7 @@ mod tests {
         );
         assert_eq!(&rows[1][0], "Quote \"me\", please");
         assert_eq!(&rows[1][3], "", "no location → empty cell");
+        assert_eq!((&rows[0][1], &rows[1][1]), ("node", "relation"));
         let raw = write_csv(
             &sample(),
             &dir.path().join("raw.csv"),

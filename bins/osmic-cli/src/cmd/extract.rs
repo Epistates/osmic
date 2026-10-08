@@ -95,22 +95,20 @@ pub fn run(args: ExtractArgs) -> anyhow::Result<()> {
         Some(e) => TagFilter::all(vec![include, TagFilter::negate(e)]),
         None => include,
     };
-    let extractor = Extractor::new(ExtractConfig {
-        filter,
-        require_name: args.require_name,
-        bbox: args.bbox,
-        node_storage: args.node_store.clone(),
-    });
-    let result = extractor
+    let mut config = ExtractConfig::default();
+    config.filter = filter;
+    config.require_name = args.require_name;
+    config.bbox = args.bbox;
+    config.node_storage = args.node_store.clone();
+    let result = Extractor::new(config)
         .extract(&args.input)
         .with_context(|| format!("processing {}", args.input.display()))?;
     let matched = result.entities.len();
     let entities = deduplicate(result.entities, args.dedup_radius);
 
-    let options = OutputOptions {
-        overwrite: args.force,
-        sanitize_csv_formulas: !args.no_csv_sanitize,
-    };
+    let mut options = OutputOptions::default();
+    options.overwrite = args.force;
+    options.sanitize_csv_formulas = !args.no_csv_sanitize;
     match format {
         OutputFormat::Csv => write_csv(&entities, &args.output, options),
         OutputFormat::Json => write_json(&entities, &args.output, options),

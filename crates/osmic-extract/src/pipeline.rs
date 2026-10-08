@@ -32,15 +32,18 @@ use osmic_osm::{NodeStorage, OsmError, RelationRecord, TagFilter, scan_nodes};
 
 use crate::entity::Entity;
 
-/// Extraction settings.
+/// Extraction settings. Start from [`Default`] and set the fields you need.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExtractConfig {
-    /// Entities must match this filter.
+    /// Entities must match this filter (default: everything).
     pub filter: TagFilter,
-    /// Only extract entities with a non-empty `name` tag.
+    /// Only extract entities with a non-empty `name` tag (default: true).
     pub require_name: bool,
-    /// Keep only entities located inside this box.
+    /// Keep only entities located inside this box (default: no limit).
     pub bbox: Option<BBox>,
+    /// Where node locations are kept while ways are located (default:
+    /// sparse in-memory index). Unused for files with locations on ways.
     pub node_storage: NodeStorage,
 }
 
@@ -57,23 +60,33 @@ impl Default for ExtractConfig {
 
 /// Result of an extraction.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ExtractResult {
     /// Matched entities, sorted by element type and id.
     pub entities: Vec<Entity>,
+    /// Counts and timings.
     pub stats: ExtractStats,
 }
 
 /// Statistics from an extraction.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ExtractStats {
+    /// Nodes in the input.
     pub node_count: u64,
+    /// Ways in the input.
     pub way_count: u64,
+    /// Relations in the input.
     pub relation_count: u64,
+    /// Entities extracted (before deduplication).
     pub matched_count: u64,
     /// Matched entities without a location (no member in the input).
     pub unlocated: u64,
+    /// Time spent indexing node locations and collecting relations.
     pub pass1_duration: Duration,
+    /// Time spent matching nodes and ways and locating relations.
     pub pass2_duration: Duration,
+    /// Wall time of the whole extraction.
     pub total_duration: Duration,
 }
 
@@ -143,6 +156,7 @@ struct Pass2Block {
 }
 
 impl Extractor {
+    /// An extractor with the given settings.
     pub fn new(config: ExtractConfig) -> Self {
         Self { config }
     }
