@@ -156,7 +156,12 @@ pub fn run(args: TilesArgs) -> anyhow::Result<()> {
     eprintln!("Layers:  {layers}");
 
     let (generator, features) = if is_geojson(&args.input) {
-        let data = osmic_osm::geojson::load_geojson(&args.input, layers)?;
+        let retention = if args.all_tags {
+            TagRetention::All
+        } else {
+            TagRetention::Curated
+        };
+        let data = osmic_osm::geojson::load_geojson_with(&args.input, layers, &retention)?;
         let kept: Vec<_> = data
             .features
             .into_iter()

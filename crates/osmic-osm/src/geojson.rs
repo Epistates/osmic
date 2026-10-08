@@ -1,9 +1,10 @@
 //! GeoJSON input.
 //!
-//! `FeatureCollection` members are deserialised one at a time (streaming),
-//! so memory is bounded by the largest single feature, not the file.
-//! Properties become tags and are classified like OSM tags; features that
-//! match no enabled layer are counted and skipped.
+//! The document is parsed as a stream — the raw JSON is never held in
+//! memory — and the resulting features are collected (like
+//! [`PbfProcessor::process`](crate::PbfProcessor::process)). Properties
+//! become tags and are classified like OSM tags; features that match no
+//! enabled layer are counted and skipped.
 
 use std::fmt;
 use std::fs::File;
@@ -268,13 +269,22 @@ impl<'de> Visitor<'de> for TopLevel<'_, '_> {
 
 /// Load a GeoJSON file, classifying properties like OSM tags into `layers`.
 pub fn load_geojson(path: &Path, layers: LayerSet) -> Result<ProcessedData, OsmError> {
+    load_geojson_with(path, layers, &TagRetention::All)
+}
+
+/// [`load_geojson`] keeping only the properties `retention` selects.
+pub fn load_geojson_with(
+    path: &Path,
+    layers: LayerSet,
+    retention: &TagRetention,
+) -> Result<ProcessedData, OsmError> {
     let start = Instant::now();
     info!(path = %path.display(), "Loading GeoJSON");
     let tag_store = Arc::new(TagStore::new());
     let mut loader = Loader {
         tag_store: &tag_store,
         layers,
-        retention: TagRetention::All,
+        retention: retention.clone(),
         features: Vec::new(),
         bbox: BBox::empty(),
         next_id: 0,
