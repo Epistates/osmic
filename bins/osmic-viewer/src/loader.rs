@@ -219,6 +219,10 @@ pub struct LoadedTile {
 #[derive(Default)]
 struct Queue {
     pending: VecDeque<TileCoord>,
+    /// Tiles being loaded, or loaded but not yet taken by
+    /// [`TileLoader::try_recv`]. Kept until the receiver has the result, so
+    /// a request between the worker sending it and the receiver draining
+    /// it cannot queue the tile again.
     in_flight: HashSet<TileCoord>,
     shutdown: bool,
 }
@@ -291,9 +295,18 @@ impl TileLoader {
         self.shared.wake.notify_all();
     }
 
-    /// A finished tile, if any.
+    /// A finished tile, if any. From here on the caller owns it: it is no
+    /// longer in flight, so a later [`TileLoader::request`] may load it
+    /// again.
     pub fn try_recv(&self) -> Option<LoadedTile> {
-        self.results.try_recv().ok()
+        let tile = self.results.try_recv().ok()?;
+        self.shared
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .in_flight
+            .remove(&tile.coord);
+        Some(tile)
     }
 }
 
@@ -339,13 +352,8 @@ fn worker(
         if let Err(e) = &result {
             warn!(%coord, error = %e, "tile failed to load");
         }
+        // The tile stays in flight until `try_recv` takes it.
         let _ = tx.send(LoadedTile { coord, result });
-        shared
-            .queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .in_flight
-            .remove(&coord);
         notify();
     }
 }
@@ -491,6 +499,40 @@ mod tests {
                 .map(|c| c.x)
                 .collect::<Vec<_>>(),
             vec![1, 4, 5]
+        );
+    }
+
+    #[test]
+    fn a_finished_tile_not_yet_received_is_not_loaded_again() {
+        // The render loop drains results, then requests what its cache
+        // lacks. A tile finishing between the two must not be queued
+        // again just because the drain came too early.
+        let source = FakeSource::new(true);
+        let notified = Arc::new(AtomicUsize::new(0));
+        let n = Arc::clone(&notified);
+        let loader = TileLoader::spawn(source.clone(), style(), 1, move || {
+            n.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        loader.request(&[t(1)]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while notified.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Sent and announced, not yet received: still in flight.
+        loader.request(&[t(1)]);
+        {
+            let q = loader.shared.queue.lock().unwrap();
+            assert!(q.pending.is_empty() && q.in_flight.contains(&t(1)));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(wait_for(&loader, 1)[0].coord, t(1));
+        assert!(loader.try_recv().is_none(), "loaded once");
+        assert_eq!(source.fetched.lock().unwrap().len(), 1);
+        assert!(
+            loader.shared.queue.lock().unwrap().in_flight.is_empty(),
+            "received tiles are no longer in flight"
         );
     }
 
