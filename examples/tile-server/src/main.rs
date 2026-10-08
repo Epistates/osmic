@@ -23,7 +23,7 @@ struct Args {
     #[arg(long, default_value = "3600")]
     cache_max_age: u32,
 
-    /// Externally visible base URL (e.g. https://tiles.example.com)
+    /// Externally visible base URL (e.g. `https://tiles.example.com`)
     #[arg(long)]
     public_url: Option<String>,
 
