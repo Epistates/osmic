@@ -43,7 +43,7 @@ pub use default::{
     default_style_json, default_style_with,
 };
 pub use error::{EvalError, StyleError};
-pub use expr::{CompareOp, Expr, Interpolation, MatchBranch};
+pub use expr::{CompareOp, Expr, Interpolation, MAX_EXPRESSION_DEPTH, MatchBranch};
 pub use model::{
     BackgroundLayer, CircleLayer, CircleStyle, FillLayer, FillStyle, Layer, LayerKind, LineLayer,
     LineStyle, Style, SymbolLayer, SymbolStyle, VectorSource,

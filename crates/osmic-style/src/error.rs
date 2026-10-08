@@ -64,17 +64,54 @@ impl StyleError {
     }
 }
 
-/// An expression failed at evaluation time (type mismatch, missing operand).
+/// An expression failed at evaluation time.
 ///
 /// Renderers treat a failed filter as "feature not matched" and a failed
 /// paint/layout property as "use the property's default", mirroring
 /// MapLibre.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct EvalError(pub String);
-
-impl EvalError {
-    pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
+#[non_exhaustive]
+pub enum EvalError {
+    /// An operand had the wrong type.
+    #[error("{op}: expected {expected}, found {found}")]
+    Type {
+        /// The operator or conversion that rejected the operand.
+        op: &'static str,
+        /// The type it accepts.
+        expected: &'static str,
+        /// The type it was given.
+        found: &'static str,
+    },
+    /// An ordering comparison between values that have no order.
+    #[error("`{op}` cannot compare {left} with {right}")]
+    Compare {
+        /// The comparison operator.
+        op: &'static str,
+        /// Type of the left operand.
+        left: &'static str,
+        /// Type of the right operand.
+        right: &'static str,
+    },
+    /// A string that is not a CSS color where a color was required.
+    #[error("invalid color: {0}")]
+    Color(String),
+    /// `interpolate`/`step` was given a non-finite (NaN or infinite) input.
+    #[error("{op}: input is not a finite number")]
+    NonFinite {
+        /// The operator.
+        op: &'static str,
+    },
+    /// An `interpolate` or `step` without stops (only constructible
+    /// programmatically; the parser rejects it).
+    #[error("{op} has no stops")]
+    NoStops {
+        /// The operator.
+        op: &'static str,
+    },
+    /// `to-number` found no operand convertible to a number.
+    #[error("to-number: cannot convert {found} to a number")]
+    NotANumber {
+        /// Type of the last operand tried.
+        found: &'static str,
+    },
 }

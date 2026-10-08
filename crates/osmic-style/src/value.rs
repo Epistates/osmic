@@ -35,13 +35,22 @@ impl Value {
         }
     }
 
-    pub(crate) fn from_json(json: &Json) -> Result<Self, String> {
+    /// Read a JSON literal found `depth` levels deep in an expression;
+    /// nested arrays count towards [`crate::MAX_EXPRESSION_DEPTH`].
+    pub(crate) fn from_json(json: &Json, depth: usize) -> Result<Self, String> {
+        if depth > crate::expr::MAX_EXPRESSION_DEPTH {
+            return Err(crate::expr::depth_message());
+        }
         Ok(match json {
             Json::Null => Self::Null,
             Json::Bool(b) => Self::Bool(*b),
             Json::Number(n) => Self::Number(n.as_f64().ok_or("number out of range")?),
             Json::String(s) => Self::String(s.clone()),
-            Json::Array(a) => Self::Array(a.iter().map(Self::from_json).collect::<Result<_, _>>()?),
+            Json::Array(a) => Self::Array(
+                a.iter()
+                    .map(|v| Self::from_json(v, depth + 1))
+                    .collect::<Result<_, _>>()?,
+            ),
             Json::Object(_) => return Err("object literals are not supported".into()),
         })
     }
@@ -63,31 +72,22 @@ impl Value {
     pub fn to_color(&self) -> Result<Color, EvalError> {
         match self {
             Self::Color(c) => Ok(*c),
-            Self::String(s) => Color::parse(s).map_err(|e| EvalError::new(e.to_string())),
-            other => Err(EvalError::new(format!(
-                "expected color, found {}",
-                other.type_name()
-            ))),
+            Self::String(s) => Color::parse(s).map_err(|e| EvalError::Color(e.to_string())),
+            other => Err(type_error("color", "color", other)),
         }
     }
 
-    pub(crate) fn expect_number(&self) -> Result<f64, EvalError> {
+    pub(crate) fn expect_number(&self, op: &'static str) -> Result<f64, EvalError> {
         match self {
             Self::Number(n) => Ok(*n),
-            other => Err(EvalError::new(format!(
-                "expected number, found {}",
-                other.type_name()
-            ))),
+            other => Err(type_error(op, "number", other)),
         }
     }
 
-    pub(crate) fn expect_bool(&self) -> Result<bool, EvalError> {
+    pub(crate) fn expect_bool(&self, op: &'static str) -> Result<bool, EvalError> {
         match self {
             Self::Bool(b) => Ok(*b),
-            other => Err(EvalError::new(format!(
-                "expected boolean, found {}",
-                other.type_name()
-            ))),
+            other => Err(type_error(op, "boolean", other)),
         }
     }
 
@@ -111,6 +111,14 @@ impl Value {
             Self::String(s) => format!("{s:?}"),
             other => other.stringify(),
         }
+    }
+}
+
+pub(crate) fn type_error(op: &'static str, expected: &'static str, found: &Value) -> EvalError {
+    EvalError::Type {
+        op,
+        expected,
+        found: found.type_name(),
     }
 }
 

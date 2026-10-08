@@ -103,9 +103,11 @@ impl PropertyValue for f64 {
         number_json(*self)
     }
 
+    /// Non-finite results (for example from interpolating between infinite
+    /// outputs) are rejected, so the property falls back to its default.
     fn from_value(value: &Value) -> Option<Self> {
         match value {
-            Value::Number(n) => Some(*n),
+            Value::Number(n) if n.is_finite() => Some(*n),
             _ => None,
         }
     }
@@ -201,7 +203,7 @@ impl PropertyValue for Vec<f64> {
             Value::Array(items) => items
                 .iter()
                 .map(|v| match v {
-                    Value::Number(n) => Some(*n),
+                    Value::Number(n) if n.is_finite() => Some(*n),
                     _ => None,
                 })
                 .collect(),

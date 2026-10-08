@@ -14,7 +14,7 @@ use osmic_core::Color;
 use serde_json::Value as Json;
 
 use crate::error::{EvalError, StyleError};
-use crate::value::{EvalContext, Value, number_json};
+use crate::value::{EvalContext, Value, number_json, type_error};
 
 /// A comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +104,26 @@ pub enum Expr {
     ToNumber(Vec<Expr>),
 }
 
-/// Operators this crate evaluates.
+/// Deepest nesting of expression arrays (including nested literal arrays)
+/// the parser accepts. Deeper documents are rejected with
+/// [`StyleError::Invalid`] so that parsing, evaluation and dropping an
+/// expression can never exhaust the stack.
+pub const MAX_EXPRESSION_DEPTH: usize = 256;
+
+pub(crate) fn depth_message() -> String {
+    format!("expression nested deeper than {MAX_EXPRESSION_DEPTH} levels")
+}
+
+fn check_depth(depth: usize, path: &str) -> Result<(), StyleError> {
+    if depth > MAX_EXPRESSION_DEPTH {
+        Err(StyleError::invalid(path, depth_message()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Operators [`Expr::parse`] accepts. (`none` and the legacy forms of the
+/// others are filter-only; see [`Expr::parse_filter`].)
 const SUPPORTED_OPS: &[&str] = &[
     "literal",
     "get",
@@ -119,7 +138,6 @@ const SUPPORTED_OPS: &[&str] = &[
     "!",
     "all",
     "any",
-    "none",
     "in",
     "!in",
     "match",
@@ -284,127 +302,146 @@ impl Expr {
     }
 
     /// Parse an expression, reporting errors under `path`.
+    ///
+    /// Expressions nested deeper than [`MAX_EXPRESSION_DEPTH`] are
+    /// rejected.
     pub fn parse_at(json: &Json, path: &str) -> Result<Self, StyleError> {
-        match json {
-            Json::Array(items) => parse_call(items, path),
-            Json::Object(_) => Err(StyleError::unsupported(
-                path,
-                "expression",
-                "object literal",
-            )),
-            scalar => Value::from_json(scalar)
-                .map(Self::Literal)
-                .map_err(|m| StyleError::invalid(path, m)),
-        }
+        parse_expr(json, path, 0)
     }
 
     /// Parse a layer filter: expression syntax or the legacy syntax.
     pub fn parse_filter(json: &Json, path: &str) -> Result<Self, StyleError> {
-        let Json::Array(items) = json else {
-            return Self::parse_at(json, path);
-        };
-        let Some(Json::String(op)) = items.first() else {
-            return Self::parse_at(json, path);
-        };
-        let args = &items[1..];
-        let legacy_key = |i: usize| -> Result<Self, StyleError> {
-            let p = child_path(path, i + 1);
-            match args.get(i) {
-                Some(Json::String(k)) if k.starts_with('$') => {
-                    Err(StyleError::unsupported(&p, "legacy filter key", k))
-                }
-                Some(Json::String(k)) => Ok(Self::get(k)),
-                _ => Err(StyleError::invalid(&p, "expected a property name")),
-            }
-        };
-        match op.as_str() {
-            "all" | "any" => {
-                let children = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| Self::parse_filter(a, &child_path(path, i + 1)))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(if op == "all" {
-                    Self::All(children)
-                } else {
-                    Self::Any(children)
-                })
-            }
-            "none" => {
-                let children = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| Self::parse_filter(a, &child_path(path, i + 1)))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Self::Not(Box::new(Self::Any(children))))
-            }
-            "has" | "!has" if matches!(args, [Json::String(_)]) => {
-                let key = match legacy_key(0)? {
-                    Self::Get(k) => *k,
-                    _ => unreachable!("legacy_key returns Get"),
-                };
-                let has = Self::Has(Box::new(key));
-                Ok(if op == "has" {
-                    has
-                } else {
-                    Self::Not(Box::new(has))
-                })
-            }
-            "in" | "!in" => {
-                // MapLibre's disambiguation: a string key followed by a
-                // non-array second operand is the legacy form.
-                let is_expression = op == "in"
-                    && args.len() >= 2
-                    && (!matches!(args[0], Json::String(_)) || matches!(args[1], Json::Array(_)));
-                if is_expression {
-                    return Self::parse_at(json, path);
-                }
-                let key = legacy_key(0)?;
-                let labels = args[1..]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| legacy_value(v, &child_path(path, i + 2)))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let test = if labels.is_empty() {
-                    Self::Literal(Value::Bool(false))
-                } else {
-                    Self::Match {
-                        input: Box::new(key),
-                        branches: vec![MatchBranch {
-                            labels,
-                            output: Self::Literal(Value::Bool(true)),
-                        }],
-                        fallback: Box::new(Self::Literal(Value::Bool(false))),
-                    }
-                };
-                Ok(if op == "in" {
-                    test
-                } else {
-                    Self::Not(Box::new(test))
-                })
-            }
-            name if CompareOp::from_name(name).is_some() => {
-                let cmp = CompareOp::from_name(name).expect("checked");
-                let is_expression = args.len() == 2
-                    && matches!(
-                        (&args[0], &args[1]),
-                        (Json::Array(_), _) | (_, Json::Array(_))
-                    );
-                if is_expression || args.len() != 2 {
-                    return Self::parse_at(json, path);
-                }
-                let key = legacy_key(0)?;
-                let value = legacy_value(&args[1], &child_path(path, 2))?;
-                Ok(Self::Compare(
-                    cmp,
-                    Box::new(key),
-                    Box::new(Self::Literal(value)),
-                ))
-            }
-            _ => Self::parse_at(json, path),
-        }
+        parse_filter_at(json, path, 0)
     }
+}
 
+fn parse_expr(json: &Json, path: &str, depth: usize) -> Result<Expr, StyleError> {
+    check_depth(depth, path)?;
+    match json {
+        Json::Array(items) => parse_call(items, path, depth),
+        Json::Object(_) => Err(StyleError::unsupported(
+            path,
+            "expression",
+            "object literal",
+        )),
+        scalar => Value::from_json(scalar, depth)
+            .map(Expr::Literal)
+            .map_err(|m| StyleError::invalid(path, m)),
+    }
+}
+
+fn parse_filter_at(json: &Json, path: &str, depth: usize) -> Result<Expr, StyleError> {
+    check_depth(depth, path)?;
+    let Json::Array(items) = json else {
+        return parse_expr(json, path, depth);
+    };
+    let Some(Json::String(op)) = items.first() else {
+        return parse_expr(json, path, depth);
+    };
+    let args = &items[1..];
+    let legacy_key = |i: usize| -> Result<String, StyleError> {
+        let p = child_path(path, i + 1);
+        match args.get(i) {
+            Some(Json::String(k)) if k.starts_with('$') => {
+                Err(StyleError::unsupported(&p, "legacy filter key", k))
+            }
+            Some(Json::String(k)) => Ok(k.clone()),
+            _ => Err(StyleError::invalid(&p, "expected a property name")),
+        }
+    };
+    let children = || {
+        args.iter()
+            .enumerate()
+            .map(|(i, a)| parse_filter_at(a, &child_path(path, i + 1), depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    match op.as_str() {
+        "all" => Ok(Expr::All(children()?)),
+        "any" => Ok(Expr::Any(children()?)),
+        "none" => Ok(Expr::Not(Box::new(Expr::Any(children()?)))),
+        "has" | "!has" if matches!(args, [Json::String(_)]) => {
+            let has = Expr::has(&legacy_key(0)?);
+            Ok(if op == "has" {
+                has
+            } else {
+                Expr::Not(Box::new(has))
+            })
+        }
+        "in" | "!in" => {
+            // MapLibre's disambiguation: a string key followed by a
+            // non-array second operand is the legacy form.
+            let is_expression = op == "in"
+                && args.len() >= 2
+                && (!matches!(args[0], Json::String(_)) || matches!(args[1], Json::Array(_)));
+            if is_expression {
+                return parse_expr(json, path, depth);
+            }
+            let key = legacy_key(0)?;
+            let mut labels: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
+            for (i, v) in args.iter().enumerate().skip(1) {
+                let v = legacy_value(v, &child_path(path, i + 1))?;
+                if !labels.contains(&v) {
+                    labels.push(v);
+                }
+            }
+            let test = legacy_membership(&key, labels);
+            Ok(if op == "in" {
+                test
+            } else {
+                Expr::Not(Box::new(test))
+            })
+        }
+        name if CompareOp::from_name(name).is_some() => {
+            let cmp = CompareOp::from_name(name).expect("checked");
+            let is_expression = args.len() == 2
+                && matches!(
+                    (&args[0], &args[1]),
+                    (Json::Array(_), _) | (_, Json::Array(_))
+                );
+            if is_expression || args.len() != 2 {
+                return parse_expr(json, path, depth);
+            }
+            let key = Expr::get(&legacy_key(0)?);
+            let value = legacy_value(&args[1], &child_path(path, 2))?;
+            Ok(Expr::Compare(
+                cmp,
+                Box::new(key),
+                Box::new(Expr::Literal(value)),
+            ))
+        }
+        _ => parse_expr(json, path, depth),
+    }
+}
+
+/// The expression for a legacy `["in", key, labels...]` filter (labels
+/// already deduplicated).
+///
+/// MapLibre's `match` only takes unique labels that are all strings or all
+/// numbers, so other label sets become `["in", ["get", key], ["literal",
+/// [...]]]`. Either form serialises to valid MapLibre JSON.
+fn legacy_membership(key: &str, labels: Vec<Value>) -> Expr {
+    let homogeneous = labels.iter().all(|l| matches!(l, Value::String(_)))
+        || labels.iter().all(|l| matches!(l, Value::Number(_)));
+    if labels.is_empty() {
+        Expr::Literal(Value::Bool(false))
+    } else if homogeneous {
+        Expr::Match {
+            input: Box::new(Expr::get(key)),
+            branches: vec![MatchBranch {
+                labels,
+                output: Expr::Literal(Value::Bool(true)),
+            }],
+            fallback: Box::new(Expr::Literal(Value::Bool(false))),
+        }
+    } else {
+        Expr::In(
+            Box::new(Expr::get(key)),
+            Box::new(Expr::Literal(Value::Array(labels))),
+        )
+    }
+}
+
+impl Expr {
     /// Serialise to MapLibre expression JSON.
     pub fn to_json(&self) -> Json {
         fn call(op: &str, args: impl IntoIterator<Item = Json>) -> Json {
@@ -499,11 +536,11 @@ impl Expr {
                     ctx.feature.is_some_and(|f| f.property(&key).is_some()),
                 ))
             }
-            Self::Not(x) => Ok(Value::Bool(!x.evaluate(ctx)?.expect_bool()?)),
+            Self::Not(x) => Ok(Value::Bool(!x.evaluate(ctx)?.expect_bool("!")?)),
             Self::Compare(op, a, b) => compare(*op, &a.evaluate(ctx)?, &b.evaluate(ctx)?),
             Self::All(xs) => {
                 for x in xs {
-                    if !x.evaluate(ctx)?.expect_bool()? {
+                    if !x.evaluate(ctx)?.expect_bool("all")? {
                         return Ok(Value::Bool(false));
                     }
                 }
@@ -511,7 +548,7 @@ impl Expr {
             }
             Self::Any(xs) => {
                 for x in xs {
-                    if x.evaluate(ctx)?.expect_bool()? {
+                    if x.evaluate(ctx)?.expect_bool("any")? {
                         return Ok(Value::Bool(true));
                     }
                 }
@@ -523,15 +560,9 @@ impl Expr {
                     Value::Array(items) => Ok(Value::Bool(items.contains(&needle))),
                     Value::String(h) => match needle {
                         Value::String(n) => Ok(Value::Bool(h.contains(&n))),
-                        other => Err(EvalError::new(format!(
-                            "`in` expected a string needle for a string haystack, found {}",
-                            other.type_name()
-                        ))),
+                        other => Err(type_error("in", "string", &other)),
                     },
-                    other => Err(EvalError::new(format!(
-                        "`in` expected an array or string haystack, found {}",
-                        other.type_name()
-                    ))),
+                    other => Err(type_error("in", "array or string", &other)),
                 }
             }
             Self::Match {
@@ -547,17 +578,19 @@ impl Expr {
             }
             Self::Case { branches, fallback } => {
                 for (cond, out) in branches {
-                    if cond.evaluate(ctx)?.expect_bool()? {
+                    if cond.evaluate(ctx)?.expect_bool("case")? {
                         return out.evaluate(ctx);
                     }
                 }
                 fallback.evaluate(ctx)
             }
+            // As in MapLibre, an operand that fails to evaluate fails the
+            // whole expression; only null results fall through.
             Self::Coalesce(xs) => {
                 for x in xs {
-                    match x.evaluate(ctx) {
-                        Ok(Value::Null) | Err(_) => continue,
-                        Ok(v) => return Ok(v),
+                    match x.evaluate(ctx)? {
+                        Value::Null => continue,
+                        v => return Ok(v),
                     }
                 }
                 Ok(Value::Null)
@@ -567,11 +600,11 @@ impl Expr {
                 input,
                 stops,
             } => {
-                let x = input.evaluate(ctx)?.expect_number()?;
+                let x = finite_input("interpolate", &input.evaluate(ctx)?)?;
                 interpolate(*interpolation, x, stops, ctx)
             }
             Self::Step { input, base, stops } => {
-                let x = input.evaluate(ctx)?.expect_number()?;
+                let x = finite_input("step", &input.evaluate(ctx)?)?;
                 match stops.iter().rev().find(|(stop, _)| *stop <= x) {
                     Some((_, out)) => out.evaluate(ctx),
                     None => base.evaluate(ctx),
@@ -579,27 +612,15 @@ impl Expr {
             }
             Self::ToString(x) => Ok(Value::String(x.evaluate(ctx)?.stringify())),
             Self::ToNumber(xs) => {
+                let mut found = "null";
                 for x in xs {
-                    let Ok(v) = x.evaluate(ctx) else { continue };
-                    let n = match v {
-                        Value::Number(n) => Some(n),
-                        Value::Null => Some(0.0),
-                        Value::Bool(b) => Some(f64::from(u8::from(b))),
-                        Value::String(s) => {
-                            let t = s.trim();
-                            t.parse::<f64>()
-                                .ok()
-                                .filter(|n| !t.is_empty() && n.is_finite())
-                        }
-                        _ => None,
-                    };
-                    if let Some(n) = n {
+                    let v = x.evaluate(ctx)?;
+                    if let Some(n) = to_number(&v) {
                         return Ok(Value::Number(n));
                     }
+                    found = v.type_name();
                 }
-                Err(EvalError::new(
-                    "to-number: no operand is convertible to a number",
-                ))
+                Err(EvalError::NotANumber { found })
             }
         }
     }
@@ -701,10 +722,37 @@ impl Expr {
 fn expect_string(v: &Value) -> Result<String, EvalError> {
     match v {
         Value::String(s) => Ok(s.clone()),
-        other => Err(EvalError::new(format!(
-            "expected string, found {}",
-            other.type_name()
-        ))),
+        other => Err(type_error("get", "string", other)),
+    }
+}
+
+/// The numeric input of `interpolate`/`step`, which must be finite.
+fn finite_input(op: &'static str, v: &Value) -> Result<f64, EvalError> {
+    let x = v.expect_number(op)?;
+    if x.is_finite() {
+        Ok(x)
+    } else {
+        Err(EvalError::NonFinite { op })
+    }
+}
+
+/// MapLibre `to-number` of one operand: null is 0, booleans are 0/1 and
+/// strings parse as decimal numbers after trimming (`""` is 0, like
+/// JavaScript's `Number("")`); `None` if not convertible.
+fn to_number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => Some(*n),
+        Value::Null => Some(0.0),
+        Value::Bool(b) => Some(f64::from(u8::from(*b))),
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Some(0.0)
+            } else {
+                t.parse::<f64>().ok().filter(|n| n.is_finite())
+            }
+        }
+        Value::Color(_) | Value::Array(_) => None,
     }
 }
 
@@ -719,12 +767,11 @@ fn compare(op: CompareOp, a: &Value, b: &Value) -> Result<Value, EvalError> {
                 (Value::Number(x), Value::Number(y)) => x.partial_cmp(y),
                 (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
                 _ => {
-                    return Err(EvalError::new(format!(
-                        "`{}` cannot compare {} with {}",
-                        op.name(),
-                        a.type_name(),
-                        b.type_name()
-                    )));
+                    return Err(EvalError::Compare {
+                        op: op.name(),
+                        left: a.type_name(),
+                        right: b.type_name(),
+                    });
                 }
             };
             Ok(Value::Bool(match (op, ord) {
@@ -747,40 +794,59 @@ fn interpolate(
 ) -> Result<Value, EvalError> {
     let (first, last) = match (stops.first(), stops.last()) {
         (Some(f), Some(l)) => (f, l),
-        _ => return Err(EvalError::new("interpolate has no stops")),
+        _ => return Err(EvalError::NoStops { op: "interpolate" }),
     };
+    if !x.is_finite() {
+        return Err(EvalError::NonFinite { op: "interpolate" });
+    }
     if x <= first.0 {
         return first.1.evaluate(ctx);
     }
     if x >= last.0 {
         return last.1.evaluate(ctx);
     }
-    let i = stops.partition_point(|(s, _)| *s <= x) - 1;
+    // `first.0 < x < last.0`, so at least one stop is `<= x` and one is
+    // `> x`; the saturation only guards against unsorted programmatic stops.
+    let i = stops
+        .partition_point(|(s, _)| *s <= x)
+        .saturating_sub(1)
+        .min(stops.len() - 2);
     let ((x0, lo), (x1, hi)) = (&stops[i], &stops[i + 1]);
-    let t = match interpolation {
-        Interpolation::Exponential(base) if (base - 1.0).abs() > f64::EPSILON => {
-            (base.powf(x - x0) - 1.0) / (base.powf(x1 - x0) - 1.0)
-        }
-        _ => (x - x0) / (x1 - x0),
-    };
+    let t = interpolation_factor(interpolation, x, *x0, *x1);
     let (lo, hi) = (lo.evaluate(ctx)?, hi.evaluate(ctx)?);
     match (&lo, &hi) {
         (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + (b - a) * t)),
         (Value::Color(_) | Value::String(_), Value::Color(_) | Value::String(_)) => Ok(
             Value::Color(lerp_color(lo.to_color()?, hi.to_color()?, t as f32)),
         ),
-        _ => Err(EvalError::new(format!(
-            "interpolate outputs must be numbers or colors, found {} and {}",
-            lo.type_name(),
-            hi.type_name()
-        ))),
+        (Value::Number(_), other) | (other, _) => {
+            Err(type_error("interpolate", "number or color", other))
+        }
     }
+}
+
+/// How far `x` is from `x0` towards `x1`, in `[0, 1]`.
+///
+/// Exponential interpolation follows MapLibre,
+/// `(b^(x-x0) - 1) / (b^(x1-x0) - 1)`. For large bases or spans both powers
+/// overflow to infinity; the ratio then tends to `b^(x-x1)`, which is used
+/// instead. Anything still not a number (an unsorted, programmatically
+/// built stop list) maps to 0.
+fn interpolation_factor(interpolation: Interpolation, x: f64, x0: f64, x1: f64) -> f64 {
+    let t = match interpolation {
+        Interpolation::Exponential(base) if (base - 1.0).abs() > f64::EPSILON => {
+            let t = (base.powf(x - x0) - 1.0) / (base.powf(x1 - x0) - 1.0);
+            if t.is_finite() { t } else { base.powf(x - x1) }
+        }
+        _ => (x - x0) / (x1 - x0),
+    };
+    if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) }
 }
 
 /// Interpolate in premultiplied space, as MapLibre does.
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     let (pa, pb) = (a.premultiplied(), b.premultiplied());
-    let m: Vec<f32> = pa.iter().zip(&pb).map(|(x, y)| x + (y - x) * t).collect();
+    let m: [f32; 4] = std::array::from_fn(|i| pa[i] + (pb[i] - pa[i]) * t);
     let alpha = m[3];
     if alpha <= 0.0 {
         return Color::TRANSPARENT;
@@ -791,7 +857,7 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 fn legacy_value(json: &Json, path: &str) -> Result<Value, StyleError> {
     match json {
         Json::Null | Json::Bool(_) | Json::Number(_) | Json::String(_) => {
-            Value::from_json(json).map_err(|m| StyleError::invalid(path, m))
+            Value::from_json(json, 0).map_err(|m| StyleError::invalid(path, m))
         }
         _ => Err(StyleError::invalid(
             path,
@@ -800,7 +866,7 @@ fn legacy_value(json: &Json, path: &str) -> Result<Value, StyleError> {
     }
 }
 
-fn parse_call(items: &[Json], path: &str) -> Result<Expr, StyleError> {
+fn parse_call(items: &[Json], path: &str, depth: usize) -> Result<Expr, StyleError> {
     let Some(Json::String(op)) = items.first() else {
         return Err(StyleError::invalid(
             path,
@@ -808,7 +874,7 @@ fn parse_call(items: &[Json], path: &str) -> Result<Expr, StyleError> {
         ));
     };
     let args = &items[1..];
-    let arg = |i: usize| Expr::parse_at(&args[i], &child_path(path, i + 1));
+    let arg = |i: usize| parse_expr(&args[i], &child_path(path, i + 1), depth + 1);
     let boxed = |i: usize| arg(i).map(Box::new);
     let all_args = || -> Result<Vec<Expr>, StyleError> { (0..args.len()).map(arg).collect() };
     let arity = |n: usize| -> Result<(), StyleError> {
@@ -825,7 +891,7 @@ fn parse_call(items: &[Json], path: &str) -> Result<Expr, StyleError> {
     match op.as_str() {
         "literal" => {
             arity(1)?;
-            Value::from_json(&args[0])
+            Value::from_json(&args[0], depth + 1)
                 .map(Expr::Literal)
                 .map_err(|m| StyleError::invalid(path, m))
         }
@@ -876,7 +942,7 @@ fn parse_call(items: &[Json], path: &str) -> Result<Expr, StyleError> {
                 Expr::Not(Box::new(test))
             })
         }
-        "match" => parse_match(args, path),
+        "match" => parse_match(args, path, depth),
         "case" => {
             if args.len() < 3 || args.len().is_multiple_of(2) {
                 return Err(StyleError::invalid(
@@ -902,8 +968,8 @@ fn parse_call(items: &[Json], path: &str) -> Result<Expr, StyleError> {
             }
             Ok(Expr::Coalesce(all_args()?))
         }
-        "interpolate" => parse_interpolate(args, path),
-        "step" => parse_step(args, path),
+        "interpolate" => parse_interpolate(args, path, depth),
+        "step" => parse_step(args, path, depth),
         "to-string" => {
             arity(1)?;
             Ok(Expr::ToString(boxed(0)?))
@@ -921,14 +987,14 @@ fn parse_call(items: &[Json], path: &str) -> Result<Expr, StyleError> {
     }
 }
 
-fn parse_match(args: &[Json], path: &str) -> Result<Expr, StyleError> {
+fn parse_match(args: &[Json], path: &str, depth: usize) -> Result<Expr, StyleError> {
     if args.len() < 4 || !args.len().is_multiple_of(2) {
         return Err(StyleError::invalid(
             path,
             "`match` expects an input, label/output pairs and a fallback",
         ));
     }
-    let input = Box::new(Expr::parse_at(&args[0], &child_path(path, 1))?);
+    let input = Box::new(parse_expr(&args[0], &child_path(path, 1), depth + 1)?);
     let mut branches = Vec::new();
     let mut seen: Vec<Value> = Vec::new();
     let mut kind: Option<&'static str> = None;
@@ -945,9 +1011,8 @@ fn parse_match(args: &[Json], path: &str) -> Result<Expr, StyleError> {
         let mut labels = Vec::new();
         for s in scalars {
             let v = match s {
-                Json::String(_) | Json::Number(_) => {
-                    Value::from_json(s).map_err(|m| StyleError::invalid(&label_path, m))?
-                }
+                Json::String(_) | Json::Number(_) => Value::from_json(s, depth + 1)
+                    .map_err(|m| StyleError::invalid(&label_path, m))?,
                 _ => {
                     return Err(StyleError::invalid(
                         &label_path,
@@ -968,12 +1033,17 @@ fn parse_match(args: &[Json], path: &str) -> Result<Expr, StyleError> {
             seen.push(v.clone());
             labels.push(v);
         }
-        let output = Expr::parse_at(&args[2 + 2 * pair], &child_path(path, 2 * pair + 3))?;
+        let output = parse_expr(
+            &args[2 + 2 * pair],
+            &child_path(path, 2 * pair + 3),
+            depth + 1,
+        )?;
         branches.push(MatchBranch { labels, output });
     }
-    let fallback = Box::new(Expr::parse_at(
+    let fallback = Box::new(parse_expr(
         &args[args.len() - 1],
         &child_path(path, args.len()),
+        depth + 1,
     )?);
     Ok(Expr::Match {
         input,
@@ -982,7 +1052,12 @@ fn parse_match(args: &[Json], path: &str) -> Result<Expr, StyleError> {
     })
 }
 
-fn parse_stops(args: &[Json], first: usize, path: &str) -> Result<Vec<(f64, Expr)>, StyleError> {
+fn parse_stops(
+    args: &[Json],
+    first: usize,
+    path: &str,
+    depth: usize,
+) -> Result<Vec<(f64, Expr)>, StyleError> {
     let mut stops: Vec<(f64, Expr)> = Vec::new();
     for (n, pair) in args[first..].chunks(2).enumerate() {
         let at = first + 2 * n;
@@ -998,13 +1073,13 @@ fn parse_stops(args: &[Json], first: usize, path: &str) -> Result<Vec<(f64, Expr
                 "stop inputs must be in strictly ascending order",
             ));
         }
-        let out = Expr::parse_at(&pair[1], &child_path(path, at + 2))?;
+        let out = parse_expr(&pair[1], &child_path(path, at + 2), depth + 1)?;
         stops.push((stop, out));
     }
     Ok(stops)
 }
 
-fn parse_interpolate(args: &[Json], path: &str) -> Result<Expr, StyleError> {
+fn parse_interpolate(args: &[Json], path: &str, depth: usize) -> Result<Expr, StyleError> {
     if args.len() < 4 || !args.len().is_multiple_of(2) {
         return Err(StyleError::invalid(
             path,
@@ -1056,8 +1131,8 @@ fn parse_interpolate(args: &[Json], path: &str) -> Result<Expr, StyleError> {
             ));
         }
     };
-    let input = Box::new(Expr::parse_at(&args[1], &child_path(path, 2))?);
-    let stops = parse_stops(args, 2, path)?;
+    let input = Box::new(parse_expr(&args[1], &child_path(path, 2), depth + 1)?);
+    let stops = parse_stops(args, 2, path, depth)?;
     Ok(Expr::Interpolate {
         interpolation,
         input,
@@ -1065,16 +1140,16 @@ fn parse_interpolate(args: &[Json], path: &str) -> Result<Expr, StyleError> {
     })
 }
 
-fn parse_step(args: &[Json], path: &str) -> Result<Expr, StyleError> {
+fn parse_step(args: &[Json], path: &str, depth: usize) -> Result<Expr, StyleError> {
     if args.len() < 2 || !args.len().is_multiple_of(2) {
         return Err(StyleError::invalid(
             path,
             "`step` expects an input, a base output and input/output stops",
         ));
     }
-    let input = Box::new(Expr::parse_at(&args[0], &child_path(path, 1))?);
-    let base = Box::new(Expr::parse_at(&args[1], &child_path(path, 2))?);
-    let stops = parse_stops(args, 2, path)?;
+    let input = Box::new(parse_expr(&args[0], &child_path(path, 1), depth + 1)?);
+    let base = Box::new(parse_expr(&args[1], &child_path(path, 2), depth + 1)?);
+    let stops = parse_stops(args, 2, path, depth)?;
     Ok(Expr::Step { input, base, stops })
 }
 
@@ -1484,6 +1559,212 @@ mod tests {
             assert_eq!(parsed.to_json(), e);
             assert_eq!(Expr::parse(&parsed.to_json()).unwrap(), parsed);
         }
+    }
+
+    #[test]
+    fn non_finite_inputs_are_errors_not_panics() {
+        let interp = json!(["interpolate", ["linear"], ["zoom"], 0, 1, 5, 2, 10, 3]);
+        let step = json!(["step", ["zoom"], 1, 5, 2]);
+        for zoom in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                eval_at(interp.clone(), zoom),
+                Err(EvalError::NonFinite { op: "interpolate" })
+            );
+            assert_eq!(
+                eval_at(step.clone(), zoom),
+                Err(EvalError::NonFinite { op: "step" })
+            );
+        }
+        // A failing property expression yields the property default.
+        let p = crate::Property::<f64>::parse(&interp, "p").unwrap();
+        assert_eq!(p.evaluate(&EvalContext::at_zoom(f64::NAN), &7.0), 7.0);
+    }
+
+    #[test]
+    fn exponential_overflow_stays_finite_and_ordered() {
+        // base^(x1 - x0) overflows to infinity: inf / inf would be NaN.
+        let e = json!([
+            "interpolate",
+            ["exponential", 1.0e10],
+            ["zoom"],
+            0,
+            0,
+            1000,
+            10
+        ]);
+        let at = |z: f64| match eval_at(e.clone(), z).unwrap() {
+            Value::Number(n) => n,
+            other => panic!("{other:?}"),
+        };
+        let (a, b, c) = (at(1.0), at(999.95), at(999.99));
+        assert!(
+            [a, b, c]
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=10.0).contains(v))
+        );
+        assert!(a <= b && b <= c, "{a} {b} {c}");
+        // Colors never become NaN either, so rendering cannot fail on them.
+        let mut colors = Expr::parse(&json!([
+            "interpolate",
+            ["exponential", 1.0e10],
+            ["zoom"],
+            0,
+            "#000000",
+            1000,
+            "#ffffff"
+        ]))
+        .unwrap();
+        colors
+            .visit_output_literals(&mut |v| {
+                *v = Value::Color(v.to_color().map_err(|e| e.to_string())?);
+                Ok(())
+            })
+            .unwrap();
+        let Value::Color(c) = colors.evaluate(&EvalContext::at_zoom(500.0)).unwrap() else {
+            panic!("color expected")
+        };
+        assert!([c.r, c.g, c.b, c.a].iter().all(|v| v.is_finite()), "{c:?}");
+        // A NaN width from an infinite output falls back to the default.
+        let p = crate::Property::<f64>::parse(
+            &json!(["interpolate", ["linear"], ["zoom"], 0, 0, 10, 1e308]),
+            "p",
+        )
+        .unwrap();
+        let mut inf = p.clone();
+        if let crate::Property::Expr(Expr::Interpolate { stops, .. }) = &mut inf {
+            stops[1].1 = Expr::number(f64::INFINITY);
+            stops[0].1 = Expr::number(f64::NEG_INFINITY);
+        }
+        assert_eq!(inf.evaluate(&EvalContext::at_zoom(5.0), &1.5), 1.5);
+    }
+
+    /// `leaf` wrapped `depth` times as `[op, ...]` (or `[...]` for an empty
+    /// `op`). Built directly: `json!` would re-serialise the inner value at
+    /// every level, recursively.
+    fn nested(depth: usize, leaf: Json, op: &str) -> Json {
+        (0..depth).fold(leaf, |acc, _| {
+            Json::Array(if op.is_empty() {
+                vec![acc]
+            } else {
+                vec![Json::from(op), acc]
+            })
+        })
+    }
+
+    #[test]
+    fn nesting_depth_is_bounded() {
+        // `depth` wrappers put the leaf `depth` levels below the root.
+        let ok = nested(MAX_EXPRESSION_DEPTH, json!(true), "!");
+        let e = Expr::parse(&ok).expect("at the limit");
+        assert!(e.evaluate(&EvalContext::at_zoom(0.0)).is_ok());
+        let deep = nested(MAX_EXPRESSION_DEPTH + 1, json!(true), "!");
+        assert!(matches!(
+            Expr::parse(&deep),
+            Err(StyleError::Invalid { .. })
+        ));
+        // Legacy filters and nested literal arrays count too.
+        let deep_filter = nested(MAX_EXPRESSION_DEPTH + 1, json!(["has", "a"]), "any");
+        assert!(matches!(
+            Expr::parse_filter(&deep_filter, "f"),
+            Err(StyleError::Invalid { .. })
+        ));
+        let deep_literal = Json::Array(vec![
+            Json::from("literal"),
+            nested(MAX_EXPRESSION_DEPTH, json!(1), ""),
+        ]);
+        assert!(matches!(
+            Expr::parse(&deep_literal),
+            Err(StyleError::Invalid { .. })
+        ));
+        // Far deeper than any stack could recurse through: still an error.
+        let huge = nested(100_000, json!(true), "!");
+        assert!(Expr::parse(&huge).is_err());
+        // serde_json's own drop of `huge` recurses; leak it so this test
+        // only exercises the expression parser.
+        std::mem::forget(huge);
+    }
+
+    #[test]
+    fn to_number_and_coalesce_follow_maplibre() {
+        // `Number("")` is 0 in MapLibre.
+        assert_eq!(eval(json!(["to-number", ""])), Value::Number(0.0));
+        assert_eq!(eval(json!(["to-number", "  "])), Value::Number(0.0));
+        assert_eq!(eval(json!(["to-number", " 2.5 "])), Value::Number(2.5));
+        // An operand that errors fails the expression instead of being
+        // skipped.
+        let failing = json!(["<", 1, "a"]);
+        assert!(matches!(
+            eval_at(json!(["to-number", failing.clone(), 5]), 0.0),
+            Err(EvalError::Compare { .. })
+        ));
+        assert!(matches!(
+            eval_at(json!(["coalesce", failing, 5]), 0.0),
+            Err(EvalError::Compare { .. })
+        ));
+        assert_eq!(
+            eval_at(json!(["to-number", ["get", "name"]]), 0.0),
+            Err(EvalError::NotANumber { found: "string" })
+        );
+    }
+
+    #[test]
+    fn every_listed_operator_is_parsed() {
+        for op in SUPPORTED_OPS {
+            if let Err(e) = Expr::parse(&json!([op])) {
+                assert!(
+                    matches!(e, StyleError::Invalid { .. }),
+                    "`{op}` is listed as supported but rejected: {e}"
+                );
+            }
+        }
+        // `none` is legacy filter syntax only.
+        assert!(Expr::parse_filter(&json!(["none"]), "f").is_ok());
+        assert!(!is_expression(&json!(["none"])));
+    }
+
+    #[test]
+    fn legacy_in_filters_serialise_to_valid_maplibre() {
+        for (legacy, matching, other) in [
+            (
+                json!(["in", "x", 1, "a"]),
+                vec![("x", "a")],
+                vec![("x", "b")],
+            ),
+            (
+                json!(["in", "x", "a", "a"]),
+                vec![("x", "a")],
+                vec![("x", "b")],
+            ),
+            (json!(["in", "x", true]), vec![], vec![("x", "true")]),
+            (
+                json!(["!in", "x", 1, "a", "a"]),
+                vec![("x", "b")],
+                vec![("x", "a")],
+            ),
+        ] {
+            let parsed = Expr::parse_filter(&legacy, "f").unwrap();
+            let out = parsed.to_json();
+            // The output is valid (non-legacy) expression syntax that
+            // parses back to the same tree.
+            let reparsed = Expr::parse(&out).unwrap_or_else(|e| panic!("{legacy} -> {out}: {e}"));
+            assert_eq!(reparsed, parsed, "{legacy} -> {out}");
+            if !matching.is_empty() {
+                assert!(
+                    parsed.evaluate_bool(&EvalContext::new(0.0, &matching)),
+                    "{legacy}"
+                );
+            }
+            assert!(
+                !parsed.evaluate_bool(&EvalContext::new(0.0, &other)),
+                "{legacy}"
+            );
+        }
+        // Homogeneous labels still use `match`.
+        let p = Expr::parse_filter(&json!(["in", "x", "a", "b", "a"]), "f").unwrap();
+        assert_eq!(
+            p.to_json(),
+            json!(["match", ["get", "x"], ["a", "b"], true, false])
+        );
     }
 
     #[test]
