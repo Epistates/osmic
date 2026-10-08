@@ -22,3 +22,6 @@ tiny-skia = { workspace = true }
 lyon = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
+
+[lints]
+workspace = true

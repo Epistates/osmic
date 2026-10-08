@@ -16,3 +16,6 @@ description = "Text shaping, deterministic label placement with collision detect
 osmic-core = { workspace = true }
 cosmic-text = { workspace = true }
 rstar = { workspace = true }
+
+[lints]
+workspace = true

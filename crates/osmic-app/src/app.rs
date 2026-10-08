@@ -400,10 +400,7 @@ mod tests {
             .add_plugin(Probe::<2>::new(&log));
         assert!(app.has_plugin::<Probe<2>>());
         app.build().expect("builds");
-        assert_eq!(
-            log.take(),
-            ["build 1", "build 2", "finish 1", "finish 2"]
-        );
+        assert_eq!(log.take(), ["build 1", "build 2", "finish 1", "finish 2"]);
     }
 
     #[test]
@@ -508,10 +505,7 @@ mod tests {
         let mut app = App::new();
         app.build().expect("empty app builds");
         app.add_plugin(Probe::<1>::new(&log));
-        assert!(matches!(
-            app.run(),
-            Err(AppError::AddedAfterBuild { .. })
-        ));
+        assert!(matches!(app.run(), Err(AppError::AddedAfterBuild { .. })));
         assert!(log.take().is_empty());
     }
 

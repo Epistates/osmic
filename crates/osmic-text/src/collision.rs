@@ -93,7 +93,7 @@ impl CollisionIndex {
     /// Whether `rect` overlaps anything already inserted.
     pub fn collides(&self, rect: &Rect) -> bool {
         self.tree
-            .locate_in_envelope_intersecting(&rect.aabb())
+            .locate_in_envelope_intersecting(rect.aabb())
             .any(|other| other.overlaps(rect))
     }
 

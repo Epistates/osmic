@@ -465,7 +465,9 @@ impl SortedRuns {
         }
         for (ci, c) in self.chunks.iter().enumerate() {
             let a = c.entries.partition_point(|e| e.key < lo);
-            let b = hi.map_or(c.entries.len(), |h| c.entries.partition_point(|e| e.key < h));
+            let b = hi.map_or(c.entries.len(), |h| {
+                c.entries.partition_point(|e| e.key < h)
+            });
             let src = Src::Chunk(u32::try_from(ci).map_err(io::Error::other)?);
             entries.extend(c.entries[a..b].iter().map(|e| PartEntry {
                 key: e.key,
@@ -649,7 +651,10 @@ mod tests {
             let part = runs.partition(i).expect("partition");
             total += part.len();
             for (key, records) in part.groups() {
-                assert!(last_key.is_none_or(|k| key > k), "key {key} split or out of order");
+                assert!(
+                    last_key.is_none_or(|k| key > k),
+                    "key {key} split or out of order"
+                );
                 last_key = Some(key);
                 let secondaries: Vec<u64> = records.map(|(s, _)| s).collect();
                 assert!(secondaries.is_sorted());

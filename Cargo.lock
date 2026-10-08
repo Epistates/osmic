@@ -1890,6 +1890,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "lru"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
+dependencies = [
+ "hashbrown 0.16.1",
+]
+
+[[package]]
 name = "lyon"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2596,9 +2605,13 @@ dependencies = [
 name = "osmic-render"
 version = "0.1.1"
 dependencies = [
- "cosmic-text",
+ "bytemuck",
+ "geo-types",
+ "lyon",
  "osmic-core",
- "osmic-osm",
+ "osmic-style",
+ "osmic-text",
+ "osmic-tiles",
  "tiny-skia 0.12.0",
  "tracing",
 ]
@@ -2643,8 +2656,10 @@ dependencies = [
 name = "osmic-style"
 version = "0.1.1"
 dependencies = [
- "serde",
+ "osmic-core",
+ "osmic-osm",
  "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2653,7 +2668,7 @@ version = "0.1.1"
 dependencies = [
  "cosmic-text",
  "osmic-core",
- "tracing",
+ "rstar 0.13.0",
 ]
 
 [[package]]
@@ -2681,13 +2696,19 @@ version = "0.1.1"
 dependencies = [
  "bytemuck",
  "clap",
- "cosmic-text",
- "lyon",
+ "geo-types",
+ "lru",
+ "naga",
  "osmic-core",
- "osmic-geo",
+ "osmic-render",
+ "osmic-style",
+ "osmic-text",
  "osmic-tiles",
  "pmtiles",
  "pollster",
+ "serde_json",
+ "tempfile",
+ "tiny-skia 0.12.0",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3294,10 +3315,13 @@ version = "0.1.1"
 dependencies = [
  "clap",
  "osmic-core",
- "osmic-geo",
  "osmic-render",
+ "osmic-style",
+ "osmic-text",
  "osmic-tiles",
  "pmtiles",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

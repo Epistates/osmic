@@ -90,8 +90,8 @@ impl TileEncoder for MltEncoder {
             keys.remove("class");
             let columns: Vec<&str> = std::iter::once("class").chain(keys).collect();
 
-            let mut builder = MltLayer::builder(layer.name.as_str(), layer.extent)
-                .map_err(encode_err)?;
+            let mut builder =
+                MltLayer::builder(layer.name.as_str(), layer.extent).map_err(encode_err)?;
             let column_keys = columns
                 .iter()
                 .map(|name| builder.add_property(*name, PropKind::Str))

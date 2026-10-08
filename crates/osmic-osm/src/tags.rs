@@ -246,7 +246,10 @@ impl TagStore {
 
     /// Look up a key without interning it.
     pub fn get(&self, key: &str) -> Option<TagKey> {
-        self.preset.get(key).copied().or_else(|| self.rodeo.get(key))
+        self.preset
+            .get(key)
+            .copied()
+            .or_else(|| self.rodeo.get(key))
     }
 
     /// Number of distinct keys interned.

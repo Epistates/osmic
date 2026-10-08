@@ -115,7 +115,9 @@ mod tests {
         app.add_plugin(TileServerPlugin::new("x.pmtiles"));
         app.build().expect("builds");
         assert_eq!(
-            app.resource::<TileServerConfig>().expect("config").pmtiles_path,
+            app.resource::<TileServerConfig>()
+                .expect("config")
+                .pmtiles_path,
             Path::new("x.pmtiles")
         );
         assert!(app.contains_resource::<ServerRoutes>());

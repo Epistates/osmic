@@ -180,7 +180,7 @@ fn tessellate_fill(
     tess.tessellate_path(
         &path,
         &FillOptions::tolerance(TOLERANCE).with_fill_rule(FillRule::EvenOdd),
-        &mut BuffersBuilder::new(out, |v: FillVertex| MeshVertex {
+        &mut BuffersBuilder::new(out, |v: FillVertex<'_>| MeshVertex {
             position: v.position().to_array(),
             extrude: [0.0, 0.0],
             half_width: [0.0, 0.0],
@@ -255,7 +255,7 @@ fn tessellate_stroke(
             .with_line_cap(cap)
             .with_line_join(join)
             .with_miter_limit(2.0),
-        &mut BuffersBuilder::new(out, |v: StrokeVertex| MeshVertex {
+        &mut BuffersBuilder::new(out, |v: StrokeVertex<'_, '_>| MeshVertex {
             position: v.position_on_path().to_array(),
             extrude: v.normal().to_array(),
             half_width: half_widths,

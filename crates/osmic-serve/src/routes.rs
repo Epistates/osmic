@@ -104,7 +104,10 @@ fn validate_prefix(prefix: &str) -> Result<(), ServeError> {
     }
     let unreserved = |c: char| c.is_ascii_alphanumeric() || "-._~".contains(c);
     if !segments.iter().all(|s| s.chars().all(unreserved)) {
-        return Err(invalid(prefix, "may only contain A-Z a-z 0-9 - . _ ~ and '/'"));
+        return Err(invalid(
+            prefix,
+            "may only contain A-Z a-z 0-9 - . _ ~ and '/'",
+        ));
     }
     if RESERVED.contains(&segments[0]) {
         return Err(invalid(prefix, "shadows a built-in endpoint"));
@@ -139,14 +142,21 @@ mod tests {
     #[test]
     fn rejects_bad_prefixes() {
         for bad in [
-            "api", "/", "", "/api/", "/a//b", "/{id}", "/*", "/a b", "/tiles", "/tiles/x",
-            "/healthz", "/style.json",
+            "api",
+            "/",
+            "",
+            "/api/",
+            "/a//b",
+            "/{id}",
+            "/*",
+            "/a b",
+            "/tiles",
+            "/tiles/x",
+            "/healthz",
+            "/style.json",
         ] {
             let err = mount(&[bad]).expect_err(bad);
-            assert!(
-                err.to_string().contains("routes"),
-                "{bad}: {err}"
-            );
+            assert!(err.to_string().contains("routes"), "{bad}: {err}");
         }
     }
 
