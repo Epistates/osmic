@@ -1,10 +1,14 @@
 use std::sync::{Arc, OnceLock};
 
-use metal::{CommandQueue, ComputePipelineState, Device};
-use objc::rc::autoreleasepool;
+use dispatch2::DispatchData;
+use objc2::rc::{Retained, autoreleasepool};
+use objc2_foundation::NSString;
+use objc2_metal::{MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary};
 use tracing::info;
 
 use crate::error::{AccelError, AccelResult};
+
+use super::{CommandQueue, ComputePipelineState, Device, error_description};
 
 /// Compiled shader library embedded by `build.rs` (this module only exists
 /// when the `osmic_metallib` cfg is set, i.e. the metallib was produced).
@@ -13,17 +17,18 @@ static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/osmic_geometr
 const CLIP_KERNEL: &str = "clip_units";
 
 /// Threadgroup width as a multiple of the pipeline's SIMD width.
-const SIMD_GROUPS_PER_THREADGROUP: u64 = 4;
+const SIMD_GROUPS_PER_THREADGROUP: usize = 4;
 
 /// Process-wide Metal state: device, queue and the compiled clip pipeline.
 ///
-/// All fields are `Send + Sync` Metal objects (the `metal` crate marks them
-/// so), hence the struct is `Send + Sync` without any `unsafe impl`.
+/// `objc2-metal` declares `MTLDevice`, `MTLCommandQueue` and
+/// `MTLComputePipelineState` as `Send + Sync` (Apple documents them as
+/// thread-safe), hence the struct is `Send + Sync` without any `unsafe impl`.
 pub(crate) struct MetalContext {
-    device: Device,
-    command_queue: CommandQueue,
-    clip_pipeline: ComputePipelineState,
-    threads_per_group: u64,
+    device: Retained<Device>,
+    command_queue: Retained<CommandQueue>,
+    clip_pipeline: Retained<ComputePipelineState>,
+    threads_per_group: usize,
 }
 
 /// Initialisation result is cached for the process lifetime; the error is
@@ -40,21 +45,27 @@ impl MetalContext {
     }
 
     fn init() -> AccelResult<MetalContext> {
-        autoreleasepool(|| {
-            let device = Device::system_default()
+        autoreleasepool(|_| {
+            let device = MTLCreateSystemDefaultDevice()
                 .ok_or_else(|| AccelError::MetalInit("no Metal device found".into()))?;
+            // The metallib is `'static`, so Metal can reference it in place.
+            let data = DispatchData::from_static_bytes(METALLIB);
             let library = device
-                .new_library_with_data(METALLIB)
-                .map_err(AccelError::ShaderCompilation)?;
+                .newLibraryWithData_error(&data)
+                .map_err(|e| AccelError::ShaderCompilation(error_description(&e)))?;
             let function = library
-                .get_function(CLIP_KERNEL, None)
-                .map_err(|e| AccelError::ShaderCompilation(format!("{CLIP_KERNEL}: {e}")))?;
+                .newFunctionWithName(&NSString::from_str(CLIP_KERNEL))
+                .ok_or_else(|| {
+                    AccelError::ShaderCompilation(format!(
+                        "{CLIP_KERNEL}: Function '{CLIP_KERNEL}' does not exist"
+                    ))
+                })?;
             let clip_pipeline = device
-                .new_compute_pipeline_state_with_function(&function)
-                .map_err(AccelError::ShaderCompilation)?;
+                .newComputePipelineStateWithFunction_error(&function)
+                .map_err(|e| AccelError::ShaderCompilation(error_description(&e)))?;
 
-            let width = clip_pipeline.thread_execution_width();
-            let max = clip_pipeline.max_total_threads_per_threadgroup();
+            let width = clip_pipeline.threadExecutionWidth();
+            let max = clip_pipeline.maxTotalThreadsPerThreadgroup();
             let threads_per_group = (width * SIMD_GROUPS_PER_THREADGROUP).min(max).max(1);
             info!(
                 device = %device.name(),
@@ -64,7 +75,9 @@ impl MetalContext {
                 "Metal GPU initialized"
             );
 
-            let command_queue = device.new_command_queue();
+            let command_queue = device
+                .newCommandQueue()
+                .ok_or_else(|| AccelError::MetalInit("could not create a command queue".into()))?;
             Ok(MetalContext {
                 device,
                 command_queue,
@@ -86,7 +99,7 @@ impl MetalContext {
         &self.clip_pipeline
     }
 
-    pub(crate) fn threads_per_group(&self) -> u64 {
+    pub(crate) fn threads_per_group(&self) -> usize {
         self.threads_per_group
     }
 }

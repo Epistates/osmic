@@ -26,8 +26,31 @@ geo-types = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 bytemuck = { workspace = true }
-metal = "0.33"
-objc = "0.2"
+# The objc2 family, at the versions wgpu-hal already pulls in, so the Metal
+# backend adds no duplicate bindings to the tree.
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "block2", "objc2"] }
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSError",
+    "NSString",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "bitflags",
+    "dispatch2",
+    "MTLAllocation",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLResource",
+    "MTLTypes",
+] }
 
 [lints]
 workspace = true

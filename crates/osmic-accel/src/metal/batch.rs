@@ -11,14 +11,16 @@
 //! produced by [`InFlight::wait`] after the command buffer reached the
 //! `Completed` state without error.
 
-use std::ffi::CStr;
+use std::mem::size_of;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::Instant;
 
-use metal::{CommandBuffer, CommandBufferRef, MTLCommandBufferStatus, MTLSize};
-use objc::rc::autoreleasepool;
-use objc::runtime::Object;
-use objc::{msg_send, sel, sel_impl};
+use objc2::rc::{Retained, autoreleasepool};
+use objc2_metal::{
+    MTLCommandBuffer, MTLCommandBufferError, MTLCommandBufferStatus, MTLCommandEncoder,
+    MTLCommandQueue, MTLComputeCommandEncoder, MTLSize,
+};
 
 use crate::clip::{ClipOptions, UnitResults, UnitView};
 use crate::error::{AccelError, AccelResult};
@@ -27,9 +29,10 @@ use crate::prepare::{Prepared, UnitKind};
 use super::buffer::MetalBuffer;
 use super::context::MetalContext;
 use super::types::*;
+use super::{CommandBuffer, error_description};
 
-/// `MTLCommandBufferErrorTimeout`.
-const NS_ERROR_CODE_TIMEOUT: isize = 2;
+/// `MTLCommandBufferErrorTimeout`, as the `NSError` code it is reported with.
+const NS_ERROR_CODE_TIMEOUT: isize = MTLCommandBufferError::Timeout.0 as isize;
 
 /// A batch whose inputs are uploaded and whose output buffers are allocated,
 /// but which has not been dispatched yet.
@@ -106,7 +109,7 @@ impl GpuBatch {
         to_u32(scratch_total, "scratch vertices")?;
         to_u32(parts_total, "line parts")?;
 
-        autoreleasepool(|| {
+        autoreleasepool(|_| {
             let device = ctx.device();
             let coords = MetalBuffer::from_slice(device, &prepared.coords)?;
             let out_points = MetalBuffer::new(device, out_total.max(1) as usize)?;
@@ -149,31 +152,55 @@ impl GpuBatch {
             _pad2: 0,
         };
 
-        let command_buffer: CommandBuffer = autoreleasepool(|| {
+        let command_buffer = autoreleasepool(|_| {
             let ctx = &self.ctx;
-            let command_buffer = ctx.command_queue().new_command_buffer();
-            let encoder = command_buffer.new_compute_command_encoder();
-            encoder.set_compute_pipeline_state(ctx.clip_pipeline());
-            encoder.set_buffer(0, Some(self.coords.metal_buffer()), 0);
-            encoder.set_buffer(1, Some(self.out_points.metal_buffer()), 0);
-            encoder.set_buffer(2, Some(self.scratch.metal_buffer()), 0);
-            encoder.set_buffer(3, Some(self.part_lens.metal_buffer()), 0);
-            encoder.set_buffer(4, Some(self.unit_buffer.metal_buffer()), 0);
-            encoder.set_buffer(5, Some(self.results.metal_buffer()), 0);
-            encoder.set_bytes(
-                6,
-                std::mem::size_of::<GpuClipParams>() as u64,
-                (&params as *const GpuClipParams).cast(),
-            );
+            let command_buffer = ctx.command_queue().commandBuffer().ok_or_else(|| {
+                AccelError::ExecutionFailed("could not create a command buffer".into())
+            })?;
+            let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+                AccelError::ExecutionFailed("could not create a compute command encoder".into())
+            })?;
+            encoder.setComputePipelineState(ctx.clip_pipeline());
+            // SAFETY: indices 0..=6 and the element types bound to them match
+            // the `[[buffer(n)]]` parameters of `clip_units` (layouts asserted
+            // in `types.rs`), and offset 0 is in bounds of every buffer. The
+            // command buffer retains the bound buffers until it completes, and
+            // the CPU cannot touch them before then: they move into `InFlight`
+            // and are only readable from `CompletedBatch`. `setBytes` copies
+            // `size_of::<GpuClipParams>()` bytes from the live `params` local
+            // during the call.
+            unsafe {
+                encoder.setBuffer_offset_atIndex(Some(self.coords.metal_buffer()), 0, 0);
+                encoder.setBuffer_offset_atIndex(Some(self.out_points.metal_buffer()), 0, 1);
+                encoder.setBuffer_offset_atIndex(Some(self.scratch.metal_buffer()), 0, 2);
+                encoder.setBuffer_offset_atIndex(Some(self.part_lens.metal_buffer()), 0, 3);
+                encoder.setBuffer_offset_atIndex(Some(self.unit_buffer.metal_buffer()), 0, 4);
+                encoder.setBuffer_offset_atIndex(Some(self.results.metal_buffer()), 0, 5);
+                encoder.setBytes_length_atIndex(
+                    NonNull::from(&params).cast(),
+                    size_of::<GpuClipParams>(),
+                    6,
+                );
+            }
 
-            let grid = MTLSize::new(u64::from(unit_count), 1, 1);
-            let group = MTLSize::new(ctx.threads_per_group().min(u64::from(unit_count)), 1, 1);
-            encoder.dispatch_threads(grid, group);
-            encoder.end_encoding();
+            let units = self.units.len();
+            let grid = MTLSize {
+                width: units,
+                height: 1,
+                depth: 1,
+            };
+            let group = MTLSize {
+                width: ctx.threads_per_group().min(units),
+                height: 1,
+                depth: 1,
+            };
+            encoder.dispatchThreads_threadsPerThreadgroup(grid, group);
+            encoder.endEncoding();
             command_buffer.commit();
-            // Retain beyond the pool: the returned ref is autoreleased.
-            command_buffer.to_owned()
-        });
+            // `Retained` holds its own reference, so the command buffer
+            // outlives the pool.
+            Ok::<_, AccelError>(Committed(command_buffer))
+        })?;
 
         Ok(InFlight {
             batch: self,
@@ -183,10 +210,26 @@ impl GpuBatch {
     }
 }
 
+/// A command buffer that has been committed: no more commands are encoded
+/// into it, it is only waited on and queried.
+struct Committed(Retained<CommandBuffer>);
+
+// SAFETY: `objc2-metal` leaves `MTLCommandBuffer` `!Send`/`!Sync` because
+// *encoding* into a command buffer is single-threaded. A `Committed` is only
+// built after `commit`, so encoding is over, and the only messages it is ever
+// sent are `waitUntilCompleted`, `status` and `error`. Metal itself updates the
+// status and error from its own completion thread, so those are designed for
+// cross-thread use, and retain/release is thread-safe for every Objective-C
+// object. (wgpu-hal makes its Metal command buffers `Send + Sync` likewise.)
+unsafe impl Send for Committed {}
+// SAFETY: see the `Send` impl above; all three messages are read-only queries
+// or blocking waits that are safe to issue concurrently.
+unsafe impl Sync for Committed {}
+
 /// A committed batch. Its buffers are inaccessible until [`InFlight::wait`].
 pub(crate) struct InFlight {
     batch: GpuBatch,
-    command_buffer: CommandBuffer,
+    command_buffer: Committed,
     started: Instant,
 }
 
@@ -200,12 +243,13 @@ impl InFlight {
             started,
         } = self;
 
-        autoreleasepool(|| {
-            command_buffer.wait_until_completed();
+        let Committed(command_buffer) = &command_buffer;
+        autoreleasepool(|_| {
+            command_buffer.waitUntilCompleted();
             match command_buffer.status() {
                 MTLCommandBufferStatus::Completed => Ok(()),
                 MTLCommandBufferStatus::Error => {
-                    let (code, description) = command_buffer_error(&command_buffer);
+                    let (code, description) = command_buffer_error(command_buffer);
                     if code == NS_ERROR_CODE_TIMEOUT {
                         Err(AccelError::GpuTimeout(started.elapsed()))
                     } else {
@@ -263,35 +307,10 @@ impl InFlight {
 }
 
 /// `(code, localizedDescription)` of the command buffer's `NSError`.
-// `objc::msg_send!` expands to a `cfg(feature = "cargo-clippy")` check that
-// rustc cannot see from this crate.
-#[allow(unexpected_cfgs)]
-fn command_buffer_error(command_buffer: &CommandBufferRef) -> (isize, String) {
-    // SAFETY: `error` is a valid selector on MTLCommandBuffer returning an
-    // optional (autoreleased) NSError; we only message it while the enclosing
-    // autorelease pool is alive.
-    let error: *mut Object = unsafe { msg_send![command_buffer, error] };
-    if error.is_null() {
-        return (0, "unknown GPU error".into());
-    }
-    // SAFETY: `error` is a live NSError (non-null, checked above); `code` and
-    // `localizedDescription` are valid NSError selectors returning NSInteger
-    // and NSString*; `UTF8String` returns a NUL-terminated buffer owned by the
-    // string, which we copy before the pool drains.
-    unsafe {
-        let code: isize = msg_send![error, code];
-        let description: *mut Object = msg_send![error, localizedDescription];
-        let text = if description.is_null() {
-            String::new()
-        } else {
-            let utf8: *const std::os::raw::c_char = msg_send![description, UTF8String];
-            if utf8.is_null() {
-                String::new()
-            } else {
-                CStr::from_ptr(utf8).to_string_lossy().into_owned()
-            }
-        };
-        (code, text)
+fn command_buffer_error(command_buffer: &CommandBuffer) -> (isize, String) {
+    match command_buffer.error() {
+        Some(error) => (error.code(), error_description(&error)),
+        None => (0, "unknown GPU error".into()),
     }
 }
 

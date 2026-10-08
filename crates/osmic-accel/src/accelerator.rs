@@ -198,6 +198,7 @@ mod tests {
     fn public_types_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<GpuAccelerator>();
+        assert_send_sync::<PendingBatch<'static>>();
         assert_send_sync::<Clipper>();
         assert_send_sync::<ClipOptions>();
         assert_send_sync::<ClippedGeometry>();
