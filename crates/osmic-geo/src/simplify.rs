@@ -5,26 +5,28 @@
 //! pixels (the tile renderer does this per zoom level); simplifying raw
 //! degrees distorts shapes away from the equator.
 
-use geo::Simplify;
 use geo_types::{LineString, MultiLineString, MultiPolygon, Polygon};
 use osmic_core::Geometry;
+use osmic_core::simplify::rdp;
 
 /// Simplify a line string.
 pub fn simplify_line(line: &LineString<f64>, tolerance: f64) -> LineString<f64> {
-    line.simplify(tolerance)
+    let mut out = Vec::with_capacity(line.0.len());
+    rdp(&line.0, tolerance, &mut out);
+    LineString(out)
 }
 
 /// Simplify a polygon's exterior and holes. Rings that collapse below four
 /// coordinates are dropped (a collapsed exterior yields `None`).
 pub fn simplify_polygon(poly: &Polygon<f64>, tolerance: f64) -> Option<Polygon<f64>> {
-    let exterior = poly.exterior().simplify(tolerance);
+    let exterior = simplify_line(poly.exterior(), tolerance);
     if exterior.0.len() < 4 {
         return None;
     }
     let interiors = poly
         .interiors()
         .iter()
-        .map(|r| r.simplify(tolerance))
+        .map(|r| simplify_line(r, tolerance))
         .filter(|r| r.0.len() >= 4)
         .collect();
     Some(Polygon::new(exterior, interiors))

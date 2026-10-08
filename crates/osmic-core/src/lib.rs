@@ -1,5 +1,6 @@
 //! Shared types for osmic: coordinates, typed OSM ids, geometry, bounding
-//! boxes, tile coordinates, Web Mercator projection, clipping and errors.
+//! boxes, tile coordinates, Web Mercator projection, clipping,
+//! simplification and errors.
 
 pub mod bbox;
 pub mod clip;
@@ -10,6 +11,7 @@ pub mod fs;
 pub mod geometry;
 pub mod mercator;
 pub mod osm_id;
+pub mod simplify;
 pub mod tile;
 
 pub use bbox::BBox;

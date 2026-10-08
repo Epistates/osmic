@@ -23,7 +23,6 @@ mlt = ["dep:mlt-core"]
 osmic-core = { workspace = true }
 osmic-osm = { workspace = true, default-features = false }
 flate2 = { workspace = true }
-geo = { workspace = true }
 geo-types = { workspace = true }
 mlt-core = { version = "0.19", optional = true }
 pmtiles = { workspace = true, features = ["write"], optional = true }
@@ -34,4 +33,5 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+geo = { workspace = true }
 bytes = { workspace = true }

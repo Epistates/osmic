@@ -19,11 +19,11 @@
 //! map styles draw; filled boundary polygons would add a feature to every
 //! tile they cover.
 
-use geo::Simplify;
 use geo_types::{Coord, LineString};
 
 use osmic_core::clip::{Axis, clip_line_band, clip_ring_band, ring_signed_area_2x};
 use osmic_core::mercator::{lat_to_unit_y, lon_to_unit_x, tiles_per_axis};
+use osmic_core::simplify::rdp;
 use osmic_core::{Geometry, TileCoord, Zoom};
 use osmic_osm::{Feature, Layer, TagStore};
 
@@ -149,7 +149,10 @@ impl Shape {
                 .iter()
                 .map(|p| {
                     p.windows(2)
-                        .map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y))
+                        .map(|w| {
+                            let (dx, dy) = (w[1].x - w[0].x, w[1].y - w[0].y);
+                            (dx * dx + dy * dy).sqrt()
+                        })
                         .sum::<f64>()
                 })
                 .sum(),
@@ -168,7 +171,11 @@ impl Shape {
     }
 
     fn simplify(&self, tolerance: f64) -> Self {
-        let simplify = |r: &Ring| LineString(r.clone()).simplify(tolerance).0;
+        let simplify = |r: &Ring| {
+            let mut out = Vec::with_capacity(r.len());
+            rdp(r, tolerance, &mut out);
+            out
+        };
         match self {
             Self::Points(_) => self.clone(),
             Self::Lines(l) => {

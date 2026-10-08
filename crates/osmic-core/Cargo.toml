@@ -19,5 +19,8 @@ tracing = { workspace = true }
 serde = { workspace = true }
 geo-types = { workspace = true }
 
+[dev-dependencies]
+geo = { workspace = true }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
