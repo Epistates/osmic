@@ -54,11 +54,14 @@ pub mod prelude {
     // App framework
     pub use osmic_app::{App, AppError, BoxError, Plugin, PluginGroup};
 
-    // Tile generation
+    // Tile generation. `TileRenderConfig` is the type of
+    // `TileGeneratorConfig::render` (`osmic::tiles::RenderConfig`).
+    pub use osmic_tiles::RenderConfig as TileRenderConfig;
     pub use osmic_tiles::{MvtEncoder, PmTilesArchive, TileGenerator, TileGeneratorConfig};
 
-    // Rendering
-    pub use osmic_render::backend::{RenderBackend, RenderConfig};
+    // Rendering. The raster backend's settings are
+    // `osmic::render::RenderConfig`, deliberately not in the prelude.
+    pub use osmic_render::backend::RenderBackend;
     pub use osmic_render::skia::SkiaBackend;
 
     // Style
@@ -66,6 +69,22 @@ pub mod prelude {
 
     // Server
     pub use osmic_serve::{ServerRoutes, TileServer, TileServerConfig, TileServerPlugin};
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::prelude::*;
+
+    #[test]
+    fn prelude_render_config_is_the_tile_generators() {
+        let config = TileGeneratorConfig {
+            render: TileRenderConfig::default(),
+            ..TileGeneratorConfig::default()
+        };
+        assert!(config.max_tile_bytes > 0);
+        // The raster backend's settings stay reachable through the module.
+        let _ = crate::render::RenderConfig::default();
+    }
 }
 
 /// The README's examples, compiled as doctests so they stay correct.
