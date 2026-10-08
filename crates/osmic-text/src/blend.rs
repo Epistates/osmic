@@ -226,10 +226,12 @@ impl<'a> Canvas<'a> {
         if rgba[3] == 0 {
             return;
         }
+        // In `i64`: a mask far off-canvas must clip, not overflow.
+        let (x, y) = (i64::from(x), i64::from(y));
         let x0 = x.max(0);
         let y0 = y.max(0);
-        let x1 = (x + mask.width as i32).min(self.width as i32);
-        let y1 = (y + mask.height as i32).min(self.height as i32);
+        let x1 = (x + i64::from(mask.width)).min(i64::from(self.width));
+        let y1 = (y + i64::from(mask.height)).min(i64::from(self.height));
         for py in y0..y1 {
             let src_row = (py - y) as usize * mask.width as usize;
             let dst_row = py as usize * self.width as usize;
@@ -246,10 +248,11 @@ impl<'a> Canvas<'a> {
     /// Fill a rectangle (clipped) with `color`.
     pub fn fill_rect(&mut self, x: i32, y: i32, w: u32, h: u32, color: Color) {
         let rgba = color.to_rgba8();
+        let (x, y) = (i64::from(x), i64::from(y));
         let x0 = x.max(0);
         let y0 = y.max(0);
-        let x1 = (x.saturating_add(w as i32)).min(self.width as i32);
-        let y1 = (y.saturating_add(h as i32)).min(self.height as i32);
+        let x1 = (x + i64::from(w)).min(i64::from(self.width));
+        let y1 = (y + i64::from(h)).min(i64::from(self.height));
         for py in y0..y1 {
             for px in x0..x1 {
                 let i = (py as usize * self.width as usize + px as usize) * 4;
@@ -318,6 +321,17 @@ mod tests {
                 "{straight:?}"
             );
         }
+    }
+
+    #[test]
+    fn composite_far_off_canvas_is_a_no_op() {
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        let mut mask = Mask::new(4, 4);
+        mask.data.fill(255);
+        let mut canvas = Canvas::new(&mut buf, 4, 4).unwrap();
+        canvas.composite_mask(&mask, i32::MAX - 1, i32::MAX - 1, Color::WHITE);
+        canvas.composite_mask(&mask, i32::MIN, i32::MIN, Color::WHITE);
+        assert!(buf.iter().all(|&b| b == 0));
     }
 
     #[test]

@@ -24,7 +24,9 @@ mod shaping;
 
 pub use blend::{Canvas, Mask, blend_over, unpremultiply};
 pub use collision::{CollisionIndex, Rect};
-pub use engine::{LabelBitmap, NoFontsError, ShapedGlyph, ShapedText, TextEngine, max_halo_width};
+pub use engine::{
+    LabelBitmap, MAX_FONT_SIZE, NoFontsError, ShapedGlyph, ShapedText, TextEngine, max_halo_width,
+};
 pub use label::{
     LabelAnchor, LabelCandidate, LabelPlacer, LabelStyle, PlacedGlyph, PlacedLabel, clip_polyline,
 };

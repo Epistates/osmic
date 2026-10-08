@@ -18,7 +18,16 @@ const LINE_HEIGHT: f32 = 1.2;
 const SHAPE_CACHE_LIMIT: usize = 8192;
 
 /// Largest label bitmap, per side, that will be rasterised.
-const MAX_LABEL_SIDE: i32 = 4096;
+const MAX_LABEL_SIDE: i64 = 4096;
+
+/// Largest font size, in pixels, that is shaped; larger text is empty.
+/// (Glyph bitmaps grow with the square of the size.)
+pub const MAX_FONT_SIZE: f32 = 2048.0;
+
+/// Glyph positions beyond this many pixels from the origin are not
+/// rasterised: `f32` stops representing whole pixels exactly there, and it
+/// keeps all bitmap arithmetic far from `i32` overflow.
+const MAX_COORDINATE: f32 = 16_777_216.0;
 
 /// No usable font could be loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,9 +187,10 @@ impl TextEngine {
         }
     }
 
-    /// Shape `text` on one line at `font_size` pixels.
+    /// Shape `text` on one line at `font_size` pixels. Sizes outside
+    /// `1..=MAX_FONT_SIZE` (or NaN) give empty text.
     pub fn shape(&mut self, text: &str, font_size: f32) -> Arc<ShapedText> {
-        if !(font_size.is_finite() && font_size >= 1.0) || text.trim().is_empty() {
+        if !(1.0..=MAX_FONT_SIZE).contains(&font_size) || text.trim().is_empty() {
             return Arc::new(ShapedText::empty());
         }
         let key = (text.to_string(), font_size.to_bits());
@@ -276,6 +286,13 @@ impl TextEngine {
         let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
         for g in glyphs {
             let sg = shaped.glyphs.get(g.index)?;
+            let placeable = g.angle.is_finite()
+                && g.center
+                    .iter()
+                    .all(|c| c.is_finite() && c.abs() <= MAX_COORDINATE);
+            if !placeable {
+                return None;
+            }
             let Some(bitmap) = self.glyph_bitmap(sg.key) else {
                 continue; // blank glyph (space) or missing from the font
             };
@@ -331,15 +348,19 @@ impl TextEngine {
             }
         }
 
-        let pad = halo_width.max(0.0).ceil() as i32 + 1;
-        let x0 = lo[0].floor() as i32 - pad;
-        let y0 = lo[1].floor() as i32 - pad;
-        let x1 = hi[0].ceil() as i32 + pad;
-        let y1 = hi[1].ceil() as i32 + pad;
+        // Glyph centres are within `MAX_COORDINATE` and glyphs within
+        // `MAX_FONT_SIZE`, so these fit easily in `i64`; once the box passes
+        // the size check every coordinate fits in `i32` too.
+        let pad = halo_width.ceil() as i64 + 1;
+        let x0 = lo[0].floor() as i64 - pad;
+        let y0 = lo[1].floor() as i64 - pad;
+        let x1 = hi[0].ceil() as i64 + pad;
+        let y1 = hi[1].ceil() as i64 + pad;
         if x1 - x0 > MAX_LABEL_SIDE || y1 - y0 > MAX_LABEL_SIDE || x1 <= x0 || y1 <= y0 {
             return None;
         }
-        let mut mask = Mask::new((x1 - x0) as u32, (y1 - y0) as u32);
+        let (x0, y0) = (i32::try_from(x0).ok()?, i32::try_from(y0).ok()?);
+        let mut mask = Mask::new((x1 - i64::from(x0)) as u32, (y1 - i64::from(y0)) as u32);
 
         for item in &items {
             let bm = &item.bitmap;
@@ -544,6 +565,47 @@ mod tests {
                 .halo
                 .is_none()
         );
+    }
+
+    #[test]
+    fn huge_or_invalid_positions_are_skipped_not_overflowed() {
+        let mut engine = test_engine();
+        let mut buf = vec![0u8; 20 * 20 * 4];
+        let mut canvas = Canvas::new(&mut buf, 20, 20).unwrap();
+        for (x, y) in [
+            (f32::MAX, 0.0),
+            (-f32::MAX, -f32::MAX),
+            (3.0e9, 3.0e9),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+        ] {
+            engine.draw_text(&mut canvas, "Far", x, y, 12.0, Color::BLACK);
+        }
+        let shaped = engine.shape("Far", 12.0);
+        let glyph = |center, angle| PlacedGlyph {
+            index: 0,
+            center,
+            angle,
+        };
+        assert!(
+            engine
+                .rasterize(&shaped, &[glyph([1.0e30, 0.0], 0.0)], 2.0)
+                .is_none()
+        );
+        assert!(
+            engine
+                .rasterize(&shaped, &[glyph([5.0, 5.0], f32::NAN)], 0.0)
+                .is_none()
+        );
+        assert!(
+            engine
+                .rasterize(&shaped, &[glyph([5.0, 5.0], 0.0)], 0.0)
+                .is_some()
+        );
+        assert!(buf.iter().all(|&b| b == 0), "nothing drawn");
+        // Absurd font sizes shape to nothing instead of huge bitmaps.
+        assert!(engine.shape("Big", MAX_FONT_SIZE * 2.0).is_empty());
+        assert!(!engine.shape("Big", MAX_FONT_SIZE).is_empty());
     }
 
     #[test]
