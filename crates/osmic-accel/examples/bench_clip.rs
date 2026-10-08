@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use geo_types::{Coord, LineString, Polygon};
 use osmic_accel::{ClipOptions, GpuAccelerator, WorkItem, clip_batch_cpu};
 use osmic_core::geometry::Geometry;
+use osmic_core::mercator::tile_bounds;
 
 /// xorshift64*: deterministic, dependency-free.
 struct Rng(u64);
@@ -30,9 +31,20 @@ impl Rng {
 const ZOOM: u8 = 8;
 const TILE: (u32, u32) = (135, 90);
 
+/// Center and half-size (degrees) of the benchmarked tile.
+fn tile_frame() -> (f64, f64, f64, f64) {
+    let b = tile_bounds(TILE.0, TILE.1, ZOOM);
+    (
+        (b.min_lon + b.max_lon) / 2.0,
+        (b.min_lat + b.max_lat) / 2.0,
+        b.width() / 2.0,
+        b.height() / 2.0,
+    )
+}
+
 fn polygon(rng: &mut Rng, vertices: usize) -> Geometry {
-    // Around lon/lat of tile (135, 90) at z8; radii cross the tile edge.
-    let (cx, cy, hw, hh) = (-12.85, 62.0, 0.7, 0.33);
+    // Around the tile; radii cross the tile edge.
+    let (cx, cy, hw, hh) = tile_frame();
     let mut angles: Vec<f64> = (0..vertices)
         .map(|_| rng.range(0.0, std::f64::consts::TAU))
         .collect();
@@ -52,12 +64,13 @@ fn polygon(rng: &mut Rng, vertices: usize) -> Geometry {
 }
 
 fn line(rng: &mut Rng, vertices: usize) -> Geometry {
-    let (mut x, mut y) = (-12.85, 62.0);
+    // A random walk from the tile center, crossing the tile edges.
+    let (mut x, mut y, hw, hh) = tile_frame();
     Geometry::Line(LineString(
         (0..vertices)
             .map(|_| {
-                x += rng.range(-0.3, 0.3);
-                y += rng.range(-0.15, 0.15);
+                x += rng.range(-0.4, 0.4) * hw;
+                y += rng.range(-0.4, 0.4) * hh;
                 Coord { x, y }
             })
             .collect(),
