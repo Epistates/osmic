@@ -701,19 +701,11 @@ mod tests {
                 )],
             ),
         ]);
-        let mut archive = PmTilesArchive::create(
-            path,
-            &ArchiveOptions {
-                format: TileFormat::Mvt,
-                compression,
-                bounds: BBox::new(-90.0, 0.0, 0.0, 66.0),
-                min_zoom: 8,
-                max_zoom: 8,
-                metadata: serde_json::json!({}),
-                overwrite: true,
-            },
-        )
-        .unwrap();
+        let mut options = ArchiveOptions::new(TileFormat::Mvt, 8, 8);
+        options.compression = compression;
+        options.bounds = BBox::new(-90.0, 0.0, 0.0, 66.0);
+        options.overwrite = true;
+        let mut archive = PmTilesArchive::create(path, &options).unwrap();
         archive
             .add_tile(TileCoord::new(70, 95, Zoom::clamped(8)), &pack(tile))
             .unwrap();

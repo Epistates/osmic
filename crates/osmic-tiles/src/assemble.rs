@@ -22,10 +22,12 @@ use crate::model::{TileFeature, TileLayer};
 
 /// Compression applied to each tile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TileCompression {
     /// gzip — what MapLibre, Mapbox and every PMTiles reader expect.
     #[default]
     Gzip,
+    /// Uncompressed.
     None,
 }
 

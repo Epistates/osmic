@@ -31,6 +31,7 @@ use crate::model::{GeomType, TileFeature, ring_area2};
 
 /// Which attributes are written into tiles.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AttributeMode {
     /// `class` plus names, references and the address/contact keys of
     /// [`osmic_osm::tags::CURATED_KEYS`].
@@ -41,9 +42,15 @@ pub enum AttributeMode {
 }
 
 /// Rendering parameters.
+///
+/// Start from [`RenderConfig::default`] and set the fields to change; new
+/// fields may be added in minor releases.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RenderConfig {
+    /// Lowest zoom level to render.
     pub min_zoom: u8,
+    /// Highest zoom level to render (at most [`Zoom::MAX`]).
     pub max_zoom: u8,
     /// Tile coordinate extent (MVT default 4096).
     pub extent: u32,
@@ -57,6 +64,7 @@ pub struct RenderConfig {
     /// Lines shorter than this and polygons with less area than its square
     /// (screen pixels) are dropped below `max_zoom`.
     pub min_size_px: f64,
+    /// Which attributes are written.
     pub attributes: AttributeMode,
 }
 

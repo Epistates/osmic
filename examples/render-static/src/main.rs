@@ -283,19 +283,11 @@ mod tests {
             ),
         ]);
         let coord = TileCoord::new(70, 95, osmic_core::Zoom::clamped(8));
-        let mut archive = PmTilesArchive::create(
-            path,
-            &ArchiveOptions {
-                format: TileFormat::Mvt,
-                compression: TileCompression::None,
-                bounds: coord.bbox(),
-                min_zoom: 8,
-                max_zoom: 8,
-                metadata: serde_json::json!({}),
-                overwrite: true,
-            },
-        )
-        .unwrap();
+        let mut options = ArchiveOptions::new(TileFormat::Mvt, 8, 8);
+        options.compression = TileCompression::None;
+        options.bounds = coord.bbox();
+        options.overwrite = true;
+        let mut archive = PmTilesArchive::create(path, &options).unwrap();
         archive.add_tile(coord, &tile).unwrap();
         archive.finalize().unwrap();
     }

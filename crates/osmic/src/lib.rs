@@ -77,10 +77,8 @@ mod tests {
 
     #[test]
     fn prelude_render_config_is_the_tile_generators() {
-        let config = TileGeneratorConfig {
-            render: TileRenderConfig::default(),
-            ..TileGeneratorConfig::default()
-        };
+        let mut config = TileGeneratorConfig::default();
+        config.render = TileRenderConfig::default();
         assert!(config.max_tile_bytes > 0);
         // The raster backend's settings stay reachable through the module.
         let _ = crate::render::RenderConfig::default();

@@ -12,9 +12,7 @@ use osmic_osm::{
     TagStore,
 };
 use osmic_tiles::pmtiles::ArchiveInfo;
-use osmic_tiles::{
-    AttributeMode, MvtEncoder, RenderConfig, TileEncoder, TileGenerator, TileGeneratorConfig,
-};
+use osmic_tiles::{AttributeMode, MvtEncoder, TileEncoder, TileGenerator, TileGeneratorConfig};
 
 use super::{check_output, fmt_bytes, fmt_count, write_file};
 use crate::args::{ZoomRange, parse_filter, parse_node_store};
@@ -220,25 +218,22 @@ fn make_encoder(format: Format) -> anyhow::Result<Box<dyn TileEncoder>> {
 }
 
 fn generator_config(args: &TilesArgs, temp_parent: PathBuf) -> TileGeneratorConfig {
-    TileGeneratorConfig {
-        render: RenderConfig {
-            min_zoom: args.zoom.min,
-            max_zoom: args.zoom.max,
-            extent: args.extent,
-            buffer_px: args.buffer_px,
-            simplify_px: args.simplify_px,
-            attributes: if args.all_tags {
-                AttributeMode::All
-            } else {
-                AttributeMode::Curated
-            },
-            ..RenderConfig::default()
-        },
-        max_tile_bytes: args.max_tile_bytes,
-        memory_budget: args.memory_mb.saturating_mul(1 << 20),
-        temp_dir: Some(temp_parent),
-        ..TileGeneratorConfig::default()
-    }
+    let mut config = TileGeneratorConfig::default();
+    let render = &mut config.render;
+    render.min_zoom = args.zoom.min;
+    render.max_zoom = args.zoom.max;
+    render.extent = args.extent;
+    render.buffer_px = args.buffer_px;
+    render.simplify_px = args.simplify_px;
+    render.attributes = if args.all_tags {
+        AttributeMode::All
+    } else {
+        AttributeMode::Curated
+    };
+    config.max_tile_bytes = args.max_tile_bytes;
+    config.memory_budget = args.memory_mb.saturating_mul(1 << 20);
+    config.temp_dir = Some(temp_parent);
+    config
 }
 
 fn finish(

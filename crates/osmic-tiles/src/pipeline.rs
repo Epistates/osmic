@@ -36,12 +36,18 @@ use crate::render::{RenderConfig, Renderer};
 use crate::sorter::{ExternalSorter, SortedRuns};
 
 /// Tile generation settings.
+///
+/// Start from [`TileGeneratorConfig::default`] and set the fields to change;
+/// new fields may be added in minor releases.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TileGeneratorConfig {
+    /// How features are rendered into tiles.
     pub render: RenderConfig,
     /// Compressed size budget per tile; least important features are
     /// dropped from tiles that exceed it.
     pub max_tile_bytes: usize,
+    /// Compression applied to each tile.
     pub compression: TileCompression,
     /// Memory for buffering rendered pieces before spilling to disk.
     pub memory_budget: usize,
@@ -154,9 +160,11 @@ impl RenderStats {
 
 /// Summary of a finished run.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct TileSummary {
     /// Features rendered (before slicing into tiles).
     pub input_features: u64,
+    /// Non-empty tiles written.
     pub tiles: u64,
     /// Feature pieces written into tiles.
     pub features: u64,
@@ -164,7 +172,9 @@ pub struct TileSummary {
     pub dropped_features: u64,
     /// Tiles that hit the size budget.
     pub budget_limited_tiles: u64,
+    /// Size of the largest tile, compressed.
     pub largest_tile_bytes: usize,
+    /// Size of all tiles, compressed.
     pub total_bytes: u64,
     /// Tiles per zoom level.
     pub tiles_per_zoom: BTreeMap<u8, u64>,
@@ -172,6 +182,7 @@ pub struct TileSummary {
     pub spilled_bytes: u64,
     /// Time from generator creation to the start of the merge.
     pub render_seconds: f64,
+    /// Time spent merging, encoding and writing tiles.
     pub encode_seconds: f64,
 }
 

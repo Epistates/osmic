@@ -120,16 +120,43 @@ pub fn metadata_json(
 }
 
 /// Header settings for a new archive.
+///
+/// Create with [`ArchiveOptions::new`] and set the fields to change; new
+/// fields may be added in minor releases.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ArchiveOptions {
+    /// Format of the tiles.
     pub format: TileFormat,
+    /// Compression the tiles were written with.
     pub compression: TileCompression,
+    /// Geographic bounds of the data.
     pub bounds: BBox,
+    /// Lowest zoom level with tiles.
     pub min_zoom: u8,
+    /// Highest zoom level with tiles.
     pub max_zoom: u8,
+    /// JSON metadata (TileJSON-style; see [`metadata_json`]).
     pub metadata: serde_json::Value,
     /// Replace an existing file at the destination (atomically).
     pub overwrite: bool,
+}
+
+impl ArchiveOptions {
+    /// Options for `format` tiles at zoom levels `min_zoom..=max_zoom`:
+    /// gzip-compressed, world bounds, empty metadata, and no overwriting of
+    /// an existing file.
+    pub fn new(format: TileFormat, min_zoom: u8, max_zoom: u8) -> Self {
+        Self {
+            format,
+            compression: TileCompression::default(),
+            bounds: BBox::world(),
+            min_zoom,
+            max_zoom,
+            metadata: serde_json::json!({}),
+            overwrite: false,
+        }
+    }
 }
 
 /// A PMTiles archive being written.
@@ -240,15 +267,14 @@ mod tests {
     use osmic_core::Zoom;
 
     fn options(overwrite: bool) -> ArchiveOptions {
-        ArchiveOptions {
-            format: TileFormat::Mvt,
-            compression: TileCompression::None,
-            bounds: BBox::new(-1.0, -1.0, 1.0, 1.0),
-            min_zoom: 0,
-            max_zoom: 1,
-            metadata: serde_json::json!({"name": "t"}),
-            overwrite,
-        }
+        let mut options = ArchiveOptions::new(TileFormat::Mvt, 0, 1);
+        assert_eq!(options.compression, TileCompression::Gzip);
+        assert!(!options.overwrite, "never overwrite unless asked");
+        options.compression = TileCompression::None;
+        options.bounds = BBox::new(-1.0, -1.0, 1.0, 1.0);
+        options.metadata = serde_json::json!({"name": "t"});
+        options.overwrite = overwrite;
+        options
     }
 
     #[test]
