@@ -38,8 +38,9 @@ pub enum AccelError {
     #[error("GPU acceleration is not available")]
     NotAvailable,
 
-    /// A work item or option is invalid (non-finite coordinate, zoom or tile
-    /// index out of range, ...).
+    /// A work item or option is invalid (non-finite coordinate, coordinate
+    /// too far from the tile to project, zoom or tile index out of range,
+    /// ...).
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 }

@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use geo_types::{Coord, LineString, MultiPolygon, Point, Polygon};
-use osmic_accel::{AccelError, ClipOptions, ClippedGeometry, GpuAccelerator, WorkItem};
+use osmic_accel::{
+    AccelError, AccelResult, ClipOptions, ClippedGeometry, GpuAccelerator, WorkItem, clip_batch_cpu,
+};
 use osmic_core::geometry::Geometry;
 
 /// The GPU backend, or `None` (the test skips) when this build or machine
@@ -17,6 +19,18 @@ pub fn gpu(options: ClipOptions) -> Option<GpuAccelerator> {
         }
         Err(e) => panic!("unexpected GPU init error: {e}"),
     }
+}
+
+/// Clip `items` with default options on every backend available here: the
+/// CPU, and the GPU when there is one. Returns `(backend, result)` pairs.
+pub fn on_every_backend(
+    items: &[WorkItem<'_>],
+) -> Vec<(&'static str, AccelResult<Vec<ClippedGeometry>>)> {
+    let mut out = vec![("cpu", clip_batch_cpu(items, &ClipOptions::default()))];
+    if let Some(gpu) = gpu(ClipOptions::default()) {
+        out.push(("gpu", gpu.clip_batch(items)));
+    }
+    out
 }
 
 pub const ZOOM: u8 = 8;

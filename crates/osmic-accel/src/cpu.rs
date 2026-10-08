@@ -6,9 +6,52 @@
 //!   bottom, top), skipping edges the ring's bounding box proves irrelevant.
 //! - Lines: Liang-Barsky per segment, emitting one output part per contiguous
 //!   run inside the clip box.
+//!
+//! The kernels are generic over the coordinate type: the `f32` instances are
+//! the reference for the GPU, the `f64` instances pre-clip far-away geometry
+//! to a guard box on the host (see [`crate::prepare`]).
+
+use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use crate::clip::{UnitResults, UnitView};
 use crate::prepare::{Bounds, Prepared, UnitKind};
+
+/// A coordinate type the clip kernels run on (`f32` or `f64`).
+pub(crate) trait Scalar:
+    Copy
+    + PartialOrd
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + Neg<Output = Self>
+{
+    const ZERO: Self;
+    const ONE: Self;
+    fn min(self, other: Self) -> Self;
+    fn max(self, other: Self) -> Self;
+    fn clamp(self, lo: Self, hi: Self) -> Self;
+}
+
+macro_rules! scalar {
+    ($t:ty) => {
+        impl Scalar for $t {
+            const ZERO: Self = 0.0;
+            const ONE: Self = 1.0;
+            fn min(self, other: Self) -> Self {
+                <$t>::min(self, other)
+            }
+            fn max(self, other: Self) -> Self {
+                <$t>::max(self, other)
+            }
+            fn clamp(self, lo: Self, hi: Self) -> Self {
+                <$t>::clamp(self, lo, hi)
+            }
+        }
+    };
+}
+scalar!(f32);
+scalar!(f64);
 
 /// A Sutherland-Hodgman stage would have written more than the allowed
 /// number of vertices.
@@ -17,21 +60,21 @@ pub(crate) struct Overflow;
 
 /// Clip edges in application order: (axis, sign, value selector).
 /// A vertex `p` is inside an edge when `(p[axis] - value) * sign >= 0`.
-fn edges(b: &Bounds) -> [(usize, f32, f32); 4] {
+fn edges<T: Scalar>(b: &Bounds<T>) -> [(usize, T, T); 4] {
     [
-        (0, 1.0, b.min_x),
-        (0, -1.0, b.max_x),
-        (1, 1.0, b.min_y),
-        (1, -1.0, b.max_y),
+        (0, T::ONE, b.min_x),
+        (0, -T::ONE, b.max_x),
+        (1, T::ONE, b.min_y),
+        (1, -T::ONE, b.max_y),
     ]
 }
 
 /// One Sutherland-Hodgman stage. `dst` is cleared first; fails if more than
 /// `cap` vertices would be produced.
-fn clip_stage(
-    src: &[[f32; 2]],
-    dst: &mut Vec<[f32; 2]>,
-    (axis, sign, value): (usize, f32, f32),
+fn clip_stage<T: Scalar>(
+    src: &[[T; 2]],
+    dst: &mut Vec<[T; 2]>,
+    (axis, sign, value): (usize, T, T),
     cap: usize,
 ) -> Result<(), Overflow> {
     dst.clear();
@@ -42,8 +85,8 @@ fn clip_stage(
     let mut prev_d = (prev[axis] - value) * sign;
     for &curr in src {
         let curr_d = (curr[axis] - value) * sign;
-        let curr_in = curr_d >= 0.0;
-        let prev_in = prev_d >= 0.0;
+        let curr_in = curr_d >= T::ZERO;
+        let prev_in = prev_d >= T::ZERO;
         if curr_in != prev_in {
             if dst.len() >= cap {
                 return Err(Overflow);
@@ -80,12 +123,12 @@ enum Loc {
 ///
 /// `out` receives the result (empty if fewer than 3 vertices survive).
 /// `cap` bounds every intermediate stage; pass `usize::MAX` for no limit.
-pub(crate) fn clip_ring(
-    input: &[[f32; 2]],
-    bounds: &Bounds,
+pub(crate) fn clip_ring<T: Scalar>(
+    input: &[[T; 2]],
+    bounds: &Bounds<T>,
     cap: usize,
-    out: &mut Vec<[f32; 2]>,
-    scratch: &mut Vec<[f32; 2]>,
+    out: &mut Vec<[T; 2]>,
+    scratch: &mut Vec<[T; 2]>,
 ) -> Result<(), Overflow> {
     out.clear();
     let Some(&first) = input.first() else {
@@ -160,11 +203,16 @@ pub(crate) fn clip_ring(
 }
 
 /// Liang-Barsky parametric clip of segment `p0 -> p1`; returns `(t0, t1)`.
-fn clip_segment(p0: [f32; 2], p1: [f32; 2], b: &Bounds) -> Option<(f32, f32)> {
+fn clip_segment<T: Scalar>(p0: [T; 2], p1: [T; 2], b: &Bounds<T>) -> Option<(T, T)> {
+    // Both ends inside: the tests below cannot move either parameter, so
+    // skip their divisions (same result as the shader's full evaluation).
+    if b.contains(p0) && b.contains(p1) {
+        return Some((T::ZERO, T::ONE));
+    }
     let dx = p1[0] - p0[0];
     let dy = p1[1] - p0[1];
-    let mut t0 = 0.0f32;
-    let mut t1 = 1.0f32;
+    let mut t0 = T::ZERO;
+    let mut t1 = T::ONE;
     let tests = [
         (-dx, p0[0] - b.min_x),
         (dx, b.max_x - p0[0]),
@@ -172,13 +220,13 @@ fn clip_segment(p0: [f32; 2], p1: [f32; 2], b: &Bounds) -> Option<(f32, f32)> {
         (dy, b.max_y - p0[1]),
     ];
     for (p, q) in tests {
-        if p == 0.0 {
-            if q < 0.0 {
+        if p == T::ZERO {
+            if q < T::ZERO {
                 return None;
             }
         } else {
             let r = q / p;
-            if p < 0.0 {
+            if p < T::ZERO {
                 if r > t1 {
                     return None;
                 }
@@ -199,7 +247,7 @@ fn clip_segment(p0: [f32; 2], p1: [f32; 2], b: &Bounds) -> Option<(f32, f32)> {
     (t0 < t1).then_some((t0, t1))
 }
 
-fn point_at(p0: [f32; 2], p1: [f32; 2], t: f32, b: &Bounds) -> [f32; 2] {
+fn point_at<T: Scalar>(p0: [T; 2], p1: [T; 2], t: T, b: &Bounds<T>) -> [T; 2] {
     [
         (p0[0] + t * (p1[0] - p0[0])).clamp(b.min_x, b.max_x),
         (p0[1] + t * (p1[1] - p0[1])).clamp(b.min_y, b.max_y),
@@ -208,10 +256,10 @@ fn point_at(p0: [f32; 2], p1: [f32; 2], t: f32, b: &Bounds) -> [f32; 2] {
 
 /// Clip a polyline to `bounds`. Appends clipped points to `out` and one entry
 /// per contiguous part (its point count) to `parts`.
-pub(crate) fn clip_polyline(
-    input: &[[f32; 2]],
-    bounds: &Bounds,
-    out: &mut Vec<[f32; 2]>,
+pub(crate) fn clip_polyline<T: Scalar>(
+    input: &[[T; 2]],
+    bounds: &Bounds<T>,
+    out: &mut Vec<[T; 2]>,
     parts: &mut Vec<u32>,
 ) {
     let mut current = 0u32;
@@ -221,8 +269,8 @@ pub(crate) fn clip_polyline(
             close_part(&mut current, parts);
             continue;
         };
-        let start_clipped = t0 > 0.0;
-        let end_clipped = t1 < 1.0;
+        let start_clipped = t0 > T::ZERO;
+        let end_clipped = t1 < T::ONE;
         if current > 0 && start_clipped {
             close_part(&mut current, parts);
         }

@@ -41,8 +41,16 @@
 //! can differ by a few ulps. GPU and CPU results are therefore
 //! **tolerance-equal, not bit-identical**; with tile extents of 4096 expect
 //! differences well below `1e-2` tile units. Both are far below the integer
-//! quantisation of vector tiles. Inputs must be finite (checked on the host;
-//! `-ffast-math` makes NaN/inf behaviour undefined on the GPU).
+//! quantisation of vector tiles.
+//!
+//! Projection runs in f64. Geometry reaching more than one tile extent
+//! beyond the clip box is first clipped to that larger guard box in f64, so
+//! the f32 stage (CPU or GPU) only sees finite coordinates within a few
+//! extents of the tile: huge but finite coordinates cannot saturate to
+//! infinity, and edges spanning thousands of tiles keep their precision.
+//! Non-finite inputs, and coordinates so far away that even their f64
+//! projection overflows, are rejected with [`AccelError::InvalidInput`]
+//! (`-ffast-math` makes NaN/inf behaviour undefined on the GPU).
 //!
 //! # Performance
 //!

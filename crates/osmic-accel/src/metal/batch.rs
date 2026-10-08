@@ -384,19 +384,19 @@ mod tests {
 
     fn prepared_ring(ring: &[[f32; 2]]) -> Prepared {
         use crate::prepare::{Plan, Unit};
-        Prepared {
-            coords: ring.to_vec(),
-            units: vec![Unit {
-                kind: UnitKind::Ring,
-                start: 0,
-                len: ring.len() as u32,
-                bounds: square_bounds(),
-            }],
-            plans: vec![Plan::Polygons {
-                first_unit: 0,
-                ring_counts: vec![1],
-            }],
-        }
+        let mut prepared = Prepared::default();
+        prepared.coords = ring.to_vec();
+        prepared.units = vec![Unit {
+            kind: UnitKind::Ring,
+            start: 0,
+            len: ring.len() as u32,
+            bounds: square_bounds(),
+        }];
+        prepared.plans = vec![Plan::Polygons {
+            first_unit: 0,
+            ring_counts: vec![1],
+        }];
+        prepared
     }
 
     /// Run a prepared batch on the GPU, returning `None` if there is no GPU.
