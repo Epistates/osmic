@@ -45,13 +45,15 @@ impl BBox {
         }
     }
 
-    /// The full world extent.
+    /// The full Web Mercator world extent (latitudes to
+    /// [`MAX_LATITUDE`](crate::mercator::MAX_LATITUDE)).
     pub const fn world() -> Self {
+        use crate::mercator::MAX_LATITUDE;
         Self {
             min_lon: -180.0,
-            min_lat: -85.051_129,
+            min_lat: -MAX_LATITUDE,
             max_lon: 180.0,
-            max_lat: 85.051_129,
+            max_lat: MAX_LATITUDE,
         }
     }
 

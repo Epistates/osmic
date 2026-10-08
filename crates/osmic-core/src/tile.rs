@@ -138,14 +138,17 @@ impl TileCoord {
         })
     }
 
-    /// Four child tiles (one zoom level down), or `None` at [`Zoom::MAX`].
+    /// Four child tiles (one zoom level down), or `None` at [`Zoom::MAX`] or
+    /// for a coordinate whose children would not fit in `u32`.
     pub fn children(&self) -> Option<[Self; 4]> {
         if self.z.0 >= Zoom::MAX.0 {
             return None;
         }
         let cz = Zoom(self.z.0 + 1);
-        let cx = self.x * 2;
-        let cy = self.y * 2;
+        // `new` does not check the grid; the doubled values are even, so
+        // adding 1 below cannot overflow.
+        let cx = self.x.checked_mul(2)?;
+        let cy = self.y.checked_mul(2)?;
         Some([
             Self::new(cx, cy, cz),
             Self::new(cx + 1, cy, cz),
@@ -266,6 +269,9 @@ mod tests {
     #[test]
     fn children_at_max_zoom_is_none() {
         assert!(TileCoord::new(0, 0, Zoom::MAX).children().is_none());
+        // Off the grid (unchecked `new`): no overflow, just no children.
+        let off_grid = TileCoord::new(u32::MAX, 0, Zoom::clamped(3));
+        assert!(off_grid.children().is_none());
     }
 
     #[test]
