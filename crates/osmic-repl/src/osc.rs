@@ -186,7 +186,8 @@ pub fn parse_osc_gz_with(
     limits: OscLimits,
     sink: impl FnMut(Change) -> Result<(), ReplError>,
 ) -> Result<(), ReplError> {
-    let limited = MultiGzDecoder::new(data).take(limits.max_decompressed_bytes + 1);
+    // One byte past the limit tells "exactly at the limit" from "over it".
+    let limited = MultiGzDecoder::new(data).take(limits.max_decompressed_bytes.saturating_add(1));
     let mut counting = CountingReader {
         inner: limited,
         read: 0,
@@ -843,5 +844,11 @@ mod tests {
             parse_osc_gz(&bytes[..], tiny),
             Err(ReplError::TooLarge { .. })
         ));
+        // An unlimited size must not overflow the read-ahead byte.
+        let unlimited = OscLimits {
+            max_decompressed_bytes: u64::MAX,
+            ..OscLimits::default()
+        };
+        assert_eq!(parse_osc_gz(&bytes[..], unlimited).expect("valid").len(), 7);
     }
 }
