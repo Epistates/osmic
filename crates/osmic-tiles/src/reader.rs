@@ -29,19 +29,32 @@ const MAX_INITIAL_BYTES: u64 = 16_384;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OpenArchiveError {
+    /// No file exists at the path.
     #[error("PMTiles archive not found: {}", .0.display())]
     NotFound(PathBuf),
+    /// The file exists but could not be read.
     #[error("cannot read PMTiles archive {}", path.display())]
     Io {
+        /// The archive's path.
         path: PathBuf,
+        /// The underlying I/O error.
         #[source]
         source: std::io::Error,
     },
+    /// The header is not PMTiles v3, or declares sections outside the file.
     #[error("{} is not a valid PMTiles v3 archive: {reason}", path.display())]
-    Invalid { path: PathBuf, reason: String },
+    Invalid {
+        /// The archive's path.
+        path: PathBuf,
+        /// What is wrong with the header.
+        reason: String,
+    },
+    /// The `pmtiles` reader failed, while opening or on a later read.
     #[error("failed to read PMTiles archive {}", path.display())]
     Pmtiles {
+        /// The archive's path.
         path: PathBuf,
+        /// The reader's error.
         #[source]
         source: PmtError,
     },
@@ -106,10 +119,16 @@ pub const MAX_DECOMPRESSED_TILE: u64 = 64 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DecompressError {
+    /// Decompressing would produce more than `limit` bytes.
     #[error("tile decompresses to more than {limit} bytes")]
-    TooLarge { limit: u64 },
+    TooLarge {
+        /// The cap that was exceeded.
+        limit: u64,
+    },
+    /// The archive uses a compression this reader cannot undo.
     #[error("{0:?} tile compression is not supported")]
     Unsupported(Compression),
+    /// The compressed stream is malformed.
     #[error("corrupt compressed tile")]
     Corrupt(#[source] std::io::Error),
 }
