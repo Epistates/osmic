@@ -264,19 +264,29 @@ fn build_layer(
                     None if sizes_zoom => l.resolve(&EvalContext::new(zoom + 1.0, &props)).width,
                     None => style.width,
                 };
-                let dash = dash_pattern(&style.dasharray, style.width);
-                for coords in lines(&f.geometry, m) {
-                    if visible(&options.cull, coords.iter(), style.width.max(width_next)) {
-                        out.push(RenderFeature::Stroke {
-                            coords,
-                            color: style.color,
-                            width: style.width,
-                            width_next_zoom: width_next,
-                            cap: style.cap,
-                            join: style.join,
-                            dash: dash.clone(),
-                        });
-                    }
+                let mut dash = dash_pattern(&style.dasharray, style.width);
+                let reach = style.width.max(width_next);
+                let mut parts = lines(&f.geometry, m)
+                    .into_iter()
+                    .filter(|coords| visible(&options.cull, coords.iter(), reach))
+                    .peekable();
+                while let Some(coords) = parts.next() {
+                    // Only a multi-part line needs copies of the pattern;
+                    // the last part takes it.
+                    let dash = if parts.peek().is_some() {
+                        dash.clone()
+                    } else {
+                        std::mem::take(&mut dash)
+                    };
+                    out.push(RenderFeature::Stroke {
+                        coords,
+                        color: style.color,
+                        width: style.width,
+                        width_next_zoom: width_next,
+                        cap: style.cap,
+                        join: style.join,
+                        dash,
+                    });
                 }
             }
         }
