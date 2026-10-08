@@ -1515,7 +1515,8 @@ mod tests {
             ["==", "class", "service"]
         ])));
         assert!(!filter(json!(["none", ["has", "name"]])));
-        // Legacy ordering compares like with like; attributes are strings.
+        // Legacy ordering compares like with like; these test attributes
+        // are strings.
         assert!(filter(json!([">", "class", "a"])));
     }
 

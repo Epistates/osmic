@@ -44,6 +44,15 @@ dense node store alone reserved 97 GB).
   `AppError::Reentrant`.
 - An interrupted CLI command exits with 128 + the signal number (130 for
   Ctrl-C, 143 for SIGTERM); `osmic serve` drains and exits 0.
+- `osmic-tiles`: `DecodedFeature::tags` holds typed `AttrValue`s (numbers
+  and booleans are no longer strings).
+- `osmic-style`: `PropertySource::property` returns a borrowed `ValueRef`;
+  `EvalError` is an enum; `text-font` is an `Arc<[String]>`.
+- `osmic-style`, `osmic-render`, `osmic-text`: public enums and config
+  structs are `#[non_exhaustive]`; build `SceneOptions`, `RenderConfig`,
+  `TessellationOptions` and `LabelStyle` with their constructors.
+  `SkiaBackend::render_labels` takes a scale and offset instead of a
+  tiny-skia `Transform`.
 
 ### Added
 
@@ -90,6 +99,15 @@ dense node store alone reserved 97 GB).
 - Plugins added from another plugin's `build` were silently dropped.
 - `scripts/publish.sh` published crates in an order that no longer matched
   their dependencies.
+- Rendering: numeric and boolean style filters now match MVT attributes;
+  a NaN zoom no longer panics `interpolate`; exponential interpolation no
+  longer yields NaN colors; huge halos, tiny dash patterns, deep
+  expressions, huge label coordinates and far-off tile zooms no longer
+  hang, overflow or exhaust memory; tile seams are not double-blended and
+  clipping no longer allocates a full-size mask per tile; circle strokes,
+  miter limits, background layers, `text-font`, `line-center`,
+  `text-rotation-alignment`, `to-number`, `coalesce` and legacy `in`
+  filters behave as in MapLibre.
 
 ## 0.1.1 - 2026-05-07
 
