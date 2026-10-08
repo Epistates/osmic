@@ -10,20 +10,28 @@ authors.workspace = true
 categories = ["visualization", "science::geo"]
 keywords = ["map-viewer", "wgpu", "gis", "pmtiles", "interactive"]
 readme.workspace = true
-description = "Interactive wgpu windowed map viewer"
+description = "Interactive wgpu windowed map viewer (Web Mercator, style-driven, background tile loading)"
 
 [dependencies]
 osmic-core = { workspace = true }
+osmic-render = { workspace = true }
+osmic-style = { workspace = true }
+osmic-text = { workspace = true }
 osmic-tiles = { workspace = true }
-osmic-geo = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
-lyon = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
-cosmic-text = { workspace = true }
+lru = { workspace = true }
 pmtiles = { workspace = true, features = ["mmap-async-tokio"] }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+geo-types = { workspace = true }
+naga = { workspace = true, features = ["wgsl-in"] }
+tempfile = { workspace = true }
+tiny-skia = { workspace = true }
+serde_json = { workspace = true }
