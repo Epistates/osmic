@@ -13,6 +13,22 @@
 //! fractional zoom between the mesh's zoom and the next. Fills have
 //! `extrude == 0`. Because widths are extruded in screen space the shader
 //! never has to re-tessellate when the camera zooms.
+//!
+//! # Limitation: dashes between integer zooms
+//!
+//! Dashed strokes are cut into separate pieces here, in scene pixels,
+//! using the pattern computed for the mesh's zoom. The vertex shader then
+//! scales positions by the tile's screen scale `s = 2^(zoom - mesh zoom)`
+//! (1 to 2 between integer zooms) while extruding the width in screen
+//! pixels. So on screen a dash is `s` times its pattern length, but the
+//! line is `mix(width, width_next_zoom, t)` wide. The pattern is exact at
+//! integer zooms; in between, dash lengths drift relative to the width by
+//! the factor `s * width / mix(width, width_next_zoom, t)`: up to 2x for a
+//! line whose width does not change with zoom, within about 6% for one
+//! whose width doubles per zoom (as road widths roughly do). Fixing it
+//! means dashing in the fragment shader from a per-vertex line distance,
+//! as MapLibre does. The software backend ([`crate::SkiaBackend`]) is
+//! unaffected: it renders each frame at its exact zoom.
 
 use bytemuck::{Pod, Zeroable};
 use lyon::math::point;
