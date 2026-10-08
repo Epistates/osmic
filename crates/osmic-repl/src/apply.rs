@@ -45,8 +45,12 @@ pub struct ApplyStats {
     pub read: u64,
     /// Objects written to the output.
     pub written: u64,
+    /// Objects written that were not in the input.
     pub created: u64,
+    /// Input objects replaced by a newer version.
     pub modified: u64,
+    /// Input objects dropped. Deletions of objects the input did not
+    /// contain are not counted.
     pub deleted: u64,
     /// Input blocks copied without re-encoding.
     pub blocks_copied: u64,
@@ -375,6 +379,17 @@ impl<W: std::io::Write> Merge<'_, W> {
 /// Apply `changes` to `input`, writing `output` with `state` recorded in
 /// the header. `input` must be sorted by type then id (as produced by
 /// `osmium sort` and every major extract provider).
+///
+/// Blobs of unknown type in the input are dropped, with a warning.
+///
+/// # Errors
+///
+/// - [`ReplError::State`] if the header does not declare the input sorted,
+///   or declares node locations on ways.
+/// - [`ReplError::Osm`] if the input cannot be read or decoded, or turns
+///   out not to be sorted after all.
+/// - [`ReplError::Io`] if reading the input or writing the output fails.
+///   An existing output is only ever replaced by a complete file.
 pub fn apply_to_pbf(
     input: &Path,
     output: &Path,

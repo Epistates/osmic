@@ -19,8 +19,11 @@ use crate::state::{ReplicationState, sequence_path};
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ClientOptions {
+    /// Accept `http://` base URLs and redirects; HTTPS only otherwise.
     pub allow_http: bool,
+    /// Time limit for establishing a connection.
     pub connect_timeout: Duration,
+    /// Overall time limit for one request, body included.
     pub request_timeout: Duration,
     /// Maximum size of one downloaded (compressed) diff.
     pub max_diff_bytes: u64,
@@ -86,6 +89,13 @@ enum Fetch {
 }
 
 impl ReplicationClient {
+    /// A client for the replication directory at `base_url` (the directory
+    /// holding `state.txt`; a trailing `/` is ignored). No request is made.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplError::State`] if `base_url` is not `https://` (or `http://`
+    /// with [`ClientOptions::allow_http`]).
     pub fn new(base_url: &str, options: ClientOptions) -> Result<Self, ReplError> {
         let lower = base_url.to_ascii_lowercase();
         if !(lower.starts_with("https://") || (options.allow_http && lower.starts_with("http://")))
@@ -110,6 +120,7 @@ impl ReplicationClient {
         })
     }
 
+    /// The replication directory URL, without a trailing `/`.
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -164,6 +175,12 @@ impl ReplicationClient {
     }
 
     /// The server's newest state.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplError::Http`] if the request fails after retries, is rejected,
+    /// or finds no `state.txt`; [`ReplError::TooLarge`] for a response over
+    /// 64 KiB; [`ReplError::State`] if the file has no valid sequence number.
     pub fn latest_state(&self) -> Result<ReplicationState, ReplError> {
         let url = format!("{}/state.txt", self.base_url);
         match self.fetch(&url, 64 << 10)? {
@@ -178,6 +195,12 @@ impl ReplicationClient {
     }
 
     /// The state for a given sequence, if published.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ReplicationClient::latest_state`], except that a missing
+    /// file is `Ok(None)`; also [`ReplError::State`] for a sequence above
+    /// 999 999 999.
     pub fn state(&self, sequence: u64) -> Result<Option<ReplicationState>, ReplError> {
         let url = format!("{}/{}.state.txt", self.base_url, sequence_path(sequence)?);
         match self.fetch(&url, 64 << 10)? {
@@ -190,6 +213,18 @@ impl ReplicationClient {
     }
 
     /// The gzipped diff for `sequence`, or `None` if not yet published.
+    ///
+    /// The body is not validated. It is usually gzip, but plain XML when the
+    /// server added a gzip content encoding on top;
+    /// [`parse_osc_auto_with`](crate::osc::parse_osc_auto_with) accepts
+    /// either.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplError::State`] for a sequence above 999 999 999;
+    /// [`ReplError::Http`] if the request fails after retries or is
+    /// rejected; [`ReplError::TooLarge`] for a body over
+    /// [`ClientOptions::max_diff_bytes`].
     pub fn diff(&self, sequence: u64) -> Result<Option<Vec<u8>>, ReplError> {
         let url = format!("{}/{}.osc.gz", self.base_url, sequence_path(sequence)?);
         Ok(match self.fetch(&url, self.options.max_diff_bytes)? {

@@ -10,6 +10,7 @@ use crate::error::ReplError;
 /// Where a dataset stands in a replication stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicationState {
+    /// Sequence number of the last diff the data includes.
     pub sequence: u64,
     /// ISO-8601 timestamp of the sequence (`2026-10-08T12:00:00Z`), if known.
     pub timestamp: Option<String>,
@@ -18,6 +19,10 @@ pub struct ReplicationState {
 }
 
 /// Replication directory path for a sequence: `000/123/456`.
+///
+/// # Errors
+///
+/// [`ReplError::State`] if `sequence` has more than nine digits.
 pub fn sequence_path(sequence: u64) -> Result<String, ReplError> {
     if sequence > 999_999_999 {
         return Err(ReplError::State(format!(
@@ -34,6 +39,11 @@ pub fn sequence_path(sequence: u64) -> Result<String, ReplError> {
 
 impl ReplicationState {
     /// URL of the diff that follows this state.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplError::State`] if the next sequence overflows or has more than
+    /// nine digits.
     pub fn next_diff_url(&self) -> Result<String, ReplError> {
         let next = self
             .sequence
@@ -46,7 +56,15 @@ impl ReplicationState {
         self.base_url.trim_end_matches('/')
     }
 
-    /// Parse a server `state.txt`.
+    /// Parse a server `state.txt`, recording `base_url` as its source.
+    ///
+    /// Unknown keys are ignored, and a timestamp that is not a valid
+    /// `YYYY-MM-DDTHH:MM:SSZ` instant is dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplError::State`] if `sequenceNumber` is missing or not an
+    /// unsigned integer.
     pub fn parse_state_txt(text: &str, base_url: &str) -> Result<Self, ReplError> {
         let mut sequence = None;
         let mut timestamp = None;

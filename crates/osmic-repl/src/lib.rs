@@ -13,6 +13,8 @@
 //! Geofabrik's `…-updates/`) so the extract does not accumulate data from
 //! elsewhere.
 
+#![warn(missing_docs)]
+
 pub mod apply;
 pub mod changeset;
 pub mod client;
@@ -49,7 +51,9 @@ pub struct UpdateOptions {
     /// Stop fetching further diffs in this run once this many objects have
     /// changed (bounds memory; the next run continues).
     pub max_objects: usize,
+    /// HTTP client settings.
     pub client: ClientOptions,
+    /// Limits applied to each downloaded change file.
     pub osc_limits: OscLimits,
 }
 
@@ -114,11 +118,16 @@ impl UpdateOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UpdateReport {
+    /// State of the input before the run.
     pub from: ReplicationState,
+    /// State written to the output; equal to `from` if nothing was applied.
     pub to: ReplicationState,
+    /// Number of diffs applied (`to.sequence - from.sequence`).
     pub diffs_applied: u64,
     /// Newest sequence the server has published.
     pub latest_sequence: u64,
+    /// Object and block counts from applying the diffs; all zero if none
+    /// were applied.
     pub stats: ApplyStats,
 }
 
@@ -136,6 +145,20 @@ fn same_stream(a: &str, b: &str) -> bool {
 
 /// Bring `input` up to date and write the result to `output` (which may be
 /// the same path). `output` is written even when there is nothing to apply.
+///
+/// # Errors
+///
+/// - [`ReplError::State`] if the input has no replication URL or sequence
+///   and `options` supplies none, if `options.server` names a different
+///   stream than the header without a `start_sequence`, if the server's
+///   state is inconsistent, or as for [`apply_to_pbf`].
+/// - [`ReplError::Http`] or [`ReplError::TooLarge`] from the
+///   [`ReplicationClient`].
+/// - [`ReplError::Osc`] for an invalid diff (the message names its
+///   sequence).
+/// - [`ReplError::Io`] or [`ReplError::Osm`] reading the input or writing
+///   the output. An existing output is only ever replaced by a complete
+///   file.
 pub fn update_pbf(
     input: &Path,
     output: &Path,

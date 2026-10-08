@@ -32,44 +32,70 @@ use crate::state::parse_iso8601;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChangeAction {
+    /// The object is new (`<create>`).
     Create,
+    /// The object has a new version (`<modify>`).
     Modify,
+    /// The object was deleted (`<delete>`, or `visible="false"` in any
+    /// block).
     Delete,
 }
 
 /// A relation member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
+    /// Type of the member object.
     pub osm_type: OsmType,
+    /// Id of the member object, within `osm_type`.
     pub id: i64,
+    /// The member's role; empty if it has none.
     pub role: String,
 }
 
 /// The new state of an object (absent for deletions).
+///
+/// `tags` are in document order; `meta` is `None` when the object carries
+/// none of `version`, `timestamp`, `changeset` or `uid`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Element {
+    /// A node.
     Node {
+        /// Node id.
         id: i64,
+        /// Location, from the `lon`/`lat` attributes.
         location: FixedCoord,
+        /// `(key, value)` tags.
         tags: Vec<(String, String)>,
+        /// Version, timestamp, changeset and user, if present.
         meta: Option<ElementMeta>,
     },
+    /// A way.
     Way {
+        /// Way id.
         id: i64,
+        /// Node ids, in order.
         refs: Vec<i64>,
+        /// `(key, value)` tags.
         tags: Vec<(String, String)>,
+        /// Version, timestamp, changeset and user, if present.
         meta: Option<ElementMeta>,
     },
+    /// A relation.
     Relation {
+        /// Relation id.
         id: i64,
+        /// Members, in order.
         members: Vec<Member>,
+        /// `(key, value)` tags.
         tags: Vec<(String, String)>,
+        /// Version, timestamp, changeset and user, if present.
         meta: Option<ElementMeta>,
     },
 }
 
 impl Element {
+    /// The object's typed id.
     pub fn osm_id(&self) -> OsmId {
         match self {
             Self::Node { id, .. } => OsmId::node(*id),
@@ -91,8 +117,12 @@ impl Element {
 /// One change from a change file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
+    /// What happened; [`ChangeAction::Delete`] whenever `element` is `None`.
     pub action: ChangeAction,
+    /// The object changed.
     pub id: OsmId,
+    /// The object's version after the change, if the file gives one; used
+    /// to order repeated changes (see [`ChangeSet`](crate::ChangeSet)).
     pub version: Option<u32>,
     /// The object after the change; `None` for deletions.
     pub element: Option<Element>,
@@ -129,6 +159,10 @@ impl Default for OscLimits {
 }
 
 /// Parse a gzip-compressed change file.
+///
+/// # Errors
+///
+/// As for [`parse_osc_gz_with`].
 pub fn parse_osc_gz(data: impl Read, limits: OscLimits) -> Result<Vec<Change>, ReplError> {
     let mut changes = Vec::new();
     parse_osc_gz_with(data, limits, |c| {
@@ -140,6 +174,13 @@ pub fn parse_osc_gz(data: impl Read, limits: OscLimits) -> Result<Vec<Change>, R
 
 /// Parse a gzip-compressed change file, handing each change to `sink` as
 /// it is read.
+///
+/// # Errors
+///
+/// [`ReplError::TooLarge`] if the file decompresses to more than
+/// [`OscLimits::max_decompressed_bytes`]; otherwise as for
+/// [`parse_osc_with`], with decompression failures reported as
+/// [`ReplError::Osc`].
 pub fn parse_osc_gz_with(
     data: impl Read,
     limits: OscLimits,
@@ -163,6 +204,11 @@ pub fn parse_osc_gz_with(
 /// Parse a change file that is either gzip-compressed or plain XML (some
 /// servers send `.osc.gz` with `Content-Encoding: gzip`, so the HTTP client
 /// has already inflated it).
+///
+/// # Errors
+///
+/// As for [`parse_osc_gz_with`]; plain input longer than
+/// [`OscLimits::max_decompressed_bytes`] is [`ReplError::TooLarge`] too.
 pub fn parse_osc_auto_with(
     data: &[u8],
     limits: OscLimits,
@@ -383,6 +429,10 @@ fn check_len(limits: &OscLimits, what: &str, value: &str) -> Result<(), ReplErro
 }
 
 /// Parse an uncompressed change file with the default limits.
+///
+/// # Errors
+///
+/// As for [`parse_osc_with`].
 pub fn parse_osc(reader: impl BufRead) -> Result<Vec<Change>, ReplError> {
     let mut changes = Vec::new();
     parse_osc_with(reader, OscLimits::default(), |c| {
@@ -394,6 +444,16 @@ pub fn parse_osc(reader: impl BufRead) -> Result<Vec<Change>, ReplError> {
 
 /// Parse an uncompressed change file, handing each change to `sink` as it
 /// is read.
+///
+/// [`OscLimits::max_decompressed_bytes`] is not applied here; bound
+/// `reader` yourself if the input is untrusted.
+///
+/// # Errors
+///
+/// [`ReplError::Osc`] if reading fails, the document is malformed or not a
+/// valid `<osmChange>` (see the module docs), or an object exceeds an
+/// [`OscLimits`] count or length; any error returned by `sink`. Changes
+/// read before the error have already been passed to `sink`.
 pub fn parse_osc_with(
     reader: impl BufRead,
     limits: OscLimits,

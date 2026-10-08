@@ -66,6 +66,7 @@ impl ChangeSet {
         self.objects.len()
     }
 
+    /// Whether no object is touched.
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
