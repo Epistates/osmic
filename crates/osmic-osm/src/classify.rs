@@ -12,110 +12,110 @@ pub fn classify(tags: &Tags, store: &TagStore, layers: &LayerSet) -> Option<Feat
     // A building with amenity=restaurant should be classified as a restaurant,
     // not a generic building. Check all POI tags before infrastructure.
 
-    if layers.is_enabled("amenity") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Amenity)) {
-            return Some(FeatureKind::Amenity(AmenityKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("amenity")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Amenity))
+    {
+        return Some(FeatureKind::Amenity(AmenityKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("shop") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Shop)) {
-            return Some(FeatureKind::Shop(ShopKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("shop")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Shop))
+    {
+        return Some(FeatureKind::Shop(ShopKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("tourism") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Tourism)) {
-            return Some(FeatureKind::Tourism(TourismKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("tourism")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Tourism))
+    {
+        return Some(FeatureKind::Tourism(TourismKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("office") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Office)) {
-            return Some(FeatureKind::Office(OfficeKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("office")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Office))
+    {
+        return Some(FeatureKind::Office(OfficeKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("healthcare") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Healthcare)) {
-            return Some(FeatureKind::Healthcare(HealthcareKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("healthcare")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Healthcare))
+    {
+        return Some(FeatureKind::Healthcare(HealthcareKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("craft") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Craft)) {
-            return Some(FeatureKind::Craft(CraftKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("craft")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Craft))
+    {
+        return Some(FeatureKind::Craft(CraftKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("historic") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Historic)) {
-            return Some(FeatureKind::Historic(HistoricKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("historic")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Historic))
+    {
+        return Some(FeatureKind::Historic(HistoricKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("club") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Club)) {
-            return Some(FeatureKind::Club(ClubKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("club")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Club))
+    {
+        return Some(FeatureKind::Club(ClubKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("emergency") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Emergency)) {
-            return Some(FeatureKind::Emergency(EmergencyKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("emergency")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Emergency))
+    {
+        return Some(FeatureKind::Emergency(EmergencyKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("education") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Education)) {
-            return Some(FeatureKind::Education(EducationKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("education")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Education))
+    {
+        return Some(FeatureKind::Education(EducationKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("leisure") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Leisure)) {
-            return Some(FeatureKind::Leisure(LeisureKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("leisure")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Leisure))
+    {
+        return Some(FeatureKind::Leisure(LeisureKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
     // === Infrastructure / geometry tags ===
 
-    if layers.is_enabled("highway") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Highway)) {
-            return Some(FeatureKind::Highway(HighwayKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("highway")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Highway))
+    {
+        return Some(FeatureKind::Highway(HighwayKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("railway") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Railway)) {
-            return Some(FeatureKind::Railway(RailwayKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("railway")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Railway))
+    {
+        return Some(FeatureKind::Railway(RailwayKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
     if layers.is_enabled("water") {
@@ -131,50 +131,50 @@ pub fn classify(tags: &Tags, store: &TagStore, layers: &LayerSet) -> Option<Feat
         }
     }
 
-    if layers.is_enabled("natural") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Natural)) {
-            let kind = NaturalKind::from_tag_value(store.resolve(val));
-            if kind == NaturalKind::Water {
-                return Some(FeatureKind::Water(WaterKind::Lake));
-            }
-            return Some(FeatureKind::Natural(kind));
+    if layers.is_enabled("natural")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Natural))
+    {
+        let kind = NaturalKind::from_tag_value(store.resolve(val));
+        if kind == NaturalKind::Water {
+            return Some(FeatureKind::Water(WaterKind::Lake));
         }
+        return Some(FeatureKind::Natural(kind));
     }
 
-    if layers.is_enabled("landuse") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Landuse)) {
-            return Some(FeatureKind::Landuse(LanduseKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("landuse")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Landuse))
+    {
+        return Some(FeatureKind::Landuse(LanduseKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
     // === Building checked LAST among physical features ===
     // So that building=yes + amenity=cafe → Amenity(Cafe), not Building(Yes)
-    if layers.is_enabled("building") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Building)) {
-            return Some(FeatureKind::Building(BuildingKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("building")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Building))
+    {
+        return Some(FeatureKind::Building(BuildingKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
     // === Metadata layers ===
 
-    if layers.is_enabled("boundary") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Boundary)) {
-            return Some(FeatureKind::Boundary(BoundaryKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("boundary")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Boundary))
+    {
+        return Some(FeatureKind::Boundary(BoundaryKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
-    if layers.is_enabled("place") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Place)) {
-            return Some(FeatureKind::Place(PlaceKind::from_tag_value(
-                store.resolve(val),
-            )));
-        }
+    if layers.is_enabled("place")
+        && let Some(val) = tags.get(store.well_known(WellKnownKey::Place))
+    {
+        return Some(FeatureKind::Place(PlaceKind::from_tag_value(
+            store.resolve(val),
+        )));
     }
 
     None

@@ -5,8 +5,8 @@ use std::path::Path;
 use memmap2::{MmapMut, MmapOptions};
 use tracing::info;
 
-use osmic_core::coord::{LonLat, PackedCoord};
 use osmic_core::NodeLocationStore;
+use osmic_core::coord::{LonLat, PackedCoord};
 
 const PACKED_COORD_SIZE: usize = std::mem::size_of::<PackedCoord>(); // 8 bytes
 
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn node_id_at_capacity_returns_none_on_get() {
         let (store, _tmp) = store_with_capacity(9); // capacity = 10, valid ids 0..=9
-                                                    // node_id 10 == capacity, which is out of bounds
+        // node_id 10 == capacity, which is out of bounds
         store.set(10, 1.0, 2.0); // silently ignored
         assert!(store.get(10).is_none());
     }

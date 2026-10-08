@@ -1,4 +1,4 @@
-use rstar::{RTree, RTreeObject, AABB};
+use rstar::{AABB, RTree, RTreeObject};
 
 use osmic_core::BBox;
 use osmic_osm::feature::Feature;

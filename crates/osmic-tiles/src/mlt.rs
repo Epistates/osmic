@@ -1,6 +1,6 @@
 use geo_types::{Coord, Geometry as GeoGeometry, LineString, MultiPolygon, Point, Polygon};
-use mlt_core::v01::{PropValue, StagedLayer01, TileFeature as MltTileFeature, TileLayer01};
 use mlt_core::EncodedLayer;
+use mlt_core::v01::{PropValue, StagedLayer01, TileFeature as MltTileFeature, TileLayer01};
 use osmic_osm::tags::{TagStore, WellKnownKey};
 #[cfg(feature = "native")]
 use pmtiles::TileType;
@@ -153,11 +153,7 @@ fn encode_mlt_tile(
         any_layer = true;
     }
 
-    if any_layer {
-        Some(output)
-    } else {
-        None
-    }
+    if any_layer { Some(output) } else { None }
 }
 
 /// Convert osmic Geometry (f64 lon/lat or projected) to geo_types::Geometry<i32>

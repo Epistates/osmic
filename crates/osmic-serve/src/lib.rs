@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::http::{header, HeaderValue};
-use axum::routing::get;
 use axum::Router;
+use axum::http::{HeaderValue, header};
+use axum::routing::get;
 use pmtiles::{AsyncPmTilesReader, MmapBackend};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;

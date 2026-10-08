@@ -11,6 +11,6 @@ pub mod assembler;
 pub mod ring;
 pub mod segment;
 
-pub use assembler::{assemble_multipolygon, AssemblyError, AssemblyReport, AssemblyWarning};
+pub use assembler::{AssemblyError, AssemblyReport, AssemblyWarning, assemble_multipolygon};
 pub use ring::ProtoRing;
 pub use segment::{NodeRefSegment, Role, SegmentList};

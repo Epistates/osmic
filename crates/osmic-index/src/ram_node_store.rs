@@ -56,8 +56,8 @@ use std::io;
 use memmap2::{MmapMut, MmapOptions};
 use tracing::info;
 
-use osmic_core::coord::{LonLat, PackedCoord};
 use osmic_core::NodeLocationStore;
+use osmic_core::coord::{LonLat, PackedCoord};
 
 const PACKED_COORD_SIZE: usize = std::mem::size_of::<PackedCoord>();
 

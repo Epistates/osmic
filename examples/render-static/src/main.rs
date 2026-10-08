@@ -4,9 +4,9 @@ use std::time::Instant;
 use clap::Parser;
 use tracing::info;
 
+use osmic_core::Color;
 use osmic_core::bbox::BBox;
 use osmic_core::geometry::Geometry;
-use osmic_core::Color;
 use osmic_geo::projection::bbox_to_tile_range;
 use osmic_render::backend::{RenderBackend, RenderConfig};
 use osmic_render::scene::{LineCap, LineJoin, RenderFeature, RenderLayer, SceneGraph};
@@ -199,29 +199,27 @@ fn build_scene(features: &[DecodedFeature], bbox: &BBox, width: f32, height: f32
                     .as_deref()
                     .is_some_and(|c| matches!(c, "river" | "stream" | "canal")));
 
-        if is_area {
-            if let Some(color) = area_color(&feature.layer, feature.class.as_deref()) {
-                if let Some(rings) = geometry_to_fill(&feature.geometry, &to_pixel) {
-                    layer.push(RenderFeature::Fill {
-                        coords: rings,
-                        color,
-                    });
-                }
-            }
+        if is_area
+            && let Some(color) = area_color(&feature.layer, feature.class.as_deref())
+            && let Some(rings) = geometry_to_fill(&feature.geometry, &to_pixel)
+        {
+            layer.push(RenderFeature::Fill {
+                coords: rings,
+                color,
+            });
         }
 
-        if is_line {
-            if let Some((color, w)) = line_style(&feature.layer, feature.class.as_deref()) {
-                if let Some(coords) = geometry_to_stroke(&feature.geometry, &to_pixel) {
-                    layer.push(RenderFeature::Stroke {
-                        coords,
-                        color,
-                        width: w,
-                        cap: LineCap::Round,
-                        join: LineJoin::Round,
-                    });
-                }
-            }
+        if is_line
+            && let Some((color, w)) = line_style(&feature.layer, feature.class.as_deref())
+            && let Some(coords) = geometry_to_stroke(&feature.geometry, &to_pixel)
+        {
+            layer.push(RenderFeature::Stroke {
+                coords,
+                color,
+                width: w,
+                cap: LineCap::Round,
+                join: LineJoin::Round,
+            });
         }
     }
 
@@ -312,11 +310,7 @@ fn geometry_to_fill(
                     rings.push(h);
                 }
             }
-            if rings.is_empty() {
-                None
-            } else {
-                Some(rings)
-            }
+            if rings.is_empty() { None } else { Some(rings) }
         }
         _ => None,
     }

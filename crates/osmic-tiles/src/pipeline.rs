@@ -24,7 +24,7 @@ use crate::coord::TileTransform;
 use crate::encode::{TileEncoder, TileFeature};
 
 #[cfg(feature = "native")]
-use crate::sort::{tile_sort_key, ExternalFeatureSort};
+use crate::sort::{ExternalFeatureSort, tile_sort_key};
 
 /// A feature with geometry clipped to a tile bbox.
 struct ClippedFeature<'a> {
@@ -159,16 +159,16 @@ impl<'a> TileGenerator<'a> {
         );
 
         #[cfg(feature = "native")]
-        if let Some(limit_mb) = self.config.max_memory_mb {
-            if estimated_mb >= limit_mb {
-                info!(
-                    features = self.features.len(),
-                    estimated_mb,
-                    limit_mb,
-                    "Switching to streaming tile generation (estimated RAM exceeds limit)"
-                );
-                return self.generate_all_streaming(&mut write_tile);
-            }
+        if let Some(limit_mb) = self.config.max_memory_mb
+            && estimated_mb >= limit_mb
+        {
+            info!(
+                features = self.features.len(),
+                estimated_mb,
+                limit_mb,
+                "Switching to streaming tile generation (estimated RAM exceeds limit)"
+            );
+            return self.generate_all_streaming(&mut write_tile);
         }
 
         let mut total_tiles = 0u64;

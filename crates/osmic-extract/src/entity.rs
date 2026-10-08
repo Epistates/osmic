@@ -93,10 +93,10 @@ impl Entity {
     /// Extract phone number from OSM tag conventions.
     pub fn extract_phone(tags: &[(String, String)]) -> String {
         for key in &["phone", "contact:phone", "telephone"] {
-            if let Some((_, v)) = tags.iter().find(|(k, _)| k == key) {
-                if !v.is_empty() {
-                    return v.clone();
-                }
+            if let Some((_, v)) = tags.iter().find(|(k, _)| k == key)
+                && !v.is_empty()
+            {
+                return v.clone();
             }
         }
         String::new()
@@ -105,10 +105,10 @@ impl Entity {
     /// Extract website URL from OSM tag conventions.
     pub fn extract_website(tags: &[(String, String)]) -> String {
         for key in &["website", "contact:website", "url"] {
-            if let Some((_, v)) = tags.iter().find(|(k, _)| k == key) {
-                if !v.is_empty() {
-                    return v.clone();
-                }
+            if let Some((_, v)) = tags.iter().find(|(k, _)| k == key)
+                && !v.is_empty()
+            {
+                return v.clone();
             }
         }
         String::new()

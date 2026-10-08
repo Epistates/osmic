@@ -1,3 +1,3 @@
 pub mod style;
 
-pub use style::{default_style_json, Style};
+pub use style::{Style, default_style_json};

@@ -47,7 +47,7 @@ pub fn load_geojson(path: &Path) -> OsmicResult<crate::pipeline::ProcessedData> 
         _ => {
             return Err(OsmicError::Other(
                 "Expected GeoJSON FeatureCollection or Feature".into(),
-            ))
+            ));
         }
     };
 

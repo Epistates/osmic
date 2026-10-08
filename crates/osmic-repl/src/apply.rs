@@ -1,12 +1,12 @@
 use geo_types::{Coord, LineString, Point, Polygon};
 
+use osmic_core::NodeLocationStore;
 use osmic_core::error::OsmicResult;
 use osmic_core::geometry::Geometry;
-use osmic_core::NodeLocationStore;
+use osmic_osm::LayerSet;
 use osmic_osm::classify::classify;
 use osmic_osm::feature::Feature;
 use osmic_osm::tags::{TagStore, Tags};
-use osmic_osm::LayerSet;
 use osmic_tiles::TileGeneratorConfig;
 use tracing::info;
 

@@ -2,8 +2,8 @@ use std::io::Read;
 use std::path::Path;
 
 use flate2::read::GzDecoder;
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 
 use osmic_core::error::{OsmicError, OsmicResult};
 
@@ -184,15 +184,15 @@ pub fn parse_osc<R: Read>(reader: R) -> OsmicResult<Vec<OscChange>> {
                 // Self-closing node/way/relation elements must be finalized here
                 // because no End event will arrive.
                 if is_empty && matches!(name, "node" | "way" | "relation") {
-                    if let Some(action) = current_action {
-                        if let Some(element) = finalize_element(
+                    if let Some(action) = current_action
+                        && let Some(element) = finalize_element(
                             &mut parsing,
                             &mut elem_tags,
                             &mut elem_nd_refs,
                             &mut elem_members,
-                        ) {
-                            changes.push(OscChange { action, element });
-                        }
+                        )
+                    {
+                        changes.push(OscChange { action, element });
                     }
                     parsing = Parsing::None;
                 }
@@ -203,15 +203,15 @@ pub fn parse_osc<R: Read>(reader: R) -> OsmicResult<Vec<OscChange>> {
                 match name {
                     "create" | "modify" | "delete" => current_action = None,
                     "node" | "way" | "relation" => {
-                        if let Some(action) = current_action {
-                            if let Some(element) = finalize_element(
+                        if let Some(action) = current_action
+                            && let Some(element) = finalize_element(
                                 &mut parsing,
                                 &mut elem_tags,
                                 &mut elem_nd_refs,
                                 &mut elem_members,
-                            ) {
-                                changes.push(OscChange { action, element });
-                            }
+                            )
+                        {
+                            changes.push(OscChange { action, element });
                         }
                         parsing = Parsing::None;
                     }

@@ -261,13 +261,15 @@ mod tests {
         let mut way_geoms = HashMap::new();
         way_geoms.insert(1, vec![coord(0.0, 0.0), coord(1.0, 0.0)]);
         let list = SegmentList::from_ways(&[], &[1], &way_geoms); // inner only
-                                                                  // Asking for an outer segment should return None
-        assert!(list
-            .find_matching_unused(coord(0.0, 0.0), Role::Outer)
-            .is_none());
+        // Asking for an outer segment should return None
+        assert!(
+            list.find_matching_unused(coord(0.0, 0.0), Role::Outer)
+                .is_none()
+        );
         // Asking for an inner segment should return Some
-        assert!(list
-            .find_matching_unused(coord(0.0, 0.0), Role::Inner)
-            .is_some());
+        assert!(
+            list.find_matching_unused(coord(0.0, 0.0), Role::Inner)
+                .is_some()
+        );
     }
 }

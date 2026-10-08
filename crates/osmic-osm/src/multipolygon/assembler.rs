@@ -32,7 +32,7 @@ use geo_types::{Coord, LineString, MultiPolygon, Polygon};
 use osmic_core::geometry::Geometry;
 
 use crate::multipolygon::ring::ProtoRing;
-use crate::multipolygon::segment::{quantize, Role, SegmentList};
+use crate::multipolygon::segment::{Role, SegmentList, quantize};
 
 /// Non-fatal warnings emitted during assembly. A relation with warnings
 /// still produces a (possibly incomplete) geometry; the caller decides

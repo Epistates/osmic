@@ -5,8 +5,8 @@ use tiny_skia::{
 };
 use tracing::info;
 
-use osmic_core::error::{OsmicError, OsmicResult};
 use osmic_core::Color;
+use osmic_core::error::{OsmicError, OsmicResult};
 
 use crate::backend::{RenderBackend, RenderConfig};
 use crate::scene::{LineCap, LineJoin, RenderFeature, RenderLayer, SceneGraph};

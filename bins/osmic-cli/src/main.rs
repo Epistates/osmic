@@ -3,11 +3,11 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use osmic_extract::{
-    deduplicate, write_csv, write_geojson, write_json, ExtractConfig, Extractor, TagFilter,
+    ExtractConfig, Extractor, TagFilter, deduplicate, write_csv, write_geojson, write_json,
 };
 use osmic_index::RamNodeLocationStore;
-use osmic_osm::pipeline::PbfProcessor;
 use osmic_osm::LayerSet;
+use osmic_osm::pipeline::PbfProcessor;
 use osmic_tiles::pipeline::{TileGenerator, TileGeneratorConfig};
 use osmic_tiles::pmtiles::PmTilesArchive;
 use osmic_tiles::{MvtEncoder, TileEncoder};
@@ -547,15 +547,15 @@ fn apply_feature_tag_filter(
             for (k, v) in feat.tags.iter() {
                 scratch.push((tag_store.resolve(*k), tag_store.resolve(*v)));
             }
-            if let Some(f) = &include {
-                if !f.matches_str(&scratch) {
-                    return false;
-                }
+            if let Some(f) = &include
+                && !f.matches_str(&scratch)
+            {
+                return false;
             }
-            if let Some(f) = &exclude {
-                if f.matches_str(&scratch) {
-                    return false;
-                }
+            if let Some(f) = &exclude
+                && f.matches_str(&scratch)
+            {
+                return false;
             }
             true
         })

@@ -11,10 +11,10 @@ use geo_types::{Coord, LineString, Polygon};
 use osmpbf::{Element, ElementReader, RelMemberType};
 use tracing::info;
 
+pub use osmic_core::NodeLocationStore;
 use osmic_core::bbox::BBox;
 use osmic_core::error::{OsmicError, OsmicResult};
 use osmic_core::geometry::Geometry;
-pub use osmic_core::NodeLocationStore;
 
 use crate::classify;
 use crate::feature::Feature;

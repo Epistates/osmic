@@ -15,8 +15,8 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use osmic_core::bbox::BBox;
 use osmic_core::Color;
+use osmic_core::bbox::BBox;
 use osmic_geo::projection::bbox_to_tile_range;
 use osmic_tiles::mvt_decode::{self, DecodedFeature};
 
@@ -166,36 +166,33 @@ fn tessellate_features(features: &[DecodedFeature], view_degrees: f64) -> (Vec<V
 
         let is_point = matches!(feature.geometry, osmic_core::Geometry::Point(_));
 
-        if is_area {
-            if let Some(color) = area_color(&feature.layer, feature.class.as_deref()) {
-                tessellate_fill(&feature.geometry, &color, &mut vertices, &mut indices);
-            }
+        if is_area && let Some(color) = area_color(&feature.layer, feature.class.as_deref()) {
+            tessellate_fill(&feature.geometry, &color, &mut vertices, &mut indices);
         }
-        if is_line {
-            if let Some((color, px_width)) = line_style(&feature.layer, feature.class.as_deref()) {
-                // Convert pixel width to world-space degrees
-                let world_width = px_width * px_to_deg;
-                tessellate_stroke(
-                    &feature.geometry,
-                    &color,
-                    world_width,
-                    &mut vertices,
-                    &mut indices,
-                );
-            }
+        if is_line
+            && let Some((color, px_width)) = line_style(&feature.layer, feature.class.as_deref())
+        {
+            // Convert pixel width to world-space degrees
+            let world_width = px_width * px_to_deg;
+            tessellate_stroke(
+                &feature.geometry,
+                &color,
+                world_width,
+                &mut vertices,
+                &mut indices,
+            );
         }
-        if is_point {
-            if let Some((color, px_radius)) = point_style(&feature.layer, feature.class.as_deref())
-            {
-                let world_radius = px_radius * px_to_deg;
-                tessellate_point(
-                    &feature.geometry,
-                    &color,
-                    world_radius,
-                    &mut vertices,
-                    &mut indices,
-                );
-            }
+        if is_point
+            && let Some((color, px_radius)) = point_style(&feature.layer, feature.class.as_deref())
+        {
+            let world_radius = px_radius * px_to_deg;
+            tessellate_point(
+                &feature.geometry,
+                &color,
+                world_radius,
+                &mut vertices,
+                &mut indices,
+            );
         }
     }
 
@@ -424,10 +421,10 @@ fn load_tiles_blocking(path: &std::path::Path, bbox: &BBox, zoom: u8) -> Vec<Dec
 
         for y in min_y..=max_y {
             for x in min_x..=max_x {
-                if let Ok(coord) = pmtiles::TileCoord::new(zoom, x, y) {
-                    if let Ok(Some(data)) = reader.get_tile_decompressed(coord).await {
-                        features.extend(mvt_decode::decode_tile(&data, zoom, x, y, n));
-                    }
+                if let Ok(coord) = pmtiles::TileCoord::new(zoom, x, y)
+                    && let Ok(Some(data)) = reader.get_tile_decompressed(coord).await
+                {
+                    features.extend(mvt_decode::decode_tile(&data, zoom, x, y, n));
                 }
             }
         }

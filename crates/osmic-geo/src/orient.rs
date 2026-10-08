@@ -63,7 +63,7 @@ pub fn orient_geometry(geom: &mut OsmicGeometry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geo_types::{coord, LineString, Polygon};
+    use geo_types::{LineString, Polygon, coord};
 
     /// A CW exterior should be flipped to CCW.
     #[test]
