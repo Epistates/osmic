@@ -14,6 +14,7 @@ description = "Text shaping, collision-aware label placement (including line lab
 [dependencies]
 osmic-core = { workspace = true }
 cosmic-text = { workspace = true }
+lru = { workspace = true }
 rstar = { workspace = true }
 
 [lints]

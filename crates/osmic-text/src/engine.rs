@@ -1,21 +1,30 @@
 //! Text shaping and glyph rasterisation on top of cosmic-text.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use cosmic_text::{
     Attrs, Buffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, fontdb,
 };
+use lru::LruCache;
 use osmic_core::Color;
 
 use crate::blend::{Canvas, Mask};
+use crate::font::{FontStack, ResolvedFont, resolve};
 use crate::label::{LabelCandidate, PlacedGlyph, PlacedLabel};
 
 /// Line height as a multiple of the font size.
 const LINE_HEIGHT: f32 = 1.2;
 
-/// Shaped-text cache bound; the cache is cleared when it is exceeded.
-const SHAPE_CACHE_LIMIT: usize = 8192;
+/// Shaped texts kept, least recently used evicted first.
+const SHAPE_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(8192).expect("non-zero");
+
+/// Distinct font stacks whose resolution is remembered (styles use a
+/// handful; the bound only matters for data-driven `text-font`).
+const FONT_CACHE_LIMIT: usize = 256;
 
 /// Largest label bitmap, per side, that will be rasterised.
 const MAX_LABEL_SIDE: i64 = 4096;
@@ -140,13 +149,83 @@ impl LabelBitmap {
 
 /// Shapes text and rasterises glyphs.
 ///
-/// Shaping results are cached per `(text, size)`, and glyph images come
-/// from cosmic-text's `SwashCache`, so repeated frames over the same labels
-/// do almost no work.
+/// Shaping results are kept in an LRU cache per `(text, size, font
+/// stack)`, looked up without allocating, and glyph images come from
+/// cosmic-text's `SwashCache`, so repeated frames over the same labels do
+/// almost no work.
 pub struct TextEngine {
     font_system: FontSystem,
     swash: SwashCache,
-    shapes: HashMap<(String, u32), Arc<ShapedText>>,
+    shapes: LruCache<ShapeKey, Arc<ShapedText>>,
+    /// How each font stack resolved (`None`: the default family).
+    fonts: HashMap<FontStack, Option<ResolvedFont>>,
+    /// The empty stack, kept so `shape` need not build one per call.
+    default_font: FontStack,
+}
+
+/// What a shaped-text cache entry is keyed by: text, size bits and font
+/// stack. Implemented by the owned key and by a borrowed view, so lookups
+/// hash and compare the same parts without copying the text.
+trait ShapeKeyParts {
+    fn parts(&self) -> (&str, u32, &FontStack);
+}
+
+struct ShapeKey {
+    text: Box<str>,
+    size: u32,
+    font: FontStack,
+}
+
+struct ShapeKeyRef<'a> {
+    text: &'a str,
+    size: u32,
+    font: &'a FontStack,
+}
+
+impl ShapeKeyParts for ShapeKey {
+    fn parts(&self) -> (&str, u32, &FontStack) {
+        (&self.text, self.size, &self.font)
+    }
+}
+
+impl ShapeKeyParts for ShapeKeyRef<'_> {
+    fn parts(&self) -> (&str, u32, &FontStack) {
+        (self.text, self.size, self.font)
+    }
+}
+
+impl Hash for dyn ShapeKeyParts + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.parts().hash(state);
+    }
+}
+
+impl PartialEq for dyn ShapeKeyParts + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for dyn ShapeKeyParts + '_ {}
+
+impl Hash for ShapeKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.parts().hash(state);
+    }
+}
+
+impl PartialEq for ShapeKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for ShapeKey {}
+
+impl<'a> Borrow<dyn ShapeKeyParts + 'a> for ShapeKey {
+    fn borrow(&self) -> &(dyn ShapeKeyParts + 'a) {
+        self
+    }
 }
 
 impl TextEngine {
@@ -183,39 +262,62 @@ impl TextEngine {
         Self {
             font_system,
             swash: SwashCache::new(),
-            shapes: HashMap::new(),
+            shapes: LruCache::new(SHAPE_CACHE_CAPACITY),
+            fonts: HashMap::new(),
+            default_font: FontStack::default(),
         }
     }
 
-    /// Shape `text` on one line at `font_size` pixels. Sizes outside
-    /// `1..=MAX_FONT_SIZE` (or NaN) give empty text.
+    /// Shape `text` on one line at `font_size` pixels in the default
+    /// sans-serif family. Sizes outside `1..=MAX_FONT_SIZE` (or NaN) give
+    /// empty text.
     pub fn shape(&mut self, text: &str, font_size: f32) -> Arc<ShapedText> {
+        let font = self.default_font.clone();
+        self.shape_with(text, font_size, &font)
+    }
+
+    /// Shape `text` on one line at `font_size` pixels with the first font
+    /// of `font` that is loaded (see [`FontStack`]). Sizes outside
+    /// `1..=MAX_FONT_SIZE` (or NaN) give empty text.
+    pub fn shape_with(&mut self, text: &str, font_size: f32, font: &FontStack) -> Arc<ShapedText> {
         if !(1.0..=MAX_FONT_SIZE).contains(&font_size) || text.trim().is_empty() {
             return Arc::new(ShapedText::empty());
         }
-        let key = (text.to_string(), font_size.to_bits());
-        if let Some(hit) = self.shapes.get(&key) {
+        let size = font_size.to_bits();
+        let key = ShapeKeyRef { text, size, font };
+        if let Some(hit) = self.shapes.get(&key as &dyn ShapeKeyParts) {
             return Arc::clone(hit);
         }
-        if self.shapes.len() >= SHAPE_CACHE_LIMIT {
-            self.shapes.clear();
-        }
-        let shaped = Arc::new(self.shape_uncached(text, font_size));
-        self.shapes.insert(key, Arc::clone(&shaped));
+        let shaped = Arc::new(self.shape_uncached(text, font_size, font));
+        let key = ShapeKey {
+            text: text.into(),
+            size,
+            font: font.clone(),
+        };
+        self.shapes.put(key, Arc::clone(&shaped));
         shaped
     }
 
-    fn shape_uncached(&mut self, text: &str, font_size: f32) -> ShapedText {
+    fn shape_uncached(&mut self, text: &str, font_size: f32, font: &FontStack) -> ShapedText {
+        if !self.fonts.contains_key(font) {
+            if self.fonts.len() >= FONT_CACHE_LIMIT {
+                self.fonts.clear();
+            }
+            let resolved = resolve(self.font_system.db(), font);
+            self.fonts.insert(font.clone(), resolved);
+        }
+        let attrs = match self.fonts.get(font).and_then(Option::as_ref) {
+            Some(r) => Attrs::new()
+                .family(Family::Name(&r.family))
+                .weight(r.weight)
+                .style(r.style),
+            None => Attrs::new().family(Family::SansSerif),
+        };
         let fs = &mut self.font_system;
         let mut buffer = Buffer::new(fs, Metrics::new(font_size, font_size * LINE_HEIGHT));
         buffer.set_size(None, None);
         let single_line = text.replace(['\n', '\r'], " ");
-        buffer.set_text(
-            &single_line,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
+        buffer.set_text(&single_line, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(fs, false);
 
         let mut shaped = ShapedText::empty();
@@ -426,7 +528,7 @@ impl TextEngine {
     ) {
         for label in placed {
             let cand = &candidates[label.candidate];
-            let shaped = self.shape(&cand.text, cand.style.font_size);
+            let shaped = self.shape_with(&cand.text, cand.style.font_size, &cand.style.font);
             if let Some(bitmap) = self.rasterize(&shaped, &label.glyphs, cand.style.halo_width) {
                 bitmap.composite(canvas, cand.style.color, cand.style.halo_color);
             }

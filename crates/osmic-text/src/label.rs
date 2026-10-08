@@ -6,7 +6,7 @@
 //! overlap anything already accepted. The same input always produces the
 //! same output.
 //!
-//! Two placement modes exist:
+//! Three placement modes exist:
 //!
 //! * [`LabelAnchor::Point`]: the label sits at (or, with `anchor`, next to)
 //!   a point; one rectangle is reserved.
@@ -14,8 +14,12 @@
 //!   out along the polyline, each rotated to the local tangent; the label
 //!   is rejected where the line bends more than `max_angle_degrees`
 //!   between neighbouring glyphs, is shorter than the text, or collides.
-//!   One rectangle per glyph is reserved. Text is flipped so it always
-//!   reads left to right.
+//!   Several positions along the visible stretches are tried. One
+//!   rectangle per glyph is reserved. Text is flipped so it always reads
+//!   left to right.
+//! * [`LabelAnchor::LineCenter`]: as `Line`, but only at the middle of the
+//!   whole line (MapLibre's `line-center`): if the label does not fit
+//!   there it is dropped.
 
 use std::sync::Arc;
 
@@ -23,22 +27,37 @@ use osmic_core::Color;
 
 use crate::collision::{CollisionIndex, Rect};
 use crate::engine::{ShapedText, TextEngine};
+use crate::font::FontStack;
 
 /// Where a label is attached.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LabelAnchor {
     /// A point, in canvas pixels.
     Point([f32; 2]),
-    /// A polyline, in canvas pixels; the label follows it.
+    /// A polyline, in canvas pixels; the label follows it, wherever along
+    /// its visible part it fits best.
     Line(Vec<[f32; 2]>),
+    /// A polyline, in canvas pixels; the label follows it, centred on the
+    /// middle of the whole line.
+    LineCenter(Vec<[f32; 2]>),
 }
 
 /// How a label looks and behaves.
+///
+/// Start from [`LabelStyle::new`] or [`LabelStyle::default`] and set the
+/// fields that differ.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct LabelStyle {
     /// Font size in pixels.
     pub font_size: f32,
+    /// The fonts to shape with, first loaded one wins; empty for the
+    /// engine's default family.
+    pub font: FontStack,
+    /// Text color (straight alpha).
     pub color: Color,
+    /// Halo color (straight alpha).
     pub halo_color: Color,
     /// Halo radius in pixels; `0` disables the halo. Drawn at most
     /// [`crate::max_halo_width`] of `font_size` wide, like MapLibre.
@@ -60,6 +79,7 @@ impl Default for LabelStyle {
     fn default() -> Self {
         Self {
             font_size: 12.0,
+            font: FontStack::default(),
             color: Color::BLACK,
             halo_color: Color::TRANSPARENT,
             halo_width: 0.0,
@@ -76,14 +96,32 @@ impl LabelAnchor {
     /// The anchor with every point passed through `f` (for example a
     /// tile-to-screen transform).
     pub fn map(&self, f: impl Fn([f32; 2]) -> [f32; 2]) -> Self {
+        let line = |points: &[[f32; 2]]| points.iter().map(|p| f(*p)).collect();
         match self {
             Self::Point(p) => Self::Point(f(*p)),
-            Self::Line(line) => Self::Line(line.iter().map(|p| f(*p)).collect()),
+            Self::Line(points) => Self::Line(line(points)),
+            Self::LineCenter(points) => Self::LineCenter(line(points)),
         }
     }
 }
 
 impl LabelStyle {
+    /// The default style at `font_size` pixels in `color`.
+    pub fn new(font_size: f32, color: Color) -> Self {
+        Self {
+            font_size,
+            color,
+            ..Self::default()
+        }
+    }
+
+    /// This style with a `width`-pixel halo in `color`.
+    pub fn with_halo(mut self, color: Color, width: f32) -> Self {
+        self.halo_color = color;
+        self.halo_width = width;
+        self
+    }
+
     /// The style with every length (font size, halo, offset, padding)
     /// multiplied by `factor`, for example a device pixel ratio.
     pub fn scaled(&self, factor: f32) -> Self {
@@ -100,8 +138,11 @@ impl LabelStyle {
 /// A label that may or may not fit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelCandidate {
+    /// The text, on one line.
     pub text: String,
+    /// Where it is attached.
     pub anchor: LabelAnchor,
+    /// How it looks.
     pub style: LabelStyle,
     /// Primary priority: lower ranks are placed first and win collisions.
     pub layer_rank: u32,
@@ -125,6 +166,7 @@ pub struct PlacedGlyph {
 pub struct PlacedLabel {
     /// Index of the originating [`LabelCandidate`].
     pub candidate: usize,
+    /// Where each glyph went.
     pub glyphs: Vec<PlacedGlyph>,
     /// Bounding box of the label on the canvas (without padding).
     pub bounds: Rect,
@@ -169,13 +211,14 @@ impl LabelPlacer {
         let mut placed = Vec::new();
         for i in order {
             let cand = &candidates[i];
-            let shaped = engine.shape(&cand.text, cand.style.font_size);
+            let shaped = engine.shape_with(&cand.text, cand.style.font_size, &cand.style.font);
             if shaped.is_empty() {
                 continue;
             }
             let result = match &cand.anchor {
                 LabelAnchor::Point(p) => self.place_point(cand, i, &shaped, *p),
                 LabelAnchor::Line(line) => self.place_line(cand, i, &shaped, line),
+                LabelAnchor::LineCenter(line) => self.place_line_center(cand, i, &shaped, line),
             };
             placed.extend(result);
         }
@@ -229,53 +272,159 @@ impl LabelPlacer {
         shaped: &Arc<ShapedText>,
         line: &[[f32; 2]],
     ) -> Option<PlacedLabel> {
-        let line: Vec<[f32; 2]> = line
-            .iter()
-            .copied()
-            .filter(|p| p[0].is_finite() && p[1].is_finite())
+        let line = finite_points(line);
+        // Each visible stretch is measured once; its reversed copy (for
+        // text that would read right to left) is built at most once.
+        let mut pieces: Vec<(Measured, Option<Measured>)> = clip_polyline(&line, &self.viewport)
+            .into_iter()
+            .map(|p| (Measured::new(p), None))
             .collect();
-        let mut pieces = clip_polyline(&line, &self.viewport);
         // Prefer the longest visible stretch; the sort is stable so equal
         // lengths keep input order.
-        let mut lengths: Vec<(f32, Vec<[f32; 2]>)> =
-            pieces.drain(..).map(|p| (polyline_length(&p), p)).collect();
-        lengths.sort_by(|a, b| b.0.total_cmp(&a.0));
+        pieces.sort_by(|a, b| b.0.total().total_cmp(&a.0.total()));
 
         let s = &cand.style;
-        for (length, piece) in &lengths {
-            if *length < shaped.width {
+        for (piece, reversed) in &mut pieces {
+            let length = piece.total();
+            if length < shaped.width {
                 continue;
             }
             for fraction in [0.5, 0.3, 0.7, 0.15, 0.85] {
                 let center =
                     (length * fraction).clamp(shaped.width / 2.0, length - shaped.width / 2.0);
-                let Some(glyphs) = layout_on_line(piece, center, shaped, s.max_angle_degrees)
+                let Some(glyphs) =
+                    layout_on_line(piece, reversed, center, shaped, s.max_angle_degrees)
                 else {
                     continue;
                 };
-                let rects: Vec<Rect> = glyphs
-                    .iter()
-                    .map(|g| glyph_rect(shaped, g).inflate(s.padding))
-                    .collect();
-                if !s.allow_overlap && self.index.collides_any(&rects) {
-                    continue;
+                if let Some(label) = self.reserve_glyphs(cand, candidate, shaped, glyphs) {
+                    return Some(label);
                 }
-                let bounds = rects
-                    .iter()
-                    .skip(1)
-                    .fold(rects[0], |acc, r| acc.union(r))
-                    .inflate(-s.padding);
-                for r in rects {
-                    self.index.insert(r);
-                }
-                return Some(PlacedLabel {
-                    candidate,
-                    glyphs,
-                    bounds,
-                });
             }
         }
         None
+    }
+
+    /// MapLibre's `line-center`: the label follows the line, centred on
+    /// the middle of the whole line (not just its visible part). It is
+    /// dropped if it does not fit there.
+    fn place_line_center(
+        &mut self,
+        cand: &LabelCandidate,
+        candidate: usize,
+        shaped: &Arc<ShapedText>,
+        line: &[[f32; 2]],
+    ) -> Option<PlacedLabel> {
+        let line = Measured::new(finite_points(line));
+        let length = line.total();
+        if line.points.len() < 2 || length < shaped.width {
+            return None;
+        }
+        let glyphs = layout_on_line(
+            &line,
+            &mut None,
+            length / 2.0,
+            shaped,
+            cand.style.max_angle_degrees,
+        )?;
+        self.reserve_glyphs(cand, candidate, shaped, glyphs)
+    }
+
+    /// Accept a line label laid out as `glyphs` if it is in view and (unless
+    /// it may overlap) collides with nothing; reserve one rectangle per
+    /// glyph.
+    fn reserve_glyphs(
+        &mut self,
+        cand: &LabelCandidate,
+        candidate: usize,
+        shaped: &ShapedText,
+        glyphs: Vec<PlacedGlyph>,
+    ) -> Option<PlacedLabel> {
+        let s = &cand.style;
+        let rects: Vec<Rect> = glyphs
+            .iter()
+            .map(|g| glyph_rect(shaped, g).inflate(s.padding))
+            .collect();
+        let first = *rects.first()?;
+        let bounds = rects
+            .iter()
+            .skip(1)
+            .fold(first, |acc, r| acc.union(r))
+            .inflate(-s.padding);
+        if !bounds.overlaps(&self.viewport) {
+            return None;
+        }
+        if !s.allow_overlap && self.index.collides_any(&rects) {
+            return None;
+        }
+        for r in rects {
+            self.index.insert(r);
+        }
+        Some(PlacedLabel {
+            candidate,
+            glyphs,
+            bounds,
+        })
+    }
+}
+
+/// `line` without its non-finite points.
+fn finite_points(line: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    line.iter()
+        .copied()
+        .filter(|p| p[0].is_finite() && p[1].is_finite())
+        .collect()
+}
+
+/// A polyline with its cumulative lengths.
+struct Measured {
+    points: Vec<[f32; 2]>,
+    /// `cum[i]`: distance from the start to `points[i]`.
+    cum: Vec<f32>,
+}
+
+impl Measured {
+    fn new(points: Vec<[f32; 2]>) -> Self {
+        let mut cum = Vec::with_capacity(points.len());
+        let mut acc = 0.0;
+        for (i, p) in points.iter().enumerate() {
+            if i > 0 {
+                acc += (p[0] - points[i - 1][0]).hypot(p[1] - points[i - 1][1]);
+            }
+            cum.push(acc);
+        }
+        Self { points, cum }
+    }
+
+    fn total(&self) -> f32 {
+        self.cum.last().copied().unwrap_or(0.0)
+    }
+
+    fn reversed(&self) -> Self {
+        Self::new(self.points.iter().rev().copied().collect())
+    }
+
+    /// The point `d` pixels along the polyline (clamped to its ends).
+    fn point_at(&self, d: f32) -> [f32; 2] {
+        let (line, cum) = (&self.points, &self.cum);
+        let last = line.len() - 1;
+        if d <= 0.0 || last == 0 {
+            return line[0];
+        }
+        if d >= cum[last] {
+            return line[last];
+        }
+        let i = cum.partition_point(|&c| c <= d).clamp(1, last);
+        let seg = cum[i] - cum[i - 1];
+        let t = if seg > 0.0 {
+            (d - cum[i - 1]) / seg
+        } else {
+            0.0
+        };
+        [
+            line[i - 1][0] + (line[i][0] - line[i - 1][0]) * t,
+            line[i - 1][1] + (line[i][1] - line[i - 1][1]) * t,
+        ]
     }
 }
 
@@ -295,27 +444,30 @@ fn glyph_rect(shaped: &ShapedText, g: &PlacedGlyph) -> Rect {
 }
 
 /// Lay `shaped` along `line`, centred `center` pixels from its start.
+/// `reversed` caches `line` reversed, for text that has to be flipped to
+/// read left to right.
 fn layout_on_line(
-    line: &[[f32; 2]],
+    line: &Measured,
+    reversed: &mut Option<Measured>,
     center: f32,
     shaped: &ShapedText,
     max_angle_degrees: f32,
 ) -> Option<Vec<PlacedGlyph>> {
-    let cum = cumulative_lengths(line);
-    let total = *cum.last()?;
+    if line.points.is_empty() {
+        return None;
+    }
+    let total = line.total();
     let start = center - shaped.width / 2.0;
-    let a = point_at(line, &cum, start);
-    let b = point_at(line, &cum, start + shaped.width);
+    let a = line.point_at(start);
+    let b = line.point_at(start + shaped.width);
     // Always read left to right.
-    let flip = b[0] < a[0];
-    let (poly, cum, start) = if flip {
-        let rev: Vec<[f32; 2]> = line.iter().rev().copied().collect();
-        let rev_cum = cumulative_lengths(&rev);
-        (rev, rev_cum, total - (start + shaped.width))
+    let (poly, start) = if b[0] < a[0] {
+        let rev = reversed.get_or_insert_with(|| line.reversed());
+        (&*rev, total - (start + shaped.width))
     } else {
-        (line.to_vec(), cum, start)
+        (line, start)
     };
-    let total = *cum.last()?;
+    let total = poly.total();
     let max_angle = max_angle_degrees.to_radians();
 
     let mut glyphs = Vec::with_capacity(shaped.glyphs.len());
@@ -323,8 +475,8 @@ fn layout_on_line(
     for (index, g) in shaped.glyphs.iter().enumerate() {
         let d = (start + g.x + g.advance / 2.0).clamp(0.0, total);
         let half = (g.advance / 2.0).max(0.5);
-        let p0 = point_at(&poly, &cum, (d - half).max(0.0));
-        let p1 = point_at(&poly, &cum, (d + half).min(total));
+        let p0 = poly.point_at((d - half).max(0.0));
+        let p1 = poly.point_at((d + half).min(total));
         let angle = (p1[1] - p0[1]).atan2(p1[0] - p0[0]);
         if let Some(prev) = prev_angle
             && angle_difference(angle, prev) > max_angle
@@ -334,7 +486,7 @@ fn layout_on_line(
         prev_angle = Some(angle);
         glyphs.push(PlacedGlyph {
             index,
-            center: point_at(&poly, &cum, d),
+            center: poly.point_at(d),
             angle,
         });
     }
@@ -347,44 +499,6 @@ fn angle_difference(a: f32, b: f32) -> f32 {
         d = std::f32::consts::TAU - d;
     }
     d
-}
-
-fn cumulative_lengths(line: &[[f32; 2]]) -> Vec<f32> {
-    let mut cum = Vec::with_capacity(line.len());
-    let mut acc = 0.0;
-    for (i, p) in line.iter().enumerate() {
-        if i > 0 {
-            acc += (p[0] - line[i - 1][0]).hypot(p[1] - line[i - 1][1]);
-        }
-        cum.push(acc);
-    }
-    cum
-}
-
-fn polyline_length(line: &[[f32; 2]]) -> f32 {
-    cumulative_lengths(line).last().copied().unwrap_or(0.0)
-}
-
-/// The point `d` pixels along the polyline (clamped to its ends).
-fn point_at(line: &[[f32; 2]], cum: &[f32], d: f32) -> [f32; 2] {
-    let last = line.len() - 1;
-    if d <= 0.0 || last == 0 {
-        return line[0];
-    }
-    if d >= cum[last] {
-        return line[last];
-    }
-    let i = cum.partition_point(|&c| c <= d).clamp(1, last);
-    let seg = cum[i] - cum[i - 1];
-    let t = if seg > 0.0 {
-        (d - cum[i - 1]) / seg
-    } else {
-        0.0
-    };
-    [
-        line[i - 1][0] + (line[i][0] - line[i - 1][0]) * t,
-        line[i - 1][1] + (line[i][1] - line[i - 1][1]) * t,
-    ]
 }
 
 /// Liang–Barsky clip of one segment to `rect`.
@@ -745,18 +859,105 @@ mod tests {
     #[test]
     fn line_labels_participate_in_collisions() {
         let mut engine = test_engine();
-        let mut first = line_cand("Main Street", vec![[20.0, 100.0], [300.0, 100.0]]);
-        first.layer_rank = 0;
+        // A line barely longer than the text has one position only, so
+        // the lower-priority copy must collide and be dropped.
+        let w = engine.shape("Main Street", 12.0).width;
+        let tight = vec![[100.0, 100.0], [100.0 + w + 2.0, 100.0]];
+        let first = line_cand("Main Street", tight.clone());
+        let mut second = line_cand("Main Street", tight);
+        second.layer_rank = 1;
+        let placed = LabelPlacer::new(viewport()).place(&mut engine, &[second, first]);
+        assert_eq!(
+            placed.iter().map(|p| p.candidate).collect::<Vec<_>>(),
+            vec![1],
+            "the higher-priority line label wins"
+        );
+
+        // On a long parallel line the second label slides to a free
+        // stretch: both are placed, and they do not overlap.
+        let first = line_cand("Main Street", vec![[20.0, 100.0], [300.0, 100.0]]);
         let mut second = line_cand("Other Street", vec![[40.0, 100.0], [320.0, 100.0]]);
         second.layer_rank = 1;
-        let placed =
-            LabelPlacer::new(viewport()).place(&mut engine, &[second.clone(), first.clone()]);
-        // Both are tried at several positions; the second may find a free
-        // stretch but must never overlap the first.
-        let first_bounds = placed.iter().find(|p| p.candidate == 1).unwrap().bounds;
-        if let Some(other) = placed.iter().find(|p| p.candidate == 0) {
-            assert!(!other.bounds.overlaps(&first_bounds));
+        let placed = LabelPlacer::new(viewport()).place(&mut engine, &[first, second]);
+        assert_eq!(placed.len(), 2);
+        assert!(!placed[0].bounds.overlaps(&placed[1].bounds));
+        // The slide went past the first label, not on top of it.
+        assert!(placed[1].bounds.min[0] >= placed[0].bounds.max[0]);
+
+        // Line labels block point labels placed after them.
+        let line = line_cand("Main Street", vec![[20.0, 100.0], [300.0, 100.0]]);
+        let point = cand("Blocked", [160.0, 100.0], 1);
+        let placed = LabelPlacer::new(viewport()).place(&mut engine, &[line, point]);
+        assert_eq!(
+            placed.iter().map(|p| p.candidate).collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    fn center_cand(text: &str, line: Vec<[f32; 2]>) -> LabelCandidate {
+        LabelCandidate {
+            anchor: LabelAnchor::LineCenter(line),
+            ..line_cand(text, vec![])
         }
+    }
+
+    #[test]
+    fn line_center_labels_sit_at_the_middle_or_nowhere() {
+        let mut engine = test_engine();
+        let placed = LabelPlacer::new(viewport()).place(
+            &mut engine,
+            &[center_cand("Centred", vec![[0.0, 50.0], [380.0, 50.0]])],
+        );
+        assert_eq!(placed.len(), 1);
+        let mid = (placed[0].bounds.min[0] + placed[0].bounds.max[0]) / 2.0;
+        assert!((mid - 190.0).abs() < 1.0, "{mid}");
+
+        // The middle of the whole line is off screen: `line` placement
+        // would use the visible stretch, `line-center` places nothing.
+        let long = vec![[0.0, 50.0], [2000.0, 50.0]];
+        assert!(
+            LabelPlacer::new(viewport())
+                .place(&mut engine, &[center_cand("Centred", long.clone())])
+                .is_empty()
+        );
+        assert_eq!(
+            LabelPlacer::new(viewport())
+                .place(&mut engine, &[line_cand("Centred", long)])
+                .len(),
+            1
+        );
+
+        // A sharp bend at the middle drops it, though straight stretches
+        // exist elsewhere.
+        let bent = vec![[0.0, 100.0], [190.0, 100.0], [190.0, 290.0]];
+        assert!(
+            LabelPlacer::new(viewport())
+                .place(&mut engine, &[center_cand("Corner label", bent)])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn font_stacks_shape_and_cache_separately() {
+        let mut engine = test_engine();
+        let plain = engine.shape("Font", 14.0);
+        let named = engine.shape_with("Font", 14.0, &FontStack::new(["Cantarell Regular"]));
+        let missing = engine.shape_with("Font", 14.0, &FontStack::new(["Nonexistent Sans"]));
+        // Different stacks are different cache entries...
+        assert!(!Arc::ptr_eq(&plain, &named));
+        // ...but the same stack hits.
+        let again = engine.shape_with("Font", 14.0, &FontStack::new(["Cantarell Regular"]));
+        assert!(Arc::ptr_eq(&named, &again));
+        // Only Cantarell is loaded, so all three use it.
+        assert_eq!(plain.width, named.width);
+        assert_eq!(plain.width, missing.width);
+        // Labels carry their stack through placement.
+        let mut c = cand("Font", [100.0, 100.0], 0);
+        c.style.font = FontStack::new(["Cantarell Bold"]);
+        assert_eq!(
+            LabelPlacer::new(viewport()).place(&mut engine, &[c]).len(),
+            1
+        );
     }
 
     #[test]

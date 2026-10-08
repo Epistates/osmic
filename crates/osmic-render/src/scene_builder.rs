@@ -5,13 +5,15 @@
 //! change shows up identically everywhere.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use geo_types::{Coord, LineString, Polygon};
 use osmic_core::{Color, Geometry, TileCoord};
 use osmic_style::{
-    EvalContext, Layer, LayerKind, PropertySource, Style, SymbolPlacement, SymbolStyle, ValueRef,
+    Alignment, EvalContext, Layer, LayerKind, PropertySource, Style, SymbolPlacement, SymbolStyle,
+    ValueRef,
 };
-use osmic_text::{LabelAnchor, LabelCandidate, LabelStyle};
+use osmic_text::{FontStack, LabelAnchor, LabelCandidate, LabelStyle};
 use osmic_tiles::mvt_decode::{AttrRef, DecodedFeature};
 
 use crate::camera::{PixelMapping, TILE_SIZE};
@@ -334,10 +336,15 @@ fn build_layer(
                 if style.text.trim().is_empty() || style.size < 1.0 {
                     continue;
                 }
-                for anchor in label_anchors(&f.geometry, style.placement, m) {
+                let anchors =
+                    label_anchors(&f.geometry, style.placement, style.rotation_alignment, m);
+                for anchor in anchors {
                     let in_view = match &anchor {
                         LabelAnchor::Point(p) => visible(&options.cull, std::iter::once(p), 0.0),
-                        LabelAnchor::Line(line) => visible(&options.cull, line.iter(), 0.0),
+                        LabelAnchor::Line(line) | LabelAnchor::LineCenter(line) => {
+                            visible(&options.cull, line.iter(), 0.0)
+                        }
+                        _ => true,
                     };
                     if in_view {
                         out.push(RenderFeature::Label(label_candidate(style, anchor, rank)));
@@ -348,25 +355,25 @@ fn build_layer(
     }
 }
 
+fn label_style(style: &SymbolStyle) -> LabelStyle {
+    let mut s = LabelStyle::new(style.size, style.color);
+    s.font = FontStack::from(Arc::clone(&style.font));
+    if style.halo_color.a > 0.0 {
+        s = s.with_halo(style.halo_color, style.halo_width);
+    }
+    s.anchor = style.anchor.fraction();
+    s.offset = [style.offset[0] * style.size, style.offset[1] * style.size];
+    s.padding = style.padding;
+    s.allow_overlap = style.allow_overlap;
+    s.max_angle_degrees = style.max_angle_degrees;
+    s
+}
+
 fn label_candidate(style: &SymbolStyle, anchor: LabelAnchor, rank: u32) -> LabelCandidate {
     LabelCandidate {
         text: style.text.clone(),
         anchor,
-        style: LabelStyle {
-            font_size: style.size,
-            color: style.color,
-            halo_color: style.halo_color,
-            halo_width: if style.halo_color.a > 0.0 {
-                style.halo_width
-            } else {
-                0.0
-            },
-            anchor: style.anchor.fraction(),
-            offset: [style.offset[0] * style.size, style.offset[1] * style.size],
-            padding: style.padding,
-            allow_overlap: style.allow_overlap,
-            max_angle_degrees: style.max_angle_degrees,
-        },
+        style: label_style(style),
         layer_rank: rank,
         sort_key: style.sort_key,
     }
@@ -454,10 +461,33 @@ fn points(g: &Geometry, m: &PixelMapping) -> Vec<[f32; 2]> {
     }
 }
 
-/// Where labels attach for a geometry under a placement mode.
-fn label_anchors(g: &Geometry, placement: SymbolPlacement, m: &PixelMapping) -> Vec<LabelAnchor> {
+/// Where labels attach for a geometry under a placement mode and
+/// `text-rotation-alignment`.
+///
+/// Scenes have no bearing, so for `point` placement `map` and `viewport`
+/// alignment coincide (text is horizontal). Along lines, `map` and `auto`
+/// rotate glyphs with the line, while `viewport` keeps the text horizontal
+/// at the middle of each line (`line-center`: of each line part).
+fn label_anchors(
+    g: &Geometry,
+    placement: SymbolPlacement,
+    alignment: Alignment,
+    m: &PixelMapping,
+) -> Vec<LabelAnchor> {
+    let follows_line = alignment != Alignment::Viewport;
     match placement {
-        SymbolPlacement::Point => match g {
+        SymbolPlacement::Line | SymbolPlacement::LineCenter if !follows_line => lines(g, m)
+            .iter()
+            .filter_map(|l| line_midpoint(l))
+            .map(LabelAnchor::Point)
+            .collect(),
+        SymbolPlacement::Line => lines(g, m).into_iter().map(LabelAnchor::Line).collect(),
+        SymbolPlacement::LineCenter => lines(g, m)
+            .into_iter()
+            .map(LabelAnchor::LineCenter)
+            .collect(),
+        // `point`, and any placement newer than this renderer.
+        _ => match g {
             Geometry::Point(_) | Geometry::MultiPoint(_) => {
                 points(g, m).into_iter().map(LabelAnchor::Point).collect()
             }
@@ -481,11 +511,6 @@ fn label_anchors(g: &Geometry, placement: SymbolPlacement, m: &PixelMapping) -> 
                     .collect()
             }
         },
-        // `line-center` is treated like `line`: the label is placed on the
-        // best stretch of the line rather than pinned to its exact middle.
-        SymbolPlacement::Line | SymbolPlacement::LineCenter => {
-            lines(g, m).into_iter().map(LabelAnchor::Line).collect()
-        }
     }
 }
 
@@ -971,6 +996,65 @@ mod tests {
             inside
         };
         assert!(inside, "{pt:?}");
+    }
+
+    #[test]
+    fn symbol_font_placement_and_rotation_alignment_are_honoured() {
+        let symbol = |id: &str, layout: serde_json::Value| {
+            let mut layout = layout;
+            layout["text-field"] = "{name}".into();
+            serde_json::json!({"id": id, "type": "symbol", "source": "s",
+                               "source-layer": "highway", "layout": layout})
+        };
+        let style = Style::from_value(&serde_json::json!({
+            "version": 8,
+            "sources": {"s": {"type": "vector", "tiles": ["x/{z}/{x}/{y}"]}},
+            "layers": [
+                symbol("along", serde_json::json!({"symbol-placement": "line",
+                                                    "text-font": ["Noto Sans Bold"]})),
+                symbol("centre", serde_json::json!({"symbol-placement": "line-center"})),
+                symbol("flat", serde_json::json!({"symbol-placement": "line",
+                                                  "text-rotation-alignment": "viewport"})),
+                symbol("flat-centre", serde_json::json!({"symbol-placement": "line-center",
+                                                         "text-rotation-alignment": "viewport"})),
+                symbol("mapped-point", serde_json::json!({"text-rotation-alignment": "map"})),
+            ],
+        }))
+        .unwrap();
+        let (tile, opts) = tile_options(14.0);
+        let f = feature("highway", "primary", Some("Main Street"), road(tile));
+        let scene = build_scene(&style, &[f], &opts);
+        let labels: Vec<&LabelCandidate> = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.features)
+            .filter_map(|f| match f {
+                RenderFeature::Label(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels.len(), 5);
+        assert!(matches!(labels[0].anchor, LabelAnchor::Line(_)));
+        assert_eq!(labels[0].style.font.names(), ["Noto Sans Bold"]);
+        assert_eq!(
+            labels[1].style.font.names(),
+            ["Open Sans Regular", "Arial Unicode MS Regular"],
+            "MapLibre's default stack"
+        );
+        assert!(matches!(labels[1].anchor, LabelAnchor::LineCenter(_)));
+        // Viewport-aligned text along a line stays horizontal, at the
+        // line's middle.
+        for flat in &labels[2..4] {
+            let LabelAnchor::Point(p) = flat.anchor else {
+                panic!("{:?}", flat.anchor)
+            };
+            assert!(
+                (p[0] - 256.0).abs() < 1.0 && (p[1] - 256.0).abs() < 1.0,
+                "{p:?}"
+            );
+        }
+        // Point placement is horizontal whatever the alignment (no bearing).
+        assert!(matches!(labels[4].anchor, LabelAnchor::Point(_)));
     }
 
     #[test]

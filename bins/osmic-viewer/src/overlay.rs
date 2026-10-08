@@ -534,11 +534,7 @@ mod tests {
         LabelCandidate {
             text: text.into(),
             anchor: LabelAnchor::Point(at),
-            style: LabelStyle {
-                font_size: 12.0,
-                color: Color::BLACK,
-                ..LabelStyle::default()
-            },
+            style: LabelStyle::new(12.0, Color::BLACK),
             layer_rank: rank,
             sort_key: 0.0,
         }

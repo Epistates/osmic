@@ -144,13 +144,7 @@ fn primitives() {
     labels.push(RenderFeature::Label(LabelCandidate {
         text: "Halo Label".into(),
         anchor: LabelAnchor::Point([60.0, 45.0]),
-        style: LabelStyle {
-            font_size: 14.0,
-            color: rgb("#222222"),
-            halo_color: rgb("#ffffff"),
-            halo_width: 2.0,
-            ..LabelStyle::default()
-        },
+        style: LabelStyle::new(14.0, rgb("#222222")).with_halo(rgb("#ffffff"), 2.0),
         layer_rank: 0,
         sort_key: 0.0,
     }));
@@ -179,12 +173,7 @@ fn primitives_at_device_pixel_ratio_2() {
     layer.push(RenderFeature::Label(LabelCandidate {
         text: "2x".into(),
         anchor: LabelAnchor::Point([50.0, 40.0]),
-        style: LabelStyle {
-            font_size: 14.0,
-            halo_color: rgb("#ffffff"),
-            halo_width: 1.5,
-            ..LabelStyle::default()
-        },
+        style: LabelStyle::new(14.0, Color::BLACK).with_halo(rgb("#ffffff"), 1.5),
         layer_rank: 0,
         sort_key: 0.0,
     }));
@@ -356,12 +345,7 @@ fn rendering_is_deterministic() {
     layer.push(RenderFeature::Label(LabelCandidate {
         text: "Deterministic".into(),
         anchor: LabelAnchor::Line(vec![[5.0, 10.0], [180.0, 40.0]]),
-        style: LabelStyle {
-            font_size: 13.0,
-            halo_color: Color::WHITE,
-            halo_width: 1.5,
-            ..LabelStyle::default()
-        },
+        style: LabelStyle::new(13.0, Color::BLACK).with_halo(Color::WHITE, 1.5),
         layer_rank: 0,
         sort_key: 0.0,
     }));

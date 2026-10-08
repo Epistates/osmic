@@ -716,10 +716,7 @@ mod tests {
         let label = LabelCandidate {
             text: "Hello".into(),
             anchor: LabelAnchor::Point([10.0, 10.0]),
-            style: LabelStyle {
-                font_size: 10.0,
-                ..LabelStyle::default()
-            },
+            style: LabelStyle::new(10.0, Color::BLACK),
             layer_rank: 0,
             sort_key: 0.0,
         };
@@ -856,11 +853,7 @@ mod tests {
         layer.push(RenderFeature::Label(LabelCandidate {
             text: "WWWW".into(),
             anchor: LabelAnchor::Point([20.0, 10.0]),
-            style: LabelStyle {
-                font_size: 14.0,
-                color: Color::BLACK,
-                ..LabelStyle::default()
-            },
+            style: LabelStyle::new(14.0, Color::BLACK),
             layer_rank: 0,
             sort_key: 0.0,
         }));

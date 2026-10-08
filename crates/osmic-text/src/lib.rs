@@ -1,10 +1,12 @@
 //! Text for maps: shaping, label placement and glyph rasterisation.
 //!
-//! * [`TextEngine`] shapes text with cosmic-text (results are cached per
-//!   text and size) and rasterises glyphs through cosmic-text's
-//!   `SwashCache`, which is the glyph cache. Use [`TextEngine::with_fonts`]
-//!   to render with bundled fonts only (deterministic output) or
-//!   [`TextEngine::system`] for the installed fonts.
+//! * [`TextEngine`] shapes text with cosmic-text (results are kept in an
+//!   LRU cache per text, size and [`FontStack`]) and rasterises glyphs
+//!   through cosmic-text's `SwashCache`, which is the glyph cache. Use
+//!   [`TextEngine::with_fonts`] to render with bundled fonts only
+//!   (deterministic output) or [`TextEngine::system`] for the installed
+//!   fonts. A [`FontStack`] (MapLibre `text-font`) picks the first loaded
+//!   family, weight and style it names.
 //! * [`LabelPlacer`] places [`LabelCandidate`]s without overlaps, in a
 //!   deterministic priority order, using rectangles taken from the real
 //!   shaped extents and an R-tree [`CollisionIndex`]. Labels attached to a
@@ -19,6 +21,7 @@
 mod blend;
 mod collision;
 mod engine;
+mod font;
 mod label;
 mod shaping;
 
@@ -27,6 +30,7 @@ pub use collision::{CollisionIndex, Rect};
 pub use engine::{
     LabelBitmap, MAX_FONT_SIZE, NoFontsError, ShapedGlyph, ShapedText, TextEngine, max_halo_width,
 };
+pub use font::FontStack;
 pub use label::{
     LabelAnchor, LabelCandidate, LabelPlacer, LabelStyle, PlacedGlyph, PlacedLabel, clip_polyline,
 };
