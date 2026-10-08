@@ -61,10 +61,14 @@ dense node store alone reserved 97 GB).
   `TileCompression` and `TileFormat` are `#[non_exhaustive]`. The `sorter`
   and `proto` modules and `TileFeature::encode`/`decode` are private.
 - `osmic-osm`: `Role::parse` returns a `Role`, with unknown roles as
-  `Role::Other`; `PbfWriterOptions` and `UnknownLayer` are
-  `#[non_exhaustive]`.
+  `Role::Other`. `PbfWriterOptions`, `UnknownLayer`, `PipelineConfig`,
+  `PipelineStats`, `NodeStorage`, `IncompleteWays` and `TagRetention` are
+  `#[non_exhaustive]`; build `PipelineConfig` with `new()` and its setters.
 - `osmic-repl`: `UpdateOptions`, `ClientOptions` and `OscLimits` are
-  `#[non_exhaustive]`; build them with their setters.
+  `#[non_exhaustive]`; build them with their setters. A non-HTTPS URL is
+  `ReplError::InsecureUrl` and an unsorted or LocationsOnWays input is
+  `ReplError::UnsupportedInput` (both were `ReplError::State`).
+  `state::format_iso8601` returns an `Option`.
 - `osmic-serve`: `ServeError::Archive` carries a typed `OpenArchiveError`.
 
 ### Added
@@ -101,6 +105,11 @@ dense node store alone reserved 97 GB).
   `source`, and can copy encoded blobs verbatim.
 - `Layer::from_name`, a lookup that never allocates; `load_geojson_with`
   takes a `TagRetention`.
+- File-backed dense node stores are locked while open, so a second
+  process gets `NodeStoreError::Locked` instead of sharing (or truncating)
+  the file.
+- Every library crate documents its whole public API and warns on missing
+  docs.
 
 ### Changed
 
@@ -118,6 +127,8 @@ dense node store alone reserved 97 GB).
   the sorter's leftover in-memory chunks are sorted in parallel.
 - `osmic generate-tiles` keeps only curated tags for GeoJSON input unless
   `--all-tags` is given, as for PBF input.
+- Replication timestamps are parsed and formatted with jiff. Any RFC 3339
+  instant is accepted, and state files keep the canonical `Z` form.
 
 ### Fixed
 
@@ -158,6 +169,12 @@ dense node store alone reserved 97 GB).
   worker or when an encoder panics. Ring areas no longer overflow on
   extreme coordinates. `TileRange::len` and `is_empty` are correct for
   inverted ranges.
+- `PbfWriter` refuses a way without locations in a LocationsOnWays file,
+  whose header promises them.
+- A change-file size limit of `u64::MAX` no longer overflows.
+- `TileCoord::children` returns `None` for an off-grid coordinate instead
+  of overflowing, and `BBox::world` uses the same latitude limit as the
+  Mercator projection.
 
 ## 0.1.1 - 2026-05-07
 
