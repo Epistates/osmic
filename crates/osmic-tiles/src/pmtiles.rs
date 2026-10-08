@@ -2,7 +2,6 @@
 #![cfg(feature = "native")]
 
 use std::fs::File;
-use std::io;
 use std::path::Path;
 
 use pmtiles::{Compression, PmTilesStreamWriter, PmTilesWriter, TileType};
@@ -67,13 +66,6 @@ impl PmTilesArchive {
             .map_err(|e| OsmicError::Tile(format!("Failed to finalize PMTiles: {e}")))?;
 
         info!("PMTiles archive finalized");
-        Ok(())
-    }
-}
-
-/// Convenience function to convert OsmicError for io::Error.
-impl From<PmTilesArchive> for io::Result<()> {
-    fn from(_: PmTilesArchive) -> Self {
         Ok(())
     }
 }

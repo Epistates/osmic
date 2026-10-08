@@ -23,12 +23,6 @@ use osmic_osm::tags::Tags;
 use crate::coord::TileTransform;
 use crate::encode::{TileEncoder, TileFeature};
 
-#[cfg(target_os = "macos")]
-type PendingGpuBatch = (
-    osmic_accel::metal::accelerator::PendingBatch,
-    Vec<osmic_core::tile::TileCoord>,
-    Vec<Vec<(usize, usize)>>,
-);
 #[cfg(feature = "native")]
 use crate::sort::{tile_sort_key, ExternalFeatureSort};
 
@@ -201,11 +195,6 @@ impl<'a> TileGenerator<'a> {
             // Step 2: Generate tiles
             let tile_entries: Vec<_> = tile_features.into_iter().collect();
 
-            // Rayon-parallel CPU tile generation.
-            // Note: GPU (Metal) clip path exists in generate_tiles_gpu() but
-            // benchmarks show rayon across M4 Max CPU cores is faster than
-            // GPU dispatch overhead for tile generation. GPU acceleration is
-            // retained for the real-time viewer where batching amortizes overhead.
             for batch in tile_entries.chunks(effective_batch_size) {
                 #[cfg(feature = "native")]
                 let tiles: Vec<_> = batch
@@ -248,176 +237,6 @@ impl<'a> TileGenerator<'a> {
         );
 
         Ok(total_tiles)
-    }
-
-    /// GPU-accelerated tile generation for a single zoom level.
-    ///
-    /// Batches all (tile, feature) pairs through Metal GPU for clipping,
-    /// then does tile encoding on CPU from the GPU output.
-    ///
-    /// Retained as a reference implementation — see the comment in
-    /// [`Self::generate_for_zoom`] for why the CPU rayon path is currently
-    /// the active one. Revived when GPU dispatch overhead is amortized
-    /// (e.g. real-time viewer with persistent command buffers).
-    #[cfg(target_os = "macos")]
-    #[allow(dead_code)]
-    fn generate_tiles_gpu<F>(
-        &self,
-        accel: &osmic_accel::GpuAccelerator,
-        tile_entries: &[((u32, u32), Vec<usize>)],
-        zoom: u8,
-        write_tile: &mut F,
-    ) -> OsmicResult<u64>
-    where
-        F: FnMut(TileCoord, &[u8]) -> OsmicResult<()>,
-    {
-        use osmic_accel::metal::flatten::WorkItem;
-
-        let mut total_tiles = 0u64;
-        let zoom_u8 = zoom;
-
-        // Double-buffered: GPU clips batch N while CPU encodes batch N-1
-        let batches: Vec<_> = tile_entries.chunks(self.config.batch_size).collect();
-        let mut pending_gpu: Option<PendingGpuBatch> = None;
-
-        for tile_batch in &batches {
-            // Phase 1: CPU simplify all geometries in this batch
-            let mut simplified_geoms: Vec<osmic_core::geometry::Geometry> = Vec::new();
-            let mut tile_coords: Vec<TileCoord> = Vec::new();
-            let mut tile_feature_data: Vec<Vec<(usize, usize)>> = Vec::new();
-
-            for ((x, y), feature_indices) in tile_batch.iter() {
-                let coord = TileCoord::new(*x, *y, Zoom::new(zoom));
-                tile_coords.push(coord);
-
-                let mut per_tile = Vec::new();
-                for &feat_idx in feature_indices {
-                    let feature = &self.features[feat_idx];
-                    let simplified = simplify_geometry(&feature.geometry, zoom_u8);
-                    let wi_idx = simplified_geoms.len();
-                    simplified_geoms.push(simplified);
-                    per_tile.push((feat_idx, wi_idx));
-                }
-                tile_feature_data.push(per_tile);
-            }
-
-            // Phase 2: Build GPU work items from pre-simplified geoms
-            // Store tile (x,y) per geom for correct projection
-            let mut work_items: Vec<WorkItem<'_>> = Vec::with_capacity(simplified_geoms.len());
-            let mut tile_idx = 0usize;
-            for ((x, y), _) in tile_batch.iter() {
-                if tile_idx < tile_feature_data.len() {
-                    for &(_, geom_idx) in &tile_feature_data[tile_idx] {
-                        work_items.push(WorkItem {
-                            geometry: &simplified_geoms[geom_idx],
-                            tile_x: *x,
-                            tile_y: *y,
-                            zoom: zoom_u8,
-                            extent: self.config.extent,
-                        });
-                    }
-                    tile_idx += 1;
-                }
-            }
-
-            // Dispatch GPU clip (async)
-            let new_pending = if !work_items.is_empty() {
-                accel.clip_batch_async(&work_items).map_err(|e| {
-                    osmic_core::error::OsmicError::Tile(format!("GPU dispatch failed: {e}"))
-                })?
-            } else {
-                None
-            };
-
-            // While GPU clips current batch, encode PREVIOUS batch on CPU
-            if let Some((prev_pending, prev_coords, prev_tile_data)) = pending_gpu.take() {
-                let results = prev_pending.wait_and_read();
-                total_tiles +=
-                    self.encode_gpu_results(&results, &prev_coords, &prev_tile_data, write_tile)?;
-            }
-
-            if let Some(pb) = new_pending {
-                pending_gpu = Some((pb, tile_coords, tile_feature_data));
-            }
-        }
-
-        // Drain last pending batch
-        if let Some((prev_pending, prev_coords, prev_tile_data)) = pending_gpu.take() {
-            let results = prev_pending.wait_and_read();
-            total_tiles +=
-                self.encode_gpu_results(&results, &prev_coords, &prev_tile_data, write_tile)?;
-        }
-
-        Ok(total_tiles)
-    }
-
-    /// Encode GPU clip results into tiles (CPU).
-    /// Coordinates are already in tile-local projected space.
-    ///
-    /// Retained alongside [`Self::generate_tiles_gpu`]; see that method
-    /// for the rationale.
-    #[cfg(target_os = "macos")]
-    #[allow(dead_code)]
-    fn encode_gpu_results<F>(
-        &self,
-        results: &[Option<(Vec<f32>, u32)>],
-        tile_coords: &[TileCoord],
-        tile_feature_data: &[Vec<(usize, usize)>],
-        write_tile: &mut F,
-    ) -> OsmicResult<u64>
-    where
-        F: FnMut(TileCoord, &[u8]) -> OsmicResult<()>,
-    {
-        let mut count = 0u64;
-
-        for (batch_idx, per_tile) in tile_feature_data.iter().enumerate() {
-            let coord = tile_coords[batch_idx];
-            let mut layer_map: HashMap<&str, Vec<ClippedFeature>> = HashMap::new();
-
-            for &(feat_idx, wi_idx) in per_tile {
-                if let Some((coords_f32, vcount)) = results.get(wi_idx).and_then(|r| r.as_ref()) {
-                    let feature = &self.features[feat_idx];
-                    let layer_name = feature.kind.layer_name();
-
-                    if let Some(geom) =
-                        gpu_output_to_geometry(coords_f32, *vcount, feature.kind.is_area())
-                    {
-                        layer_map
-                            .entry(layer_name)
-                            .or_default()
-                            .push(ClippedFeature {
-                                id: feature.id,
-                                kind: feature.kind,
-                                geometry: geom,
-                                tags: &feature.tags,
-                            });
-                    }
-                }
-            }
-
-            if layer_map.is_empty() {
-                continue;
-            }
-
-            let layer_entries: Vec<(&str, Vec<&dyn TileFeature>)> = layer_map
-                .iter()
-                .map(|(name, features)| {
-                    let refs: Vec<&dyn TileFeature> =
-                        features.iter().map(|f| f as &dyn TileFeature).collect();
-                    (*name, refs)
-                })
-                .collect();
-
-            if let Some(bytes) =
-                self.encoder
-                    .encode_projected(self.config.extent, &layer_entries, self.tag_store)
-            {
-                write_tile(coord, &bytes)?;
-                count += 1;
-            }
-        }
-
-        Ok(count)
     }
 
     /// Build a map of (tile_x, tile_y) → [feature_indices] for a given zoom.
@@ -656,44 +475,5 @@ impl<'a> TileGenerator<'a> {
             &layer_entries,
             self.tag_store,
         )
-    }
-}
-
-/// Convert GPU output (projected f32 coordinate pairs in tile-local space)
-/// back into a `Geometry` for encoding.
-///
-/// The GPU already projected coords to tile-local [0, extent] space.
-/// Paired with [`TileGenerator::generate_tiles_gpu`]; retained as a
-/// reference implementation (see that method's doc comment).
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn gpu_output_to_geometry(
-    coords_f32: &[f32],
-    count: u32,
-    is_area: bool,
-) -> Option<osmic_core::geometry::Geometry> {
-    use geo_types::{Coord, LineString, Polygon};
-
-    let n = count as usize;
-    if n < 2 {
-        return None;
-    }
-
-    let coords: Vec<Coord<f64>> = (0..n)
-        .map(|i| Coord {
-            x: coords_f32[i * 2] as f64,
-            y: coords_f32[i * 2 + 1] as f64,
-        })
-        .collect();
-
-    if is_area && n >= 3 {
-        Some(osmic_core::geometry::Geometry::Polygon(Polygon::new(
-            LineString::new(coords),
-            vec![],
-        )))
-    } else {
-        Some(osmic_core::geometry::Geometry::Line(LineString::new(
-            coords,
-        )))
     }
 }

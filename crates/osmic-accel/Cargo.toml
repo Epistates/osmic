@@ -18,11 +18,8 @@ osmic-core = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 geo-types = { workspace = true }
-geo = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.33"
 parking_lot = "0.12"
 
-[build-dependencies]
-cc = "1"

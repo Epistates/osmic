@@ -35,14 +35,6 @@ pub trait TileEncoder: Send + Sync {
         tag_store: &TagStore,
     ) -> Option<Vec<u8>>;
 
-    /// Encode features already in projected tile-local coordinates.
-    fn encode_projected(
-        &self,
-        extent: u32,
-        layer_features: &[(&str, Vec<&dyn TileFeature>)],
-        tag_store: &TagStore,
-    ) -> Option<Vec<u8>>;
-
     /// The tile format this encoder produces.
     fn format(&self) -> TileFormat;
 

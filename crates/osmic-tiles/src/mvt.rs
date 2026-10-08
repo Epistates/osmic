@@ -64,57 +64,6 @@ pub fn encode_geometry(
     }
 }
 
-/// Encode a geometry that is ALREADY in tile-local projected coordinates.
-/// Skips the lon_lat_to_tile projection — coordinates are used as-is.
-pub fn encode_geometry_projected(geometry: &Geometry) -> Result<GeomData, mvt::Error> {
-    match geometry {
-        Geometry::Point(p) => GeomEncoder::new(GeomType::Point)
-            .point(p.x(), p.y())?
-            .encode(),
-        Geometry::Line(ls) => {
-            let mut encoder = GeomEncoder::new(GeomType::Linestring);
-            for coord in ls.coords() {
-                encoder.add_point(coord.x, coord.y)?;
-            }
-            encoder.encode()
-        }
-        Geometry::Polygon(poly) => {
-            let mut encoder = GeomEncoder::new(GeomType::Polygon);
-            let rings: Vec<_> = std::iter::once(poly.exterior())
-                .chain(poly.interiors())
-                .collect();
-            for (i, ring) in rings.iter().enumerate() {
-                for coord in ring.coords() {
-                    encoder.add_point(coord.x, coord.y)?;
-                }
-                if i < rings.len() - 1 {
-                    encoder.complete_geom()?;
-                }
-            }
-            encoder.encode()
-        }
-        Geometry::MultiPolygon(mp) => {
-            let mut encoder = GeomEncoder::new(GeomType::Polygon);
-            let total_polys = mp.0.len();
-            for (pi, poly) in mp.iter().enumerate() {
-                let rings: Vec<_> = std::iter::once(poly.exterior())
-                    .chain(poly.interiors())
-                    .collect();
-                for (ri, ring) in rings.iter().enumerate() {
-                    for coord in ring.coords() {
-                        encoder.add_point(coord.x, coord.y)?;
-                    }
-                    let is_last = pi == total_polys - 1 && ri == rings.len() - 1;
-                    if !is_last {
-                        encoder.complete_geom()?;
-                    }
-                }
-            }
-            encoder.encode()
-        }
-    }
-}
-
 /// Extra tag keys to encode for POI detail (address, contact, etc.)
 const EXTRA_TAG_KEYS: &[(WellKnownKey, &str)] = &[
     (WellKnownKey::AddrStreet, "addr:street"),
@@ -173,56 +122,6 @@ fn resolve_extra_keys(tag_store: &TagStore) -> Vec<(osmic_osm::tags::TagKey, &'s
         .iter()
         .map(|(wk, mvt_name)| (tag_store.well_known(*wk), *mvt_name))
         .collect()
-}
-
-/// Build an MVT tile from features with PRE-PROJECTED coordinates.
-/// Used by the GPU path where coordinates are already in tile-local space.
-pub fn build_tile_projected(
-    extent: u32,
-    layer_features: &[(&str, Vec<&dyn TileFeature>)],
-    tag_store: &TagStore,
-    include_all_tags: bool,
-) -> Option<Vec<u8>> {
-    let mut tile = Tile::new(extent);
-    let name_key = tag_store.well_known(WellKnownKey::Name);
-    let extra_keys = resolve_extra_keys(tag_store);
-
-    for &(layer_name, ref features) in layer_features {
-        if features.is_empty() {
-            continue;
-        }
-
-        let mut layer = tile.create_layer(layer_name);
-
-        for &feature in features {
-            match encode_geometry_projected(feature.geometry()) {
-                Ok(geom_data) => {
-                    let mut mvt_feature = layer.into_feature(geom_data);
-                    mvt_feature.set_id(feature.id() as u64);
-                    encode_feature_tags(
-                        &mut mvt_feature,
-                        feature,
-                        tag_store,
-                        name_key,
-                        &extra_keys,
-                        include_all_tags,
-                    );
-                    layer = mvt_feature.into_layer();
-                }
-                Err(_) => continue,
-            }
-        }
-
-        if layer.num_features() > 0 {
-            let _ = tile.add_layer(layer);
-        }
-    }
-
-    if tile.num_layers() == 0 {
-        return None;
-    }
-
-    tile.to_bytes().ok()
 }
 
 /// Build an MVT tile from clipped features grouped by layer name.
@@ -318,15 +217,6 @@ impl TileEncoder for MvtEncoder {
             tag_store,
             self.include_all_tags,
         )
-    }
-
-    fn encode_projected(
-        &self,
-        extent: u32,
-        layer_features: &[(&str, Vec<&dyn TileFeature>)],
-        tag_store: &TagStore,
-    ) -> Option<Vec<u8>> {
-        build_tile_projected(extent, layer_features, tag_store, self.include_all_tags)
     }
 
     fn format(&self) -> TileFormat {

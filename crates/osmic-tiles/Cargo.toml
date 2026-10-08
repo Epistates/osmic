@@ -20,18 +20,12 @@ mlt = ["dep:mlt-core"]
 [dependencies]
 osmic-core = { workspace = true }
 osmic-geo = { workspace = true }
-osmic-index = { workspace = true }
 osmic-osm = { workspace = true, default-features = false }
 geo-types = { workspace = true }
 mvt = { workspace = true }
 pmtiles = { workspace = true, features = ["write"], optional = true }
 rayon = { workspace = true, optional = true }
 tracing = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-geo = { workspace = true }
 mlt-core = { version = "0.6", optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-osmic-accel = { workspace = true }

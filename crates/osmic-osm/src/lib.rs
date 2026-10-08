@@ -1,10 +1,7 @@
-pub mod arena;
 pub mod classify;
 pub mod feature;
 #[cfg(feature = "native")]
 pub mod geojson;
-#[cfg(feature = "native")]
-pub mod io;
 pub mod layers;
 pub mod multipolygon;
 #[cfg(feature = "native")]

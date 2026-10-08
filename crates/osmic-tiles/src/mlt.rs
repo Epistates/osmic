@@ -53,15 +53,6 @@ impl TileEncoder for MltEncoder {
         encode_mlt_tile(extent, Some(transform), layer_features, tag_store)
     }
 
-    fn encode_projected(
-        &self,
-        extent: u32,
-        layer_features: &[(&str, Vec<&dyn TileFeature>)],
-        tag_store: &TagStore,
-    ) -> Option<Vec<u8>> {
-        encode_mlt_tile(extent, None, layer_features, tag_store)
-    }
-
     fn format(&self) -> TileFormat {
         TileFormat::Mlt
     }

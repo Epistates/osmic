@@ -13,7 +13,5 @@ readme.workspace = true
 description = "MapLibre-compatible style system"
 
 [dependencies]
-osmic-core = { workspace = true }
-osmic-osm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

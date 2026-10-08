@@ -33,10 +33,6 @@ enum Commands {
         #[arg(long, default_value = "0-14")]
         zoom: String,
 
-        /// Path for node location store (temporary mmap file)
-        #[arg(long, default_value = "/tmp/osmic-nodes.bin")]
-        node_store: PathBuf,
-
         /// Maximum expected node ID
         #[arg(long, default_value = "13000000000")]
         max_node_id: i64,
@@ -103,10 +99,6 @@ enum Commands {
         /// Input PBF file
         pbf_file: PathBuf,
 
-        /// Path for node location store
-        #[arg(long, default_value = "/tmp/osmic-nodes.bin")]
-        node_store: PathBuf,
-
         /// Maximum expected node ID
         #[arg(long, default_value = "13000000000")]
         max_node_id: i64,
@@ -148,10 +140,6 @@ enum Commands {
         /// Deduplication radius in meters (0 to disable)
         #[arg(long, default_value = "100")]
         dedup_radius: f64,
-
-        /// Path for node location store (temporary mmap file)
-        #[arg(long, default_value = "/tmp/osmic-extract-nodes.bin")]
-        node_store: PathBuf,
 
         /// Maximum expected node ID
         #[arg(long, default_value = "13000000000")]
@@ -197,10 +185,6 @@ enum Commands {
         #[arg(long, default_value = "./osmic-features.redb")]
         feature_store: PathBuf,
 
-        /// Path for node location store
-        #[arg(long, default_value = "/tmp/osmic-nodes.bin")]
-        node_store: PathBuf,
-
         /// Maximum expected node ID
         #[arg(long, default_value = "13000000000")]
         max_node_id: i64,
@@ -226,7 +210,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pbf_file,
             output,
             zoom,
-            node_store,
             max_node_id,
             extent,
             style,
@@ -244,7 +227,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &pbf_file,
                 &output,
                 &zoom,
-                &node_store,
                 max_node_id,
                 extent,
                 style.as_deref(),
@@ -258,10 +240,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Inspect {
             pbf_file,
-            node_store,
             max_node_id,
         } => {
-            inspect(&pbf_file, &node_store, max_node_id)?;
+            inspect(&pbf_file, max_node_id)?;
         }
         Commands::Extract {
             pbf_file,
@@ -272,7 +253,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             require_name,
             bbox,
             dedup_radius,
-            node_store,
             max_node_id,
         } => {
             extract_entities(
@@ -284,7 +264,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 require_name,
                 bbox.as_deref(),
                 dedup_radius,
-                &node_store,
                 max_node_id,
             )?;
         }
@@ -299,7 +278,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state_dir,
             replication_url,
             feature_store,
-            node_store,
             max_node_id,
             init_sequence,
         } => {
@@ -307,7 +285,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &state_dir,
                 &replication_url,
                 &feature_store,
-                &node_store,
                 max_node_id,
                 init_sequence,
             )?;
@@ -414,7 +391,6 @@ fn generate_tiles(
     pbf_file: &std::path::Path,
     output: &std::path::Path,
     zoom: &str,
-    node_store_path: &std::path::Path,
     max_node_id: i64,
     extent: u32,
     style_path: Option<&std::path::Path>,
@@ -439,7 +415,6 @@ fn generate_tiles(
 
     // Step 1: Process PBF
     let total_start = Instant::now();
-    let _ = node_store_path; // argument retained for CLI stability; store is now RAM-backed
     let node_store = RamNodeLocationStore::create(max_node_id)?;
     let processor = PbfProcessor::new();
     let result = processor.process(pbf_file, &node_store, layers)?;
@@ -531,11 +506,6 @@ fn generate_tiles(
         println!("Style:  {}  (source: {})", style_path.display(), source_url);
     }
 
-    // Cleanup temp file
-    if node_store_path.starts_with("/tmp") {
-        let _ = std::fs::remove_file(node_store_path);
-    }
-
     Ok(())
 }
 
@@ -593,11 +563,7 @@ fn apply_feature_tag_filter(
     Ok(retained)
 }
 
-fn inspect(
-    pbf_file: &std::path::Path,
-    node_store_path: &std::path::Path,
-    max_node_id: i64,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn inspect(pbf_file: &std::path::Path, max_node_id: i64) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Osmic - PBF Inspector ===");
     println!("File: {}", pbf_file.display());
 
@@ -612,7 +578,6 @@ fn inspect(
         file_size as f64 / (1024.0 * 1024.0 * 1024.0)
     );
 
-    let _ = node_store_path; // argument retained for CLI stability; store is now RAM-backed
     let node_store = RamNodeLocationStore::create(max_node_id)?;
     let processor = PbfProcessor::new();
     let result = processor.process(pbf_file, &node_store, &LayerSet::all())?;
@@ -650,10 +615,6 @@ fn inspect(
         println!("  {:<12} {:>12}", kind, format_number(*count as u64));
     }
 
-    if node_store_path.starts_with("/tmp") {
-        let _ = std::fs::remove_file(node_store_path);
-    }
-
     Ok(())
 }
 
@@ -667,7 +628,6 @@ fn extract_entities(
     require_name: bool,
     bbox: Option<&str>,
     dedup_radius: f64,
-    node_store_path: &std::path::Path,
     max_node_id: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Osmic - Entity Extractor ===");
@@ -733,7 +693,6 @@ fn extract_entities(
     let config = ExtractConfig {
         filter,
         require_name,
-        node_store_path: node_store_path.to_path_buf(),
         max_node_id,
         bbox: parsed_bbox,
     };
@@ -792,7 +751,6 @@ fn update_from_replication(
     state_dir: &std::path::Path,
     replication_url: &str,
     feature_store_path: &std::path::Path,
-    node_store_path: &std::path::Path,
     max_node_id: i64,
     init_sequence: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -814,7 +772,6 @@ fn update_from_replication(
     println!("Current sequence: {}", state.sequence_number);
 
     // Open stores
-    let _ = node_store_path; // argument retained for CLI stability; store is now RAM-backed
     let node_store = RamNodeLocationStore::create(max_node_id)?;
     let store = osmic_repl::FeatureStore::open(feature_store_path)?;
     let tag_store = TagStore::new();

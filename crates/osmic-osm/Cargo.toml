@@ -19,8 +19,6 @@ native = ["dep:osmpbf", "dep:rayon"]
 [dependencies]
 osmic-core = { workspace = true }
 osmic-geo = { workspace = true }
-bumpalo = "3.20"
-crossbeam-channel = "0.5"
 osmpbf = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 lasso = { workspace = true }

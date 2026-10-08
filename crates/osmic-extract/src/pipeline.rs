@@ -4,7 +4,7 @@
 //! this pipeline extracts arbitrary named entities matching tag filters and
 //! collects business contact metadata.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use osmic_core::error::{OsmicError, OsmicResult};
@@ -23,8 +23,6 @@ pub struct ExtractConfig {
     pub filter: TagFilter,
     /// Only extract entities that have a `name` tag.
     pub require_name: bool,
-    /// Path for the memory-mapped node location store.
-    pub node_store_path: PathBuf,
     /// Maximum expected node ID (determines mmap file size).
     /// For 2025 North America: ~13_000_000_000.
     pub max_node_id: i64,
@@ -37,7 +35,6 @@ impl Default for ExtractConfig {
         Self {
             filter: TagFilter::All(vec![]),
             require_name: true,
-            node_store_path: PathBuf::from("/tmp/osmic-extract-nodes.bin"),
             max_node_id: 13_000_000_000,
             bbox: None,
         }
@@ -84,11 +81,6 @@ impl Extractor {
             )));
         }
 
-        // RAM-backed node store — no file backing, relies on OS 4KB-page
-        // sparsity for FlexMem-style memory behavior. The legacy
-        // `node_store_path` field in the config is now unused but kept
-        // for API stability.
-        let _ = &self.config.node_store_path;
         let node_store = RamNodeLocationStore::create(self.config.max_node_id)?;
 
         // Pass 1: Read node locations

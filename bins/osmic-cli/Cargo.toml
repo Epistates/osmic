@@ -17,7 +17,6 @@ default = []
 mlt = ["osmic-tiles/mlt"]
 
 [dependencies]
-osmic-core = { workspace = true }
 osmic-osm = { workspace = true, features = ["native"] }
 osmic-index = { workspace = true }
 osmic-extract = { workspace = true }
@@ -28,5 +27,4 @@ osmic-style = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking"] }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

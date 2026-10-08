@@ -15,8 +15,6 @@ description = "Backend abstraction, scene graph, tessellation"
 [dependencies]
 osmic-core = { workspace = true }
 osmic-osm = { workspace = true }
-osmic-style = { workspace = true }
 tiny-skia = { workspace = true }
 cosmic-text = { workspace = true }
-geo-types = { workspace = true }
 tracing = { workspace = true }

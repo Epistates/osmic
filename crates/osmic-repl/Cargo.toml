@@ -15,15 +15,12 @@ description = "OSM replication: change file parsing, feature store, incremental 
 [dependencies]
 osmic-core = { workspace = true }
 osmic-osm = { workspace = true }
-osmic-index = { workspace = true }
 osmic-tiles = { workspace = true }
 osmic-geo = { workspace = true }
 geo-types = { workspace = true }
 quick-xml = "0.39"
 flate2 = "1"
 redb = "2"
-reqwest = { version = "0.12", features = ["blocking"] }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }

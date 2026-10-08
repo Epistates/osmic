@@ -64,7 +64,7 @@ proj4rs = "0.1"
 # Tile & format
 geozero = "0.15"
 mvt = "0.12"
-pmtiles = "0.21"
+pmtiles = { version = "0.21", default-features = false }
 
 # Rendering
 wgpu = "28"

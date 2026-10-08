@@ -74,18 +74,6 @@ impl PbfProcessor {
     ) -> OsmicResult<ProcessedData> {
         let total_start = Instant::now();
 
-        // Pre-compute a feature-count estimate from the PBF size and allocate
-        // a bump arena for pipeline scratch space. The capacity hint is used
-        // to pre-size the final feature Vec, avoiding ~26 reallocations for
-        // planet-scale runs.
-        let pbf_size = std::fs::metadata(pbf_path).map(|m| m.len()).unwrap_or(0);
-        let arena = crate::arena::ProcessedArena::for_pbf_size(pbf_size);
-        info!(
-            pbf_mb = pbf_size / (1024 * 1024),
-            estimated_features = arena.feature_capacity_hint(),
-            "Sized feature arena from PBF metadata"
-        );
-
         // Pass 1: Node locations. Streams blobs directly from disk.
         info!("Pass 1: Reading node locations from {}", pbf_path.display());
         let pass1_start = Instant::now();
@@ -102,23 +90,16 @@ impl PbfProcessor {
         // Way coords are cached in RAM for multipolygon assembly.
         info!("Pass 2: Processing ways, POI nodes, and relations (single streaming pass)...");
         let pass2_start = Instant::now();
-        let (raw_features, way_count, relation_count, bbox) =
+        let (mut features, way_count, relation_count, bbox) =
             self.pass2_all(pbf_path, node_store, layers)?;
         let pass2_duration = pass2_start.elapsed();
         info!(
             "Pass 2 complete: {} ways + {} relations → {} features in {:.2}s",
             way_count,
             relation_count,
-            raw_features.len(),
+            features.len(),
             pass2_duration.as_secs_f64()
         );
-
-        // Copy into the pre-sized feature vector to release any over-
-        // allocated capacity from rayon's reduce-phase doubling growth.
-        // This also gives a predictable memory layout for downstream
-        // consumers that iterate features in a tight loop (tile gen).
-        let mut features = arena.new_feature_vec();
-        features.extend(raw_features);
         features.shrink_to_fit();
 
         let total_duration = total_start.elapsed();
