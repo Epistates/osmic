@@ -794,7 +794,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "custom-plugin"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "osmic-app",
 ]
@@ -1916,7 +1916,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "load-pbf"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "osmic-core",
@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "osmic"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "osmic-accel",
  "osmic-app",
@@ -2601,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-accel"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "dispatch2",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-app"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
@@ -2624,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "csscolorparser",
  "geo",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-extract"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "caseless",
  "csv",
@@ -2688,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-geo"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "geo",
  "geo-types",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-index"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "memmap2 0.9.11",
  "osmic-core",
@@ -2708,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-osm"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "geo",
@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-render"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "geo-types",
@@ -2750,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-repl"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "osmic-core",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-serve"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "axum",
  "bytes",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-style"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "osmic-core",
  "osmic-osm",
@@ -2799,7 +2799,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-text"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "cosmic-text",
  "lru",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-tiles"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "flate2",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "osmic-viewer"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "clap",
@@ -3451,7 +3451,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "render-static"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "osmic-core",
@@ -4209,7 +4209,7 @@ dependencies = [
 
 [[package]]
 name = "tile-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "osmic-serve",

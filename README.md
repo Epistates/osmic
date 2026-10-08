@@ -11,7 +11,7 @@ generating PMTiles archives, serving them, keeping the source data current
 from replication diffs, extracting entities, and rendering with MapLibre
 styles.
 
-**Status:** `0.1.x`, pre-1.0 — APIs may still change. See
+**Status:** `0.2.x`, pre-1.0 — APIs may still change. See
 [CHANGELOG.md](CHANGELOG.md).
 
 ## What it does
@@ -95,7 +95,7 @@ Use the umbrella crate, or depend on individual crates:
 
 ```toml
 [dependencies]
-osmic = "0.1"
+osmic = "0.2"
 ```
 
 Stream a PBF file into a PMTiles archive:

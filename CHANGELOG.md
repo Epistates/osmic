@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.2.0 - Unreleased
 
 This release rewrites most of the pipeline for correctness and scale. On the
 United States extract (10.8 GB PBF) it generates z0–14 tiles in under six
@@ -53,6 +53,19 @@ dense node store alone reserved 97 GB).
   `TessellationOptions` and `LabelStyle` with their constructors.
   `SkiaBackend::render_labels` takes a scale and offset instead of a
   tiny-skia `Transform`.
+- `osmic-core`: `Zoom` is always within 0..=22. Its field is private:
+  `Zoom::new` returns an `Option`, `Zoom::clamped` saturates, `Zoom::get`
+  reads the level, and `TryFrom<u8>` replaces `From<u8>`.
+- `osmic-tiles`: `RenderConfig`, `TileGeneratorConfig`, `TileSummary`,
+  `ArchiveOptions` (build it with `ArchiveOptions::new`), `AttributeMode`,
+  `TileCompression` and `TileFormat` are `#[non_exhaustive]`. The `sorter`
+  and `proto` modules and `TileFeature::encode`/`decode` are private.
+- `osmic-osm`: `Role::parse` returns a `Role`, with unknown roles as
+  `Role::Other`; `PbfWriterOptions` and `UnknownLayer` are
+  `#[non_exhaustive]`.
+- `osmic-repl`: `UpdateOptions`, `ClientOptions` and `OscLimits` are
+  `#[non_exhaustive]`; build them with their setters.
+- `osmic-serve`: `ServeError::Archive` carries a typed `OpenArchiveError`.
 
 ### Added
 
@@ -77,6 +90,17 @@ dense node store alone reserved 97 GB).
   viewer with background tile loading.
 - CI on Linux, macOS and Windows with MSRV, docs, cargo-deny and coverage;
   workspace lints; CONTRIBUTING and SECURITY policies.
+- `osmic_tiles::reader` (feature `reader`) opens PMTiles archives after
+  validating the header, with a bounded leaf-directory cache, and
+  `decompress_tile` inflates tiles under a size cap. The server and the
+  viewer read archives through it.
+- `osmic serve` gained `--max-connections`, `--header-timeout`,
+  `--drain-delay`, `--drain-timeout` and `--directory-cache`. Raster
+  archives get raster tile URLs and a raster style.
+- `PbfWriter` writes element metadata, LocationsOnWays and the header's
+  `source`, and can copy encoded blobs verbatim.
+- `Layer::from_name`, a lookup that never allocates; `load_geojson_with`
+  takes a `TagRetention`.
 
 ### Changed
 
@@ -87,6 +111,13 @@ dense node store alone reserved 97 GB).
 - The `osmic` binary uses mimalloc. PBF blocks inflate with zlib-rs.
 - Dependencies updated to current releases, including wgpu 30, cosmic-text
   0.19, geo 0.33, rstar 0.13, pmtiles 0.24 and tower-http 0.7.
+- `osmic update` copies the blocks no change touches verbatim, and
+  re-encodes touched blocks with each object's metadata.
+- Tile attributes are handled once per feature rather than once per tile
+  piece (`Renderer::render` is about 3.5× faster on 200k buildings), and
+  the sorter's leftover in-memory chunks are sorted in parallel.
+- `osmic generate-tiles` keeps only curated tags for GeoJSON input unless
+  `--all-tags` is given, as for PBF input.
 
 ### Fixed
 
@@ -108,6 +139,25 @@ dense node store alone reserved 97 GB).
   miter limits, background layers, `text-font`, `line-center`,
   `text-rotation-alignment`, `to-number`, `coalesce` and legacy `in`
   filters behave as in MapLibre.
+- osmium's missing-location marker in LocationsOnWays files is no longer
+  read as a coordinate, and out-of-range node coordinates are rejected
+  instead of wrapping (tile and extract pipelines).
+- Invalid UTF-8 elsewhere in a block no longer drops relation tags or
+  roles. A multipolygon member with a misspelled role no longer drops the
+  area, and self-intersecting rings reject the relation.
+- `PbfWriter` caps blocks at 16 MiB, since readers refuse larger ones. An
+  empty tag key no longer shifts the tags of the nodes that follow it.
+- Change files must be well-formed osmChange documents within the OSM API
+  limits, and a state file for the wrong sequence is rejected.
+- Malformed PMTiles headers no longer panic the server or the viewer, and
+  tile inflation is capped at 64 MiB.
+- The server limits connections, header reads and shutdown draining.
+  Brotli or zstd archives answer 406 instead of 500, and tile
+  coordinates must be canonical.
+- `TileGenerator::finish` no longer hangs when it is called on a rayon
+  worker or when an encoder panics. Ring areas no longer overflow on
+  extreme coordinates. `TileRange::len` and `is_empty` are correct for
+  inverted ranges.
 
 ## 0.1.1 - 2026-05-07
 
