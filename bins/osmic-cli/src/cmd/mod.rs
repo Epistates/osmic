@@ -32,21 +32,11 @@ pub fn check_output(path: &Path, force: bool) -> anyhow::Result<()> {
 /// Write a small file atomically (temp file + rename).
 pub fn write_file(path: &Path, bytes: &[u8], force: bool) -> anyhow::Result<()> {
     check_output(path, force)?;
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let mut temp = tempfile::Builder::new()
-        .prefix(&osmic_core::fs::temp_file_prefix())
-        .tempfile_in(dir)
-        .with_context(|| format!("creating a temporary file in {}", dir.display()))?;
+    let mut temp = osmic_core::fs::temp_file_for(path)
+        .with_context(|| format!("creating a temporary file next to {}", path.display()))?;
     temp.write_all(bytes)?;
-    temp.as_file().sync_all()?;
-    if force {
-        temp.persist(path)?;
-    } else {
-        temp.persist_noclobber(path)?;
-    }
+    osmic_core::fs::persist(temp, path, force)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 

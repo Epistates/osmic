@@ -116,14 +116,7 @@ pub fn apply_to_pbf(
             input.display()
         )));
     }
-    let dir = match output.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let temp = tempfile::Builder::new()
-        .prefix(&osmic_core::fs::temp_file_prefix())
-        .suffix(".osm.pbf.tmp")
-        .tempfile_in(dir)?;
+    let temp = osmic_core::fs::temp_file_for(output)?;
     let options = PbfWriterOptions {
         bbox: header.bbox,
         sorted: true,
@@ -188,8 +181,7 @@ pub fn apply_to_pbf(
         }
     }
     writer.finish()?;
-    temp.as_file().sync_all()?;
-    temp.persist(output).map_err(|e| ReplError::Io(e.error))?;
+    osmic_core::fs::persist(temp, output, true)?;
     info!(
         output = %output.display(),
         sequence = state.sequence,

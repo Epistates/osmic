@@ -54,26 +54,13 @@ fn write_atomically(
     if !overwrite && path.exists() {
         return Err(OutputError::Exists(path.to_path_buf()));
     }
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let temp = tempfile::Builder::new()
-        .prefix(&osmic_core::fs::temp_file_prefix())
-        .suffix(".tmp")
-        .tempfile_in(dir)?;
+    let temp = osmic_core::fs::temp_file_for(path)?;
     {
         let mut w = BufWriter::new(temp.as_file());
         body(&mut w)?;
         w.flush()?;
     }
-    temp.as_file().sync_all()?;
-    if overwrite {
-        temp.persist(path).map_err(|e| OutputError::Io(e.error))?;
-    } else {
-        temp.persist_noclobber(path)
-            .map_err(|e| OutputError::Io(e.error))?;
-    }
+    osmic_core::fs::persist(temp, path, overwrite)?;
     Ok(())
 }
 

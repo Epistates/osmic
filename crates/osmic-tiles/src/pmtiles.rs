@@ -149,14 +149,7 @@ impl PmTilesArchive {
                 path.display()
             )));
         }
-        let parent = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        let temp = tempfile::Builder::new()
-            .prefix(&osmic_core::fs::temp_file_prefix())
-            .suffix(".pmtiles.tmp")
-            .tempfile_in(parent)?;
+        let temp = osmic_core::fs::temp_file_for(path)?;
         let file = temp.reopen()?;
         let tile_type = match options.format {
             TileFormat::Mvt => TileType::Mvt,
@@ -215,17 +208,8 @@ impl PmTilesArchive {
     /// archive to its destination.
     pub fn finalize(self) -> Result<PathBuf, TileError> {
         self.writer.finalize().map_err(archive_err)?;
-        self.temp.as_file().sync_all()?;
         let path = self.path;
-        if self.overwrite {
-            self.temp
-                .persist(&path)
-                .map_err(|e| TileError::Io(e.error))?;
-        } else {
-            self.temp
-                .persist_noclobber(&path)
-                .map_err(|e| TileError::Io(e.error))?;
-        }
+        osmic_core::fs::persist(self.temp, &path, self.overwrite)?;
         info!(path = %path.display(), tiles = self.tiles, "PMTiles archive written");
         Ok(path)
     }

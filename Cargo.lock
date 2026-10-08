@@ -2446,7 +2446,7 @@ dependencies = [
 name = "osmic-app"
 version = "0.1.1"
 dependencies = [
- "osmic-core",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -2480,8 +2480,11 @@ name = "osmic-core"
 version = "0.1.1"
 dependencies = [
  "geo-types",
+ "libc",
  "serde",
+ "tempfile",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -2586,6 +2589,7 @@ dependencies = [
  "osmic-style",
  "pmtiles",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tower",

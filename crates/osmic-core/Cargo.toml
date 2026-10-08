@@ -14,5 +14,10 @@ description = "Shared types, errors, and coordinate primitives for osmic"
 
 [dependencies]
 thiserror = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
 serde = { workspace = true }
 geo-types = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
