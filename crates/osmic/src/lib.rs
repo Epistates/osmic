@@ -2,6 +2,9 @@
 //!
 //! Each workspace crate is re-exported as a module ([`osm`], [`tiles`],
 //! [`serve`], …) and the most common types are collected in [`prelude`].
+//! Heavier parts are opt-in features: `extract` (`osmic::extract`),
+//! `replication` (`osmic::repl`), `accel` (`osmic::accel`, Apple Silicon)
+//! and `mlt` (MapLibre Tile output).
 //!
 //! ```no_run
 //! use osmic::prelude::*;
@@ -23,6 +26,13 @@ pub use osmic_serve as serve;
 pub use osmic_style as style;
 pub use osmic_text as text;
 pub use osmic_tiles as tiles;
+
+#[cfg(feature = "accel")]
+pub use osmic_accel as accel;
+#[cfg(feature = "extract")]
+pub use osmic_extract as extract;
+#[cfg(feature = "replication")]
+pub use osmic_repl as repl;
 
 /// Common types re-exported for convenience.
 pub mod prelude {

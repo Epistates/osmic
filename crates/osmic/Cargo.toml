@@ -11,6 +11,17 @@ keywords = ["osm", "openstreetmap", "maps", "tiles", "gis"]
 readme.workspace = true
 description = "Osmic facade crate: re-exports and prelude"
 
+[features]
+default = []
+# Entity extraction (osmic::extract).
+extract = ["dep:osmic-extract"]
+# Replication: keeping PBF files current (osmic::repl). Adds an HTTPS client.
+replication = ["dep:osmic-repl"]
+# MapLibre Tile output (needs Rust 1.98).
+mlt = ["osmic-tiles/mlt"]
+# Metal geometry clipping on Apple Silicon (osmic::accel).
+accel = ["dep:osmic-accel"]
+
 [dependencies]
 osmic-core = { workspace = true }
 osmic-osm = { workspace = true, features = ["native"] }
@@ -22,6 +33,12 @@ osmic-tiles = { workspace = true }
 osmic-render = { workspace = true }
 osmic-text = { workspace = true }
 osmic-serve = { workspace = true }
+osmic-extract = { workspace = true, optional = true }
+osmic-repl = { workspace = true, optional = true }
+osmic-accel = { workspace = true, optional = true }
+
+[package.metadata.docs.rs]
+features = ["extract", "replication"]
 
 [lints]
 workspace = true
