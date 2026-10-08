@@ -16,7 +16,7 @@ flate2 = "1.1"
 osmic-core = { path = "../crates/osmic-core" }
 osmic-repl = { path = "../crates/osmic-repl" }
 osmic-style = { path = "../crates/osmic-style" }
-osmic-tiles = { path = "../crates/osmic-tiles", default-features = false }
+osmic-tiles = { path = "../crates/osmic-tiles", default-features = false, features = ["reader"] }
 
 [[bin]]
 name = "mvt_decode"
@@ -42,6 +42,13 @@ bench = false
 [[bin]]
 name = "style_json"
 path = "fuzz_targets/style_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pmtiles_header"
+path = "fuzz_targets/pmtiles_header.rs"
 test = false
 doc = false
 bench = false
