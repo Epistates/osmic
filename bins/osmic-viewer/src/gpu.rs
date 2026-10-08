@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use osmic_core::Color;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use winit::window::Window;
 
 use crate::plan::scissor;
@@ -20,14 +20,41 @@ pub const MSAA_SAMPLES: u32 = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameOutcome {
     Presented,
-    /// Nothing to draw now (timed out, occluded, validation error); try
-    /// again later.
+    /// Nothing can be drawn until something changes (the window is occluded
+    /// or minimised, or acquiring the frame failed validation): wait for
+    /// the next window event rather than retrying in a loop.
     Skipped,
-    /// The surface was stale and has been reconfigured; draw again.
+    /// Acquiring the frame timed out; draw again. (The acquire itself
+    /// waited for the timeout, so retrying does not spin.)
+    Retry,
+    /// The surface was stale or lost and has been reconfigured or
+    /// recreated; draw again.
     Reconfigured,
-    /// The surface is gone and cannot be drawn to; the application should
-    /// exit.
+    /// The surface is gone and recreating it keeps failing; the
+    /// application should exit.
     Lost,
+}
+
+/// Consecutive lost surfaces tolerated (each one recreated) before giving
+/// up.
+const MAX_SURFACE_LOSSES: u32 = 3;
+
+/// Counts surface losses since the last presented frame.
+#[derive(Debug, Default)]
+struct LossBudget {
+    losses: u32,
+}
+
+impl LossBudget {
+    /// A loss happened: whether recreating the surface is still worth it.
+    fn lost(&mut self) -> bool {
+        self.losses += 1;
+        self.losses <= MAX_SURFACE_LOSSES
+    }
+
+    fn presented(&mut self) {
+        self.losses = 0;
+    }
 }
 
 /// Prefer a non-sRGB surface format; otherwise take the first one and
@@ -60,9 +87,12 @@ pub fn region_scissor(region: [f64; 4], scale: f64, size: [u32; 2]) -> Option<[u
 /// A window's surface and the renderer drawing into it.
 pub struct Gpu {
     window: Arc<Window>,
+    /// Kept to recreate the surface when it is lost.
+    instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     max_texture: u32,
+    losses: LossBudget,
     renderer: Renderer,
 }
 
@@ -120,9 +150,11 @@ impl Gpu {
         );
         Ok(Self {
             window,
+            instance,
             surface,
             config,
             max_texture,
+            losses: LossBudget::default(),
             renderer,
         })
     }
@@ -159,6 +191,31 @@ impl Gpu {
         self.renderer.resize(size);
     }
 
+    /// Reconfigure the surface for the window's current size, which may
+    /// have changed without a resize event reaching us yet. `false` while
+    /// the window has no area (minimised).
+    fn reconfigure(&mut self) -> bool {
+        let size = self.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return false;
+        }
+        let size = [
+            size.width.min(self.max_texture),
+            size.height.min(self.max_texture),
+        ];
+        self.config.width = size[0];
+        self.config.height = size[1];
+        self.surface.configure(self.renderer.device(), &self.config);
+        self.renderer.resize(size);
+        true
+    }
+
+    /// Replace a lost surface with a new one for the same window.
+    fn recreate_surface(&mut self) -> Result<(), wgpu::CreateSurfaceError> {
+        self.surface = self.instance.create_surface(Arc::clone(&self.window))?;
+        Ok(())
+    }
+
     /// Draw one frame.
     pub fn render(&mut self, clear: Color, draws: &[TileDraw<'_>]) -> FrameOutcome {
         use wgpu::CurrentSurfaceTexture as Acquired;
@@ -166,11 +223,33 @@ impl Gpu {
             Acquired::Success(frame) => (frame, false),
             Acquired::Suboptimal(frame) => (frame, true),
             Acquired::Outdated => {
-                self.surface.configure(self.renderer.device(), &self.config);
-                return FrameOutcome::Reconfigured;
+                return if self.reconfigure() {
+                    FrameOutcome::Reconfigured
+                } else {
+                    FrameOutcome::Skipped
+                };
             }
-            Acquired::Lost => return FrameOutcome::Lost,
-            status @ (Acquired::Timeout | Acquired::Occluded | Acquired::Validation) => {
+            Acquired::Lost => {
+                if !self.losses.lost() {
+                    error!("the window surface keeps getting lost; giving up");
+                    return FrameOutcome::Lost;
+                }
+                warn!("the window surface was lost; recreating it");
+                if let Err(e) = self.recreate_surface() {
+                    error!("recreating the window surface: {e}");
+                    return FrameOutcome::Lost;
+                }
+                return if self.reconfigure() {
+                    FrameOutcome::Reconfigured
+                } else {
+                    FrameOutcome::Skipped
+                };
+            }
+            Acquired::Timeout => {
+                debug!("acquiring the frame timed out; retrying");
+                return FrameOutcome::Retry;
+            }
+            status @ (Acquired::Occluded | Acquired::Validation) => {
                 debug!("skipping frame: {status:?}");
                 return FrameOutcome::Skipped;
             }
@@ -180,8 +259,9 @@ impl Gpu {
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.renderer.draw(&view, clear, draws);
         self.renderer.queue().present(frame);
+        self.losses.presented();
         if suboptimal {
-            self.surface.configure(self.renderer.device(), &self.config);
+            self.reconfigure();
         }
         FrameOutcome::Presented
     }
@@ -212,6 +292,17 @@ mod tests {
             Some((F::Bgra8UnormSrgb, true))
         );
         assert_eq!(choose_surface_format(&[]), None);
+    }
+
+    #[test]
+    fn lost_surfaces_are_recreated_until_losses_keep_repeating() {
+        let mut budget = LossBudget::default();
+        for _ in 0..MAX_SURFACE_LOSSES {
+            assert!(budget.lost(), "recreate");
+        }
+        assert!(!budget.lost(), "lost again without a frame in between");
+        budget.presented();
+        assert!(budget.lost(), "a presented frame resets the count");
     }
 
     #[test]

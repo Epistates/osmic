@@ -281,8 +281,17 @@ impl App {
             .collect();
 
         match gpu.render(background_color(&self.style, camera.zoom()), &draws) {
+            // Skipped frames are redrawn on the next event (for an occluded
+            // window, `Occluded(false)`), not in a loop.
             FrameOutcome::Presented | FrameOutcome::Skipped => {}
-            FrameOutcome::Reconfigured => gpu.window().request_redraw(),
+            FrameOutcome::Retry => gpu.window().request_redraw(),
+            FrameOutcome::Reconfigured => {
+                // The surface follows the window's current size; keep the
+                // camera's logical size in step.
+                let size = gpu.window().inner_size();
+                self.controller.resize(size.width, size.height);
+                gpu.window().request_redraw();
+            }
             FrameOutcome::Lost => {
                 self.fail(event_loop, "the window surface was lost".to_string());
             }
@@ -399,6 +408,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::RedrawRequested => self.redraw(event_loop),
+
+            // Frames are skipped while occluded; catch up when visible.
+            WindowEvent::Occluded(false) => self.request_redraw(),
 
             _ => {}
         }
