@@ -10,8 +10,7 @@ use std::thread::JoinHandle;
 
 use osmic_core::TileCoord;
 use osmic_render::{
-    Mesh, PixelMapping, RenderFeature, SceneBuilder, SceneOptions, TessellationOptions,
-    tessellate_scene,
+    Mesh, RenderFeature, SceneBuilder, SceneOptions, TessellationOptions, tessellate_scene,
 };
 use osmic_style::Style;
 use osmic_text::LabelCandidate;
@@ -65,15 +64,7 @@ impl TileData {
     /// evaluated one zoom up so the vertex shader can interpolate between
     /// them as the camera zooms.
     pub fn build(coord: TileCoord, features: &[DecodedFeature], style: &Style) -> Self {
-        let scene = SceneBuilder::new(style).build(
-            features,
-            &SceneOptions {
-                zoom: f64::from(coord.z.0),
-                mapping: PixelMapping::for_tile(coord),
-                cull: None,
-                clip: None,
-            },
-        );
+        let scene = SceneBuilder::new(style).build(features, &SceneOptions::for_tile(coord));
         let mesh = tessellate_scene(&scene, &TessellationOptions::default());
         if mesh.truncated || mesh.skipped > 0 {
             debug!(%coord, truncated = mesh.truncated, skipped = mesh.skipped, "tile mesh incomplete");

@@ -339,12 +339,8 @@ fn default_style_map() {
     let style = default_style();
     let scene = SceneBuilder::new(&style).build(
         &features,
-        &SceneOptions {
-            zoom: camera.zoom(),
-            mapping: camera.pixel_mapping(),
-            cull: Some([-20.0, -20.0, 340.0, 260.0]),
-            clip: None,
-        },
+        &SceneOptions::new(camera.zoom(), camera.pixel_mapping())
+            .with_cull([-20.0, -20.0, 340.0, 260.0]),
     );
     assert!(scene.feature_count() > 20);
 

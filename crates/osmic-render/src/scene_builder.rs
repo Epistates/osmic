@@ -7,31 +7,83 @@
 use std::collections::HashMap;
 
 use geo_types::{Coord, LineString, Polygon};
-use osmic_core::{Color, Geometry};
+use osmic_core::{Color, Geometry, TileCoord};
 use osmic_style::{
     EvalContext, Layer, LayerKind, PropertySource, Style, SymbolPlacement, SymbolStyle, ValueRef,
 };
 use osmic_text::{LabelAnchor, LabelCandidate, LabelStyle};
 use osmic_tiles::mvt_decode::{AttrRef, DecodedFeature};
 
-use crate::camera::PixelMapping;
+use crate::camera::{PixelMapping, TILE_SIZE};
 use crate::scene::{RenderFeature, RenderLayer, SceneGraph};
 use crate::tessellate::MIN_DASH_PERIOD;
 
 /// Parameters of one scene build.
+///
+/// Build with [`SceneOptions::new`] or [`SceneOptions::for_tile`] and the
+/// `with_*` methods.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SceneOptions {
     /// Style zoom (MapLibre convention) the style is evaluated at.
     pub zoom: f64,
     /// Projection from the Mercator unit square into scene pixels.
     pub mapping: PixelMapping,
     /// Rectangle `[x0, y0, x1, y1]` in scene pixels. Primitives entirely
-    /// outside it (allowing for stroke width) are dropped, and additional
-    /// `background` layers cover it. `None` keeps everything.
+    /// outside it (allowing for stroke width) are dropped. `None` keeps
+    /// everything.
     pub cull: Option<[f32; 4]>,
     /// Rectangle every produced layer is clipped to by the renderer; set to
     /// a tile's bounds when composing a view from several tiles.
     pub clip: Option<[f32; 4]>,
+}
+
+impl SceneOptions {
+    /// Evaluate at `zoom`, projecting with `mapping`; no culling or
+    /// clipping.
+    pub fn new(zoom: f64, mapping: PixelMapping) -> Self {
+        Self {
+            zoom,
+            mapping,
+            cull: None,
+            clip: None,
+        }
+    }
+
+    /// One tile on its own: the style at the tile's zoom, tile-local
+    /// pixels ([`PixelMapping::for_tile`]) and the scene clipped to the
+    /// tile's `TILE_SIZE` square.
+    pub fn for_tile(tile: TileCoord) -> Self {
+        let size = TILE_SIZE as f32;
+        Self::new(f64::from(tile.z.0), PixelMapping::for_tile(tile))
+            .with_clip([0.0, 0.0, size, size])
+    }
+
+    /// Drop primitives entirely outside `rect` (`[x0, y0, x1, y1]`).
+    pub fn with_cull(mut self, rect: [f32; 4]) -> Self {
+        self.cull = Some(rect);
+        self
+    }
+
+    /// Clip every produced layer to `rect` (`[x0, y0, x1, y1]`).
+    pub fn with_clip(mut self, rect: [f32; 4]) -> Self {
+        self.clip = Some(rect);
+        self
+    }
+
+    /// The area a `background` layer covers: the clip rectangle, else the
+    /// cull rectangle, else the whole projected world.
+    fn background_rect(&self) -> [f32; 4] {
+        self.clip.or(self.cull).unwrap_or_else(|| {
+            let PixelMapping { origin, scale } = self.mapping;
+            [
+                (-origin[0] * scale) as f32,
+                (-origin[1] * scale) as f32,
+                ((1.0 - origin[0]) * scale) as f32,
+                ((1.0 - origin[1]) * scale) as f32,
+            ]
+        })
+    }
 }
 
 /// Feature attributes as seen by style expressions, with their tile types:
@@ -76,6 +128,13 @@ impl<'a> SceneBuilder<'a> {
     /// Layers are visited in style order; within a layer, features keep
     /// their input order. Label candidates carry a priority derived from the
     /// layer order (later layers win collisions) and `symbol-sort-key`.
+    ///
+    /// `background` layers paint in style order, as in MapLibre. The ones
+    /// below every other active layer are composited into the scene's
+    /// clear color ([`SceneGraph::background`]; transparent if there are
+    /// none); any later one becomes a layer filling
+    /// [`SceneOptions::clip`], else [`SceneOptions::cull`], else the
+    /// projected world.
     pub fn build(&self, features: &[DecodedFeature], options: &SceneOptions) -> SceneGraph {
         let zoom = options.zoom;
         let mut by_layer: HashMap<&str, Vec<&DecodedFeature>> = HashMap::new();
@@ -84,7 +143,10 @@ impl<'a> SceneBuilder<'a> {
         }
 
         let mut scene = SceneGraph::new(Color::TRANSPARENT);
-        let mut saw_background = false;
+        // Whether every active layer so far was a background. This depends
+        // on the style only, never on the data, so all tiles of a view
+        // agree on which backgrounds are the clear color.
+        let mut below_everything = true;
         let layer_count = self.style.layers.len();
         for (index, layer) in self.style.layers.iter().enumerate() {
             if !layer.is_active_at(zoom) {
@@ -94,10 +156,10 @@ impl<'a> SceneBuilder<'a> {
             out.clip = options.clip;
             if let LayerKind::Background(bg) = &layer.kind {
                 let color = bg.resolve(&EvalContext::at_zoom(zoom));
-                if !saw_background {
-                    saw_background = true;
-                    scene.background = color;
-                } else if let Some([x0, y0, x1, y1]) = options.cull {
+                if below_everything {
+                    scene.background = over(color, scene.background);
+                } else if color.a > 0.0 {
+                    let [x0, y0, x1, y1] = options.background_rect();
                     out.push(RenderFeature::Fill {
                         coords: vec![vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]],
                         color,
@@ -106,6 +168,7 @@ impl<'a> SceneBuilder<'a> {
                 }
                 continue;
             }
+            below_everything = false;
             let Some(source_layer) = layer.source_layer.as_deref() else {
                 continue;
             };
@@ -119,6 +182,18 @@ impl<'a> SceneBuilder<'a> {
             }
         }
         scene
+    }
+}
+
+/// `top` composited over `bottom` (source-over), as straight-alpha colors.
+fn over(top: Color, bottom: Color) -> Color {
+    let (t, b) = (top.premultiplied(), bottom.premultiplied());
+    let inv = 1.0 - t[3];
+    let p: [f32; 4] = std::array::from_fn(|i| t[i] + b[i] * inv);
+    if p[3] <= 0.0 {
+        Color::TRANSPARENT
+    } else {
+        Color::rgba(p[0] / p[3], p[1] / p[3], p[2] / p[3], p[3])
     }
 }
 
@@ -896,6 +971,58 @@ mod tests {
             inside
         };
         assert!(inside, "{pt:?}");
+    }
+
+    #[test]
+    fn backgrounds_paint_in_style_order() {
+        let style = Style::from_value(&serde_json::json!({
+            "version": 8,
+            "sources": {"s": {"type": "vector", "tiles": ["x/{z}/{x}/{y}"]}},
+            "layers": [
+                {"id": "base", "type": "background", "paint": {"background-color": "#ff0000"}},
+                {"id": "tint", "type": "background",
+                 "paint": {"background-color": "#0000ff", "background-opacity": 0.5}},
+                {"id": "water", "type": "fill", "source": "s", "source-layer": "water"},
+                {"id": "veil", "type": "background",
+                 "paint": {"background-color": "rgba(255, 255, 255, 0.5)"}},
+            ],
+        }))
+        .unwrap();
+        let (tile, opts) = tile_options(10.0);
+        // The backgrounds below everything fold into the clear color...
+        let scene = build_scene(&style, &[], &opts);
+        assert_eq!(scene.background.to_rgba8(), [128, 0, 128, 255]);
+        // ...and a later one paints over the layers before it, in order,
+        // even with no cull rectangle (it then covers the whole world).
+        assert_eq!(scene.layers.len(), 1);
+        assert_eq!(scene.layers[0].z_order, 3);
+        let RenderFeature::Fill { coords, color } = &scene.layers[0].features[0] else {
+            panic!("{:?}", scene.layers[0])
+        };
+        assert_eq!(color.to_rgba8(), [255, 255, 255, 128]);
+        let n = f32::from(1u16 << tile.z.0); // the mapping is the tile's
+        let (x0, y0) = (coords[0][0][0], coords[0][0][1]);
+        let (x1, y1) = (coords[0][2][0], coords[0][2][1]);
+        assert!(x0 <= 0.0 && y0 <= 0.0 && x1 >= 512.0 && y1 >= 512.0);
+        assert!(
+            (x1 - x0 - 512.0 * n).abs() < 1.0,
+            "the world is 2^z tiles wide"
+        );
+        // With data, the order is base+tint, water, veil.
+        let water = feature("water", "lake", None, square(tile, false));
+        let scene = build_scene(&style, &[water], &opts);
+        let order: Vec<i32> = scene.layers.iter().map(|l| l.z_order).collect();
+        assert_eq!(order, [2, 3]);
+        // A tile scene's background covers exactly its clip.
+        let scene = build_scene(&style, &[], &SceneOptions::for_tile(tile));
+        let RenderFeature::Fill { coords, .. } = &scene.layers[0].features[0] else {
+            panic!()
+        };
+        assert_eq!(
+            coords[0],
+            vec![[0.0, 0.0], [512.0, 0.0], [512.0, 512.0], [0.0, 512.0]]
+        );
+        assert_eq!(scene.layers[0].clip, Some([0.0, 0.0, 512.0, 512.0]));
     }
 
     #[test]

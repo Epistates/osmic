@@ -15,9 +15,10 @@ use tracing::{info, warn};
 
 use osmic_core::TileCoord;
 use osmic_core::bbox::BBox;
-use osmic_render::camera::TILE_SIZE;
+use osmic_render::camera::{MAX_VISIBLE_TILES, TILE_SIZE};
 use osmic_render::{
-    Camera, RenderConfig, SceneBuilder, SceneOptions, SkiaBackend, backend::RenderBackend,
+    Camera, RenderConfig, SceneBuilder, SceneGraph, SceneOptions, SkiaBackend,
+    backend::RenderBackend,
 };
 use osmic_style::Style;
 use osmic_text::TextEngine;
@@ -120,25 +121,32 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
 
     // One scene per tile, each clipped to its tile so features overlapping
     // into a neighbour's buffer are drawn once; labels are placed together
-    // by the backend.
+    // by the backend. Tiles without data still get a (feature-less) scene:
+    // a `background` layer above other layers paints every tile.
     let builder = SceneBuilder::new(&style);
-    let mapping = camera.pixel_mapping();
     let (w, h) = (args.width as f32, args.height as f32);
-    let options = |clip| SceneOptions {
-        zoom: camera.zoom(),
-        mapping,
-        cull: Some([-64.0, -64.0, w + 64.0, h + 64.0]),
-        clip,
-    };
-    let mut scene = builder.build(&[], &options(None));
+    let options = SceneOptions::new(camera.zoom(), camera.pixel_mapping()).with_cull([
+        -64.0,
+        -64.0,
+        w + 64.0,
+        h + 64.0,
+    ]);
+    let visible = camera.visible_tiles(tile_zoom, 0.0);
+    if visible.is_empty() {
+        return Err(format!(
+            "tile zoom {tile_zoom} is out of range for a map zoom of {:.1} \
+             (it would need more than {MAX_VISIBLE_TILES} tiles)",
+            camera.zoom()
+        )
+        .into());
+    }
+    let mut scene = SceneGraph::new(builder.build(&[], &options).background);
     let (mut tiles, mut features_total) = (0usize, 0usize);
-    for visible in camera.visible_tiles(tile_zoom, 0.0) {
+    for visible in visible {
         if visible.world != 0 {
             continue; // static maps do not wrap around the antimeridian
         }
-        let Some(features) = load_tile(&reader, visible.coord).await? else {
-            continue;
-        };
+        let features = load_tile(&reader, visible.coord).await?;
         let t = camera.tile_transform(visible.coord, 0);
         let size = TILE_SIZE * t.scale;
         let clip = [
@@ -147,8 +155,9 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
             (t.offset[0] + size) as f32,
             (t.offset[1] + size) as f32,
         ];
-        scene.append(builder.build(&features, &options(Some(clip))));
-        tiles += 1;
+        let features = features.unwrap_or_default();
+        scene.append(builder.build(&features, &options.clone().with_clip(clip)));
+        tiles += usize::from(!features.is_empty());
         features_total += features.len();
     }
     info!(
@@ -360,5 +369,17 @@ mod tests {
         let mut a = args(dir.path(), "0,0,1,1");
         a.font = vec![dir.path().join("missing.ttf")];
         assert!(run(a).await.is_err());
+        // A tile zoom far above the view's: an error, not 10^17 tiles.
+        let bb = TileCoord::new(70, 95, osmic_core::Zoom(8)).bbox();
+        let mut a = args(
+            dir.path(),
+            &format!(
+                "{},{},{},{}",
+                bb.min_lon, bb.min_lat, bb.max_lon, bb.max_lat
+            ),
+        );
+        a.zoom = Some(30);
+        let err = run(a).await.unwrap_err().to_string();
+        assert!(err.contains("out of range"), "{err}");
     }
 }
