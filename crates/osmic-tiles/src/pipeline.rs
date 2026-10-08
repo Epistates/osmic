@@ -444,7 +444,8 @@ impl FeatureSink for TileGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::MvtEncoder;
+    use crate::encode::{MvtEncoder, TileFormat};
+    use crate::render::AttributeMode;
     use geo_types::{LineString, Point};
     use osmic_core::{Geometry, OsmId};
     use osmic_osm::TagRetention;
@@ -514,6 +515,214 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
             .collect();
         assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
+
+    /// A deterministic, varied feature set: buildings (some with holes),
+    /// named roads crossing many tiles, POIs, large landuse and water
+    /// polygons, a boundary and a railway — with curated and extra tags.
+    fn mixed_features(store: &TagStore) -> Vec<Feature> {
+        use geo_types::{MultiPolygon, Polygon};
+        use osmic_osm::feature::{
+            BoundaryKind, BuildingKind, LanduseKind, NaturalKind, RailwayKind, ShopKind, WaterKind,
+        };
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rand = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let square = |x: f64, y: f64, d: f64| {
+            LineString::from(vec![(x, y), (x + d, y), (x + d, y + d), (x, y + d), (x, y)])
+        };
+        let hole = |x: f64, y: f64, d: f64| {
+            LineString::from(vec![(x, y), (x, y + d), (x + d, y + d), (x + d, y), (x, y)])
+        };
+        let tags = |t: &[(&str, &str)]| store.intern_tags(t.iter().copied(), &TagRetention::All);
+        let mut out = Vec::new();
+        for i in 0..3_000i64 {
+            let (x, y) = (-122.52 + rand() * 0.2, 37.70 + rand() * 0.12);
+            let d = 0.0001 + rand() * 0.0004;
+            let interiors = if i % 7 == 0 {
+                vec![hole(x + d / 4.0, y + d / 4.0, d / 2.0)]
+            } else {
+                vec![]
+            };
+            let name = format!("Building {i}");
+            let number = (i % 300).to_string();
+            let mut t = vec![("building", "yes"), ("addr:housenumber", number.as_str())];
+            if i % 3 == 0 {
+                t.push(("name", &name));
+            }
+            if i % 5 == 0 {
+                t.push(("fixme", "check"));
+            }
+            out.push(Feature {
+                id: OsmId::way(i),
+                kind: FeatureKind::Building(BuildingKind::Yes),
+                geometry: Geometry::Polygon(Polygon::new(square(x, y, d), interiors)),
+                tags: tags(&t),
+            });
+        }
+        let kinds = [
+            (HighwayKind::Motorway, "motorway"),
+            (HighwayKind::Primary, "primary"),
+            (HighwayKind::Residential, "residential"),
+            (HighwayKind::Footway, "footway"),
+        ];
+        for i in 0..400i64 {
+            let (kind, value) = kinds[(i % 4) as usize];
+            let (mut x, mut y) = (-122.6 + rand() * 0.4, 37.6 + rand() * 0.3);
+            let mut pts = vec![(x, y)];
+            for _ in 0..(3 + i % 20) {
+                x += (rand() - 0.5) * 0.05;
+                y += (rand() - 0.5) * 0.05;
+                pts.push((x, y));
+            }
+            let name = format!("Street {}", i % 37);
+            let reference = format!("R{}", i % 11);
+            out.push(Feature {
+                id: OsmId::way(10_000 + i),
+                kind: FeatureKind::Highway(kind),
+                geometry: Geometry::Line(LineString::from(pts)),
+                tags: tags(&[
+                    ("highway", value),
+                    ("name", &name),
+                    ("ref", &reference),
+                    ("surface", "asphalt"),
+                ]),
+            });
+        }
+        for i in 0..500i64 {
+            let (x, y) = (-122.5 + rand() * 0.15, 37.72 + rand() * 0.1);
+            let name = format!("Place {i}");
+            let (kind, t) = if i % 2 == 0 {
+                (
+                    FeatureKind::Amenity(AmenityKind::Cafe),
+                    vec![
+                        ("amenity", "cafe"),
+                        ("name", name.as_str()),
+                        ("cuisine", "coffee"),
+                    ],
+                )
+            } else {
+                (
+                    FeatureKind::Shop(ShopKind::Supermarket),
+                    vec![
+                        ("shop", "supermarket"),
+                        ("name", name.as_str()),
+                        ("opening_hours", "24/7"),
+                    ],
+                )
+            };
+            out.push(Feature {
+                id: OsmId::node(i),
+                kind,
+                geometry: Geometry::Point(Point::new(x, y)),
+                tags: tags(&t),
+            });
+        }
+        out.push(Feature {
+            id: OsmId::relation(1),
+            kind: FeatureKind::Landuse(LanduseKind::Forest),
+            geometry: Geometry::Polygon(Polygon::new(
+                square(-122.55, 37.65, 0.3),
+                vec![hole(-122.5, 37.7, 0.1)],
+            )),
+            tags: tags(&[("landuse", "forest"), ("name", "Big Wood")]),
+        });
+        out.push(Feature {
+            id: OsmId::relation(2),
+            kind: FeatureKind::Water(WaterKind::Lake),
+            geometry: Geometry::MultiPolygon(MultiPolygon(vec![
+                Polygon::new(square(-122.45, 37.75, 0.05), vec![]),
+                Polygon::new(square(-122.35, 37.75, 0.02), vec![]),
+            ])),
+            tags: tags(&[("natural", "water"), ("water", "lake")]),
+        });
+        out.push(Feature {
+            id: OsmId::relation(3),
+            kind: FeatureKind::Natural(NaturalKind::Wood),
+            geometry: Geometry::Polygon(Polygon::new(square(-123.0, 37.0, 2.0), vec![])),
+            tags: tags(&[("natural", "wood")]),
+        });
+        out.push(Feature {
+            id: OsmId::relation(4),
+            kind: FeatureKind::Boundary(BoundaryKind::Administrative),
+            geometry: Geometry::Polygon(Polygon::new(square(-124.0, 36.0, 4.0), vec![])),
+            tags: tags(&[
+                ("boundary", "administrative"),
+                ("admin_level", "6"),
+                ("name", "County"),
+            ]),
+        });
+        out.push(Feature {
+            id: OsmId::way(99_999),
+            kind: FeatureKind::Railway(RailwayKind::Rail),
+            geometry: Geometry::Line(LineString::from(vec![
+                (-123.5, 36.5),
+                (-122.4, 37.8),
+                (-121.0, 38.9),
+            ])),
+            tags: tags(&[("railway", "rail"), ("name", "Main Line")]),
+        });
+        out
+    }
+
+    /// FNV-1a: a hash that is stable across Rust releases.
+    fn fnv1a(hash: &mut u64, bytes: &[u8]) {
+        for &b in bytes {
+            *hash ^= u64::from(b);
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+    }
+
+    /// Hash of every tile (coordinate and bytes, in delivery order) and of
+    /// the layer metadata, for `mode`.
+    fn output_hashes(mode: AttributeMode) -> (u64, u64, u64) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TagStore::new());
+        let mut config = TileGeneratorConfig {
+            temp_dir: Some(dir.path().to_path_buf()),
+            // Uncompressed, so the hashes do not depend on the gzip backend.
+            compression: TileCompression::None,
+            ..Default::default()
+        };
+        config.render.attributes = mode;
+        let g = TileGenerator::new(config, Box::new(MvtEncoder), Arc::clone(&store)).expect("new");
+        g.add_parallel(&mixed_features(&store)).expect("add");
+        let layers = g.stats().expect("stats").layers;
+        let meta = metadata_json(&ArchiveInfo::default(), TileFormat::Mvt, &layers);
+        let mut meta_hash = 0xCBF2_9CE4_8422_2325u64;
+        fnv1a(&mut meta_hash, meta["vector_layers"].to_string().as_bytes());
+        let mut tile_hash = 0xCBF2_9CE4_8422_2325u64;
+        let summary = g
+            .finish(|t| {
+                fnv1a(&mut tile_hash, t.coord.to_string().as_bytes());
+                fnv1a(&mut tile_hash, &t.data);
+                Ok(())
+            })
+            .expect("finish");
+        (tile_hash, meta_hash, summary.tiles)
+    }
+
+    /// Pins the generator's exact output, so performance work on the
+    /// render → sort → assemble path is provably byte-for-byte neutral.
+    /// Update the constants only for an intended output change.
+    #[test]
+    fn output_matches_golden_hashes() {
+        let curated = output_hashes(AttributeMode::Curated);
+        let all = output_hashes(AttributeMode::All);
+        assert_eq!(
+            curated,
+            (13100065092465890892, 808955951512424232, 16234),
+            "curated"
+        );
+        assert_eq!(
+            all,
+            (14680961121889460320, 13951613413496947922, 16234),
+            "all tags"
+        );
     }
 
     #[test]
