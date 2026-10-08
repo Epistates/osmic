@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use tiny_skia::{
-    Color as SkiaColor, FillRule, LineCap as SkiaCap, LineJoin as SkiaJoin, Mask, Paint, Path,
-    PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
+    Color as SkiaColor, FillRule, IntRect, LineCap as SkiaCap, LineJoin as SkiaJoin, Paint, Path,
+    PathBuilder, Pixmap, PixmapMut, Stroke, StrokeDash, Transform,
 };
 use tracing::info;
 
@@ -54,64 +52,36 @@ impl RenderBackend for SkiaBackend {
         let mut layers: Vec<&RenderLayer> = scene.layers.iter().collect();
         layers.sort_by_key(|l| l.z_order); // stable
 
-        let mut labels: Vec<&LabelCandidate> = Vec::new();
-        // Clip masks are shared by all layers clipped to the same rectangle
-        // (every style layer of one tile).
-        let mut masks: HashMap<[i32; 4], Option<Mask>> = HashMap::new();
-        for layer in layers {
-            let mask = match layer.clip {
-                Some(rect) => {
-                    let key = self.clip_key(rect);
-                    masks
-                        .entry(key)
-                        .or_insert_with(|| self.clip_mask(key))
-                        .as_ref()
-                }
-                None => None,
-            };
-            for feature in &layer.features {
-                match feature {
-                    RenderFeature::Fill { coords, color } => {
-                        self.render_fill(coords, color, transform, mask)?;
-                    }
-                    RenderFeature::Stroke {
-                        coords,
-                        color,
-                        width,
-                        cap,
-                        join,
-                        dash,
-                        ..
-                    } => {
-                        self.render_stroke(
-                            coords, color, *width, *cap, *join, dash, transform, mask,
-                        )?;
-                    }
-                    RenderFeature::Circle {
-                        center,
-                        radius,
-                        color,
-                        stroke_color,
-                        stroke_width,
-                        ..
-                    } => {
-                        self.render_circle(
-                            *center,
-                            *radius,
-                            color,
-                            stroke_color,
-                            *stroke_width,
-                            transform,
-                            mask,
-                        )?;
-                    }
-                    RenderFeature::Label(candidate) => labels.push(candidate),
+        // Labels are placed across all layers at once so priorities apply,
+        // then drawn on top of the geometry. They are never clipped.
+        let labels: Vec<&LabelCandidate> = layers
+            .iter()
+            .flat_map(|l| &l.features)
+            .filter_map(|f| match f {
+                RenderFeature::Label(candidate) => Some(candidate),
+                _ => None,
+            })
+            .collect();
+
+        let mut rest = layers.as_slice();
+        while let Some(first) = rest.first() {
+            let clipped = first.clip.is_some();
+            let run = rest
+                .iter()
+                .take_while(|l| l.clip.is_some() == clipped)
+                .count();
+            let (now, later) = rest.split_at(run);
+            if clipped {
+                self.draw_clipped(now, transform)?;
+            } else {
+                for layer in now {
+                    draw_features(&mut self.pixmap.as_mut(), &layer.features, transform)?;
                 }
             }
+            rest = later;
         }
-        // Labels are placed across all layers at once so priorities apply,
-        // then drawn on top of the geometry.
-        self.render_labels(&labels, transform);
+
+        self.render_labels(&labels, ratio, [0.0, 0.0]);
         Ok(())
     }
 
@@ -169,46 +139,120 @@ impl SkiaBackend {
             .map_err(|e| RenderError::Png(Box::new(e)))
     }
 
-    /// A clip rectangle in whole physical pixels, grown outward so adjacent
-    /// tiles overlap by a sub-pixel at most instead of leaving gaps.
-    fn clip_key(&self, rect: [f32; 4]) -> [i32; 4] {
-        let r = self.config.pixel_ratio;
-        [
-            (rect[0] * r).floor() as i32,
-            (rect[1] * r).floor() as i32,
-            (rect[2] * r).ceil() as i32,
-            (rect[3] * r).ceil() as i32,
-        ]
+    /// A clip rectangle in whole physical pixels, intersected with the
+    /// target: `[x, y, width, height]`, or `None` if nothing remains.
+    ///
+    /// Every edge is rounded to the nearest pixel boundary, so two tiles
+    /// sharing an edge split the pixels along it exactly: none is drawn
+    /// twice (which would double-blend translucent fills) and none is left
+    /// out.
+    fn clip_pixels(&self, rect: [f32; 4]) -> Option<[u32; 4]> {
+        if rect.iter().any(|v| v.is_nan()) {
+            return None;
+        }
+        let r = f64::from(self.config.pixel_ratio);
+        let edge = |v: f32, max: u32| (f64::from(v) * r).round().clamp(0.0, f64::from(max)) as u32;
+        let (w, h) = self.physical_size();
+        let (x0, x1) = (edge(rect[0], w), edge(rect[2], w));
+        let (y0, y1) = (edge(rect[1], h), edge(rect[3], h));
+        (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
     }
 
-    fn clip_mask(&self, key: [i32; 4]) -> Option<Mask> {
-        let mut mask = Mask::new(self.pixmap.width(), self.pixmap.height())?;
-        let rect =
-            tiny_skia::Rect::from_ltrb(key[0] as f32, key[1] as f32, key[2] as f32, key[3] as f32)?;
-        mask.fill_path(
-            &PathBuilder::from_rect(rect),
-            FillRule::Winding,
-            false,
-            Transform::identity(),
-        );
-        Some(mask)
+    /// Draw a run of clipped layers (in `z_order`).
+    ///
+    /// Each clip rectangle is rendered into its own pixmap holding just
+    /// that rectangle, so the pixmap edges are the clip and no
+    /// full-target mask is ever allocated. When the run's rectangles are
+    /// pairwise disjoint (the tiles of one view), all layers of a rectangle
+    /// are drawn in one go: disjoint rectangles touch disjoint pixels, so
+    /// regrouping cannot change the result, and only one rectangle's pixels
+    /// are held at a time. Overlapping rectangles are drawn layer by layer
+    /// to keep the order exact.
+    fn draw_clipped(&mut self, layers: &[&RenderLayer], transform: Transform) -> RenderResult<()> {
+        let keyed: Vec<(Option<[u32; 4]>, &RenderLayer)> = layers
+            .iter()
+            .map(|l| (l.clip.and_then(|c| self.clip_pixels(c)), *l))
+            .collect();
+        let mut rects: Vec<[u32; 4]> = Vec::new();
+        for (rect, _) in &keyed {
+            if let Some(rect) = rect
+                && !rects.contains(rect)
+            {
+                rects.push(*rect);
+            }
+        }
+        let overlap = |a: &[u32; 4], b: &[u32; 4]| {
+            a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+        };
+        let disjoint = rects
+            .iter()
+            .enumerate()
+            .all(|(i, a)| rects[i + 1..].iter().all(|b| !overlap(a, b)));
+        if disjoint {
+            for rect in &rects {
+                let group = keyed
+                    .iter()
+                    .filter(|(r, _)| r.as_ref() == Some(rect))
+                    .map(|(_, l)| *l);
+                self.draw_in_rect(*rect, group, transform)?;
+            }
+        } else {
+            for (rect, layer) in &keyed {
+                if let Some(rect) = rect {
+                    self.draw_in_rect(*rect, std::iter::once(*layer), transform)?;
+                }
+            }
+        }
+        Ok(())
     }
 
-    /// Place and draw `labels` (scene coordinates). `transform` maps scene
-    /// coordinates to pixels; it must be a scale plus translation — label
-    /// anchors are transformed by it and lengths (font size, halo, padding)
-    /// are multiplied by its scale.
-    pub fn render_labels(&mut self, labels: &[&LabelCandidate], transform: Transform) {
+    /// Draw `layers` clipped to `rect` (`[x, y, width, height]`, inside the
+    /// target) through a pixmap of just that rectangle.
+    fn draw_in_rect<'l>(
+        &mut self,
+        rect: [u32; 4],
+        layers: impl Iterator<Item = &'l RenderLayer>,
+        transform: Transform,
+    ) -> RenderResult<()> {
+        let [x, y, w, h] = rect;
+        let sub_rect = i32::try_from(x)
+            .ok()
+            .zip(i32::try_from(y).ok())
+            .and_then(|(x, y)| IntRect::from_xywh(x, y, w, h));
+        let Some(mut sub) = sub_rect.and_then(|r| self.pixmap.clone_rect(r)) else {
+            return Ok(());
+        };
+        let local = transform.post_translate(-(x as f32), -(y as f32));
+        for layer in layers {
+            draw_features(&mut sub.as_mut(), &layer.features, local)?;
+        }
+        let stride = self.pixmap.width() as usize * 4;
+        let row = w as usize * 4;
+        let dst = self.pixmap.data_mut();
+        for (j, src) in sub.data().chunks_exact(row).enumerate() {
+            let start = (y as usize + j) * stride + x as usize * 4;
+            dst[start..start + row].copy_from_slice(src);
+        }
+        Ok(())
+    }
+
+    /// Place and draw `labels`, given in scene coordinates: a scene point
+    /// `p` lands on pixel `p * scale + offset`, and lengths (font size,
+    /// halo, padding, offsets) are multiplied by `scale`.
+    pub fn render_labels(&mut self, labels: &[&LabelCandidate], scale: f32, offset: [f32; 2]) {
         if labels.is_empty() {
             return;
         }
-        let (scale, tx, ty) = (transform.sx, transform.tx, transform.ty);
         let candidates: Vec<LabelCandidate> = labels
             .iter()
             .map(|c| LabelCandidate {
-                anchor: c.anchor.map(|p| [p[0] * scale + tx, p[1] * scale + ty]),
+                text: c.text.clone(),
+                anchor: c
+                    .anchor
+                    .map(|p| [p[0] * scale + offset[0], p[1] * scale + offset[1]]),
                 style: c.style.scaled(scale),
-                ..(*c).clone()
+                layer_rank: c.layer_rank,
+                sort_key: c.sort_key,
             })
             .collect();
         let (w, h) = self.physical_size();
@@ -218,117 +262,169 @@ impl SkiaBackend {
             self.text.draw_labels(&mut canvas, &candidates, &placed);
         }
     }
+}
 
-    fn render_fill(
-        &mut self,
-        rings: &[Vec<[f32; 2]>],
-        color: &Color,
-        transform: Transform,
-        mask: Option<&Mask>,
-    ) -> RenderResult<()> {
-        let mut pb = PathBuilder::new();
-        for ring in rings.iter().filter(|r| r.len() >= 3) {
-            pb.move_to(ring[0][0], ring[0][1]);
-            for pt in &ring[1..] {
-                pb.line_to(pt[0], pt[1]);
+/// Draw the geometry of `features` (labels are placed separately).
+fn draw_features(
+    target: &mut PixmapMut<'_>,
+    features: &[RenderFeature],
+    transform: Transform,
+) -> RenderResult<()> {
+    for feature in features {
+        match feature {
+            RenderFeature::Fill { coords, color } => {
+                draw_fill(target, coords, color, transform)?;
             }
-            pb.close();
+            RenderFeature::Stroke {
+                coords,
+                color,
+                width,
+                cap,
+                join,
+                dash,
+                ..
+            } => {
+                let stroke = StrokeStyle {
+                    width: *width,
+                    cap: *cap,
+                    join: *join,
+                    dash,
+                };
+                draw_stroke(target, coords, color, &stroke, transform)?;
+            }
+            RenderFeature::Circle {
+                center,
+                radius,
+                color,
+                stroke_color,
+                stroke_width,
+                ..
+            } => {
+                draw_circle(
+                    target,
+                    *center,
+                    *radius,
+                    color,
+                    (stroke_color, *stroke_width),
+                    transform,
+                )?;
+            }
+            RenderFeature::Label(_) => {}
         }
-        if let Some(path) = pb.finish() {
-            let paint = paint(color)?;
-            // Even-odd so interior rings are holes regardless of winding.
-            self.pixmap
-                .fill_path(&path, &paint, FillRule::EvenOdd, transform, mask);
-        }
-        Ok(())
     }
+    Ok(())
+}
 
-    #[allow(clippy::too_many_arguments)] // independent stroke parameters
-    fn render_stroke(
-        &mut self,
-        coords: &[[f32; 2]],
-        color: &Color,
-        width: f32,
-        cap: LineCap,
-        join: LineJoin,
-        dash: &[f32],
-        transform: Transform,
-        mask: Option<&Mask>,
-    ) -> RenderResult<()> {
-        if coords.len() < 2 || width.is_nan() || width <= 0.0 {
-            return Ok(());
-        }
-        let closed = coords.len() > 3 && coords.first() == coords.last();
-        let pts = if closed {
-            &coords[..coords.len() - 1]
-        } else {
-            coords
-        };
-        let mut pb = PathBuilder::new();
-        pb.move_to(pts[0][0], pts[0][1]);
-        for pt in &pts[1..] {
+fn draw_fill(
+    target: &mut PixmapMut<'_>,
+    rings: &[Vec<[f32; 2]>],
+    color: &Color,
+    transform: Transform,
+) -> RenderResult<()> {
+    let mut pb = PathBuilder::new();
+    for ring in rings.iter().filter(|r| r.len() >= 3) {
+        pb.move_to(ring[0][0], ring[0][1]);
+        for pt in &ring[1..] {
             pb.line_to(pt[0], pt[1]);
         }
-        if closed {
-            pb.close();
-        }
-        let Some(path) = pb.finish() else {
-            return Ok(());
-        };
+        pb.close();
+    }
+    if let Some(path) = pb.finish() {
+        let paint = paint(color)?;
+        // Even-odd so interior rings are holes regardless of winding.
+        target.fill_path(&path, &paint, FillRule::EvenOdd, transform, None);
+    }
+    Ok(())
+}
 
+/// How a polyline is stroked.
+struct StrokeStyle<'a> {
+    width: f32,
+    cap: LineCap,
+    join: LineJoin,
+    dash: &'a [f32],
+}
+
+fn draw_stroke(
+    target: &mut PixmapMut<'_>,
+    coords: &[[f32; 2]],
+    color: &Color,
+    style: &StrokeStyle<'_>,
+    transform: Transform,
+) -> RenderResult<()> {
+    let StrokeStyle {
+        width,
+        cap,
+        join,
+        dash,
+    } = *style;
+    if coords.len() < 2 || width.is_nan() || width <= 0.0 {
+        return Ok(());
+    }
+    let closed = coords.len() > 3 && coords.first() == coords.last();
+    let pts = if closed {
+        &coords[..coords.len() - 1]
+    } else {
+        coords
+    };
+    let mut pb = PathBuilder::new();
+    pb.move_to(pts[0][0], pts[0][1]);
+    for pt in &pts[1..] {
+        pb.line_to(pt[0], pt[1]);
+    }
+    if closed {
+        pb.close();
+    }
+    let Some(path) = pb.finish() else {
+        return Ok(());
+    };
+
+    let stroke = Stroke {
+        width,
+        line_cap: match cap {
+            LineCap::Butt => SkiaCap::Butt,
+            LineCap::Round => SkiaCap::Round,
+            LineCap::Square => SkiaCap::Square,
+        },
+        line_join: match join {
+            LineJoin::Miter => SkiaJoin::Miter,
+            LineJoin::Round => SkiaJoin::Round,
+            LineJoin::Bevel => SkiaJoin::Bevel,
+        },
+        // The dash is applied in path space, before `transform`, so its
+        // lengths scale with the pixel ratio like the width does.
+        // Patterns too fine (or too numerous) to draw are solid.
+        dash: dash_is_drawable(dash, polyline_length(coords))
+            .then(|| StrokeDash::new(dash.to_vec(), 0.0))
+            .flatten(),
+        ..Stroke::default()
+    };
+    target.stroke_path(&path, &paint(color)?, &stroke, transform, None);
+    Ok(())
+}
+
+fn draw_circle(
+    target: &mut PixmapMut<'_>,
+    center: [f32; 2],
+    radius: f32,
+    color: &Color,
+    (stroke_color, stroke_width): (&Color, f32),
+    transform: Transform,
+) -> RenderResult<()> {
+    let Some(path) = circle_path(center, radius) else {
+        return Ok(());
+    };
+    if color.a > 0.0 {
+        target.fill_path(&path, &paint(color)?, FillRule::Winding, transform, None);
+    }
+    if stroke_width > 0.0 && stroke_color.a > 0.0 {
         let stroke = Stroke {
-            width,
-            line_cap: match cap {
-                LineCap::Butt => SkiaCap::Butt,
-                LineCap::Round => SkiaCap::Round,
-                LineCap::Square => SkiaCap::Square,
-            },
-            line_join: match join {
-                LineJoin::Miter => SkiaJoin::Miter,
-                LineJoin::Round => SkiaJoin::Round,
-                LineJoin::Bevel => SkiaJoin::Bevel,
-            },
-            // The dash is applied in path space, before `transform`, so its
-            // lengths scale with the pixel ratio like the width does.
-            // Patterns too fine (or too numerous) to draw are solid.
-            dash: dash_is_drawable(dash, polyline_length(coords))
-                .then(|| StrokeDash::new(dash.to_vec(), 0.0))
-                .flatten(),
+            width: stroke_width,
             ..Stroke::default()
         };
-        self.pixmap
-            .stroke_path(&path, &paint(color)?, &stroke, transform, mask);
-        Ok(())
+        target.stroke_path(&path, &paint(stroke_color)?, &stroke, transform, None);
     }
-
-    #[allow(clippy::too_many_arguments)] // independent circle parameters
-    fn render_circle(
-        &mut self,
-        center: [f32; 2],
-        radius: f32,
-        color: &Color,
-        stroke_color: &Color,
-        stroke_width: f32,
-        transform: Transform,
-        mask: Option<&Mask>,
-    ) -> RenderResult<()> {
-        let Some(path) = circle_path(center, radius) else {
-            return Ok(());
-        };
-        if color.a > 0.0 {
-            self.pixmap
-                .fill_path(&path, &paint(color)?, FillRule::Winding, transform, mask);
-        }
-        if stroke_width > 0.0 && stroke_color.a > 0.0 {
-            let stroke = Stroke {
-                width: stroke_width,
-                ..Stroke::default()
-            };
-            self.pixmap
-                .stroke_path(&path, &paint(stroke_color)?, &stroke, transform, mask);
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 fn circle_path(center: [f32; 2], radius: f32) -> Option<Path> {
@@ -585,12 +681,9 @@ mod tests {
             (max_x, max_y)
         };
         let mut small = backend(100, 100, 1.0);
-        small.render_labels(&[&label], Transform::identity());
+        small.render_labels(&[&label], 1.0, [0.0, 0.0]);
         let mut moved = backend(100, 100, 1.0);
-        moved.render_labels(
-            &[&label],
-            Transform::from_scale(2.0, 2.0).post_translate(30.0, 0.0),
-        );
+        moved.render_labels(&[&label], 2.0, [30.0, 0.0]);
         let (sx, sy) = ink(&small);
         let (mx, my) = ink(&moved);
         assert!(mx > sx + 30, "translated and enlarged: {sx} -> {mx}");
@@ -621,6 +714,82 @@ mod tests {
         let mut b2 = backend(40, 20, 2.0);
         b2.render(&s).unwrap();
         assert_eq!(px(&b2, 10, 20), px(&b2, 70, 20));
+    }
+
+    /// Two tiles sharing a fractional edge, each covering its half with a
+    /// translucent fill that overlaps into the neighbour (as tile buffers
+    /// do).
+    fn seam_scene(edge: f32) -> SceneGraph {
+        let square = || RenderFeature::Fill {
+            coords: vec![vec![[0.0, 0.0], [40.0, 0.0], [40.0, 20.0], [0.0, 20.0]]],
+            color: Color::rgba(0.0, 0.0, 0.0, 0.5),
+        };
+        let mut s = SceneGraph::new(Color::WHITE);
+        for clip in [[0.0, 0.0, edge, 20.0], [edge, 0.0, 40.0, 20.0]] {
+            let mut tile = RenderLayer::new(0);
+            tile.clip = Some(clip);
+            tile.push(square());
+            s.add_layer(tile);
+        }
+        s
+    }
+
+    #[test]
+    fn adjacent_clips_with_fractional_edges_partition_pixels() {
+        for (edge, ratio) in [
+            (20.4, 1.0),
+            (20.5, 1.0),
+            (20.6, 1.0),
+            (13.37, 1.5),
+            (20.25, 2.0),
+        ] {
+            let mut b = backend(40, 20, ratio);
+            b.render(&seam_scene(edge)).unwrap();
+            let (w, h) = b.physical_size();
+            let expected = px(&b, 0, 0);
+            assert!((i32::from(expected[0]) - 128).abs() <= 1, "{expected:?}");
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(px(&b, x, y), expected, "edge {edge} @{ratio}x: ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_clips_keep_z_order() {
+        let fill = |color: Color| RenderFeature::Fill {
+            coords: vec![vec![[0.0, 0.0], [30.0, 0.0], [30.0, 10.0], [0.0, 10.0]]],
+            color,
+        };
+        let layer = |z: i32, clip: [f32; 4], color: Color| {
+            let mut l = RenderLayer::new(z);
+            l.clip = Some(clip);
+            l.push(fill(color));
+            l
+        };
+        let (left, right) = ([0.0, 0.0, 20.0, 10.0], [10.0, 0.0, 30.0, 10.0]);
+        let mut s = SceneGraph::new(Color::WHITE);
+        s.add_layer(layer(0, left, Color::rgb(1.0, 0.0, 0.0)));
+        s.add_layer(layer(1, right, Color::rgb(0.0, 1.0, 0.0)));
+        s.add_layer(layer(2, left, Color::rgb(0.0, 0.0, 1.0)));
+        let mut b = backend(30, 10, 1.0);
+        b.render(&s).unwrap();
+        // Grouping the two `left` layers would paint blue under green.
+        assert_eq!(px(&b, 5, 5), [0, 0, 255, 255]);
+        assert_eq!(px(&b, 15, 5), [0, 0, 255, 255], "blue is drawn last");
+        assert_eq!(px(&b, 25, 5), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn clips_outside_the_target_or_nan_draw_nothing() {
+        let mut s = seam_scene(20.0);
+        s.layers[0].clip = Some([100.0, 100.0, 200.0, 200.0]);
+        s.layers[1].clip = Some([f32::NAN, 0.0, 40.0, 20.0]);
+        let mut b = backend(40, 20, 1.0);
+        b.render(&s).unwrap();
+        assert_eq!(px(&b, 5, 5), [255, 255, 255, 255]);
+        assert_eq!(px(&b, 35, 5), [255, 255, 255, 255]);
     }
 
     #[test]
