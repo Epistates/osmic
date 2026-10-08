@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["science::geo", "algorithms"]
 keywords = ["geo", "projection", "simplification", "clipping"]
 readme.workspace = true
-description = "Projection, simplification, clipping, and validation"
+description = "Geometry helpers for osmic: projection, simplification and ring orientation"
 
 [dependencies]
 osmic-core = { workspace = true }

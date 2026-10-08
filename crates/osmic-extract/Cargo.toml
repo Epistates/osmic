@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["science::geo", "parser-implementations"]
 keywords = ["osm", "extraction", "poi", "geocoding", "business"]
 readme.workspace = true
-description = "Business entity extraction from OSM PBF — tag-based filtering, contact metadata, deduplication"
+description = "Entity extraction from OSM PBF: tag filters, contact metadata, locations for ways and relations, deduplication"
 
 [dependencies]
 osmic-core = { workspace = true }

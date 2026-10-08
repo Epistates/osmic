@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["web-programming::http-server", "science::geo"]
 keywords = ["tile-server", "mvt", "pmtiles", "axum", "map"]
 readme.workspace = true
-description = "HTTP tile server with Tower middleware pipeline"
+description = "HTTP tile server for PMTiles archives with HTTP caching, CORS, resource limits and a MapLibre viewer"
 
 [dependencies]
 osmic-app = { workspace = true }

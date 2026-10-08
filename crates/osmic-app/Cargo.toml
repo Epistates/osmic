@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["science::geo", "rust-patterns"]
 keywords = ["plugin", "app", "framework", "map"]
 readme.workspace = true
-description = "Plugin system, App builder, event bus, and lifecycle"
+description = "Application framework for osmic: plugins, typed resources, events and a runner"
 
 [dependencies]
 thiserror = { workspace = true }

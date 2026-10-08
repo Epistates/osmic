@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["science::geo", "visualization"]
 keywords = ["mvt", "pmtiles", "vector-tiles", "osm", "gis"]
 readme.workspace = true
-description = "MVT/MLT encoding, PMTiles archives, tile math"
+description = "Vector tile pipeline: render OSM features into MVT/MLT tiles via a parallel external sort and write PMTiles archives"
 
 [features]
 default = ["native"]

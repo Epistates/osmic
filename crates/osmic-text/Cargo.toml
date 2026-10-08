@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["text-processing", "graphics"]
 keywords = ["text-shaping", "labels", "collision", "cosmic-text"]
 readme.workspace = true
-description = "Text shaping, deterministic label placement with collision detection and line-following labels, glyph rasterisation and premultiplied compositing"
+description = "Text shaping, collision-aware label placement (including line labels) and glyph rasterisation"
 
 [dependencies]
 osmic-core = { workspace = true }

@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["science::geo", "graphics"]
 keywords = ["rendering", "map", "tessellation", "skia"]
 readme.workspace = true
-description = "Style-driven map rendering: evaluates an osmic-style Style against decoded tile features into a backend-agnostic scene, rasterises it in software (tiny-skia) or tessellates it (lyon) for GPU consumers; includes a Web Mercator camera"
+description = "Style-driven map rendering: scene building, software rasterisation (tiny-skia), lyon tessellation and a Web Mercator camera"
 
 [dependencies]
 osmic-core = { workspace = true }

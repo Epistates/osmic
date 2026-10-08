@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["command-line-utilities", "science::geo"]
 keywords = ["osm", "pbf", "tiles", "cli", "map"]
 readme.workspace = true
-description = "CLI for tile generation, PBF inspection, render-to-image"
+description = "OpenStreetMap to vector tiles: generate PMTiles, inspect PBF files, extract entities, serve tiles and apply replication updates"
 
 [[bin]]
 name = "osmic"

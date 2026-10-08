@@ -58,3 +58,8 @@ pub mod prelude {
     // Server
     pub use osmic_serve::{ServerRoutes, TileServer, TileServerConfig, TileServerPlugin};
 }
+
+/// The README's examples, compiled as doctests so they stay correct.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+pub struct ReadmeDoctests;

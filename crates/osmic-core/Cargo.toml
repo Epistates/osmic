@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["science::geo", "data-structures"]
 keywords = ["osm", "openstreetmap", "geo", "coordinates"]
 readme.workspace = true
-description = "Shared types, errors, and coordinate primitives for osmic"
+description = "Shared osmic types: fixed-precision coordinates, typed OSM ids, geometry, Web Mercator, clipping and simplification"
 
 [dependencies]
 thiserror = { workspace = true }
