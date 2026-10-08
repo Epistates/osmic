@@ -100,7 +100,8 @@ pub fn tile_bounds(x: u32, y: u32, zoom: u8) -> BBox {
     )
 }
 
-/// Inclusive range of tiles at one zoom level.
+/// Inclusive range of tiles at one zoom level. A range whose minimum
+/// exceeds its maximum on either axis is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileRange {
     pub zoom: u8,
@@ -111,15 +112,24 @@ pub struct TileRange {
 }
 
 impl TileRange {
-    /// Number of tiles in the range.
+    /// Number of tiles in the range (0 if it is empty), saturating at
+    /// `u64::MAX` — which only a range spanning the full `u32` grid on both
+    /// axes, far beyond any real zoom level, can reach.
     pub fn len(&self) -> u64 {
-        u64::from(self.max_x - self.min_x + 1) * u64::from(self.max_y - self.min_y + 1)
+        if self.is_empty() {
+            return 0;
+        }
+        let side = |min: u32, max: u32| u64::from(max - min) + 1;
+        side(self.min_x, self.max_x).saturating_mul(side(self.min_y, self.max_y))
     }
 
+    /// Whether the range holds no tiles (its minimum exceeds its maximum on
+    /// either axis).
     pub fn is_empty(&self) -> bool {
-        false
+        self.min_x > self.max_x || self.min_y > self.max_y
     }
 
+    /// Whether tile `(x, y)` lies in the range.
     pub fn contains(&self, x: u32, y: u32) -> bool {
         (self.min_x..=self.max_x).contains(&x) && (self.min_y..=self.max_y).contains(&y)
     }
@@ -192,6 +202,31 @@ mod tests {
         assert!(b.contains_point(-122.4194, 37.7749));
         let z0 = tile_bounds(0, 0, 0);
         assert!((z0.min_lon + 180.0).abs() < 1e-12 && (z0.max_lat - MAX_LATITUDE).abs() < 1e-9);
+    }
+
+    fn range(min_x: u32, min_y: u32, max_x: u32, max_y: u32) -> TileRange {
+        TileRange {
+            zoom: 3,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }
+    }
+
+    #[test]
+    fn tile_range_len_and_emptiness() {
+        assert_eq!(range(2, 2, 2, 2).len(), 1);
+        assert!(!range(2, 2, 2, 2).is_empty());
+        assert_eq!(range(0, 0, 7, 7).len(), 64);
+        for inverted in [range(3, 0, 2, 7), range(0, 3, 7, 2), range(5, 5, 0, 0)] {
+            assert!(inverted.is_empty(), "{inverted:?}");
+            assert_eq!(inverted.len(), 0, "{inverted:?}");
+            assert!(!inverted.contains(2, 2) && !inverted.contains(3, 3));
+        }
+        let full = range(0, 0, u32::MAX, u32::MAX);
+        assert_eq!(full.len(), u64::MAX, "saturates instead of overflowing");
+        assert_eq!(range(0, 0, u32::MAX, 0).len(), 1 << 32);
     }
 
     #[test]
