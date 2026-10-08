@@ -9,8 +9,8 @@ use geo_types::{
     Coord, Geometry as GeoGeometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point,
     Polygon,
 };
-use mlt_core::EncodedLayer;
-use mlt_core::v01::{PropValue, StagedLayer01, TileFeature as MltFeature, TileLayer01};
+use mlt_core::encoder::EncoderConfig;
+use mlt_core::{MltError, PropKind, PropValue, TileLayer as MltLayer};
 
 use crate::encode::{TileEncoder, TileFormat};
 use crate::error::TileError;
@@ -78,58 +78,44 @@ impl TileEncoder for MltEncoder {
     fn encode(&self, layers: &[TileLayer]) -> Result<Vec<u8>, TileError> {
         let mut out = Vec::new();
         for layer in layers.iter().filter(|l| !l.features.is_empty()) {
+            let encode_err = |e: MltError| TileError::Encode {
+                tile: format!("layer {}", layer.name),
+                message: e.to_string(),
+            };
             let mut keys: BTreeSet<&str> = layer
                 .features
                 .iter()
                 .flat_map(|f| f.attributes.iter().map(|(k, _)| k.as_str()))
                 .collect();
             keys.remove("class");
-            let property_names: Vec<String> = std::iter::once("class")
-                .chain(keys)
-                .map(str::to_string)
-                .collect();
-            let features: Vec<MltFeature> = layer
-                .features
+            let columns: Vec<&str> = std::iter::once("class").chain(keys).collect();
+
+            let mut builder = MltLayer::builder(layer.name.as_str(), layer.extent)
+                .map_err(encode_err)?;
+            let column_keys = columns
                 .iter()
-                .filter_map(|f| {
-                    let geometry = geometry(f)?;
-                    let properties = property_names
-                        .iter()
-                        .map(|name| {
-                            PropValue::Str(
-                                f.attributes
-                                    .iter()
-                                    .find(|(k, _)| k == name)
-                                    .map(|(_, v)| v.clone()),
-                            )
-                        })
-                        .collect();
-                    Some(MltFeature {
-                        id: f.id,
-                        geometry,
-                        properties,
-                    })
-                })
-                .collect();
-            if features.is_empty() {
+                .map(|name| builder.add_property(*name, PropKind::Str))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(encode_err)?;
+            for f in &layer.features {
+                let Some(geometry) = geometry(f) else {
+                    continue;
+                };
+                let mut row = builder.feature(geometry);
+                row.id(f.id);
+                for (k, v) in &f.attributes {
+                    if let Some(i) = columns.iter().position(|c| c == k) {
+                        row.property(column_keys[i], PropValue::Str(Some(v.clone())))
+                            .map_err(encode_err)?;
+                    }
+                }
+                row.finish().map_err(encode_err)?;
+            }
+            let layer = builder.finish();
+            if layer.feature_count() == 0 {
                 continue;
             }
-            let staged = StagedLayer01::from(TileLayer01 {
-                name: layer.name.clone(),
-                extent: layer.extent,
-                property_names,
-                features,
-            });
-            let encode_err = |message: String| TileError::Encode {
-                tile: format!("layer {}", layer.name),
-                message,
-            };
-            let (encoded, _) = staged
-                .encode_auto()
-                .map_err(|e| encode_err(e.to_string()))?;
-            EncodedLayer::Tag01(encoded)
-                .write_to(&mut out)
-                .map_err(|e| encode_err(e.to_string()))?;
+            out.extend(layer.encode(EncoderConfig::default()).map_err(encode_err)?);
         }
         Ok(out)
     }
@@ -175,6 +161,42 @@ mod tests {
             ],
         };
         let bytes = MltEncoder.encode(&[layer]).expect("encodes");
-        assert!(!bytes.is_empty());
+
+        let mut parser = mlt_core::Parser::default();
+        let mut decoder = mlt_core::Decoder::default();
+        let layers = parser.parse_layers(&bytes).expect("parses");
+        assert_eq!(layers.len(), 1);
+        let decoded = layers
+            .into_iter()
+            .next()
+            .and_then(|l| l.into_tile(&mut decoder).expect("decodes"))
+            .expect("tag 0x01 layer");
+        assert_eq!(decoded.name(), "test");
+        assert_eq!(decoded.extent().get(), 4096);
+        assert_eq!(decoded.property_names(), ["class", "name", "surface"]);
+        assert_eq!(decoded.feature_count(), 3);
+        let point = decoded
+            .features()
+            .iter()
+            .find(|f| matches!(f.geometry(), GeoGeometry::Point(_)))
+            .expect("point survives");
+        assert_eq!(point.id(), Some(1));
+        assert_eq!(
+            point.properties(),
+            [
+                PropValue::Str(Some("a".into())),
+                PropValue::Str(Some("x".into())),
+                PropValue::Str(None),
+            ]
+        );
+        let polygon = decoded
+            .features()
+            .iter()
+            .find_map(|f| match f.geometry() {
+                GeoGeometry::Polygon(p) => Some(p),
+                _ => None,
+            })
+            .expect("polygon survives");
+        assert_eq!(polygon.interiors().len(), 1);
     }
 }

@@ -9,7 +9,5 @@ publish = false
 [dependencies]
 osmic-core = { workspace = true }
 osmic-osm = { workspace = true, features = ["native"] }
-osmic-index = { workspace = true }
 clap = { workspace = true }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -23,7 +23,6 @@ mlt = ["osmic-tiles/mlt"]
 [dependencies]
 osmic-core = { workspace = true }
 osmic-extract = { workspace = true }
-osmic-index = { workspace = true }
 osmic-osm = { workspace = true, features = ["native"] }
 osmic-repl = { workspace = true }
 osmic-serve = { workspace = true }

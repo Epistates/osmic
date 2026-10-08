@@ -8,7 +8,7 @@ use crate::model::TileLayer;
 pub enum TileFormat {
     /// Mapbox Vector Tile 2.1.
     Mvt,
-    /// MapLibre Tile (requires the `mlt` feature).
+    /// MapLibre Tile (requires the `mlt` feature and Rust 1.98).
     Mlt,
 }
 

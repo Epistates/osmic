@@ -57,7 +57,7 @@ impl FeatureIndex {
         let envelope =
             AABB::from_corners([bbox.min_lon, bbox.min_lat], [bbox.max_lon, bbox.max_lat]);
         self.tree
-            .locate_in_envelope_intersecting(&envelope)
+            .locate_in_envelope_intersecting(envelope)
             .map(|entry| entry.index)
     }
 
