@@ -6,12 +6,14 @@
 //! file would panic instead of failing. Every section the header declares
 //! must lie inside the file. The reader caches decoded leaf directories in a
 //! bounded cache, so serving a large archive does not re-read and re-inflate
-//! a leaf directory for every tile.
+//! a leaf directory for every tile. [`decompress_tile`] inflates tile data
+//! with a size cap.
 
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use pmtiles::{AsyncPmTilesReader, MmapBackend, MokaCache, PmtError};
+use pmtiles::{AsyncPmTilesReader, Compression, MmapBackend, MokaCache, PmtError};
 
 /// A PMTiles archive reader with a bounded leaf-directory cache.
 pub type ArchiveReader = AsyncPmTilesReader<MmapBackend, MokaCache>;
@@ -94,6 +96,61 @@ pub async fn open(path: &Path, directory_cache: u64) -> Result<ArchiveReader, Op
     AsyncPmTilesReader::try_from_cached_source(backend, cache)
         .await
         .map_err(|e| OpenArchiveError::read(path, e))
+}
+
+/// Default upper bound for a decompressed tile, a guard against
+/// decompression bombs.
+pub const MAX_DECOMPRESSED_TILE: u64 = 64 * 1024 * 1024;
+
+/// Why a tile could not be decompressed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DecompressError {
+    #[error("tile decompresses to more than {limit} bytes")]
+    TooLarge { limit: u64 },
+    #[error("{0:?} tile compression is not supported")]
+    Unsupported(Compression),
+    #[error("corrupt compressed tile")]
+    Corrupt(#[source] std::io::Error),
+}
+
+/// Decompress the raw bytes of a tile stored with `compression`, refusing
+/// to produce more than `limit` bytes.
+///
+/// Unlike `AsyncPmTilesReader::get_tile_decompressed`, a crafted archive
+/// cannot make this allocate without bound. Uncompressed tiles are borrowed
+/// (and subject to the same limit).
+///
+/// # Errors
+///
+/// [`DecompressError::TooLarge`] past `limit`, [`DecompressError::Corrupt`]
+/// for invalid compressed data, [`DecompressError::Unsupported`] for
+/// brotli, zstd and unknown compression.
+pub fn decompress_tile(
+    raw: &[u8],
+    compression: Compression,
+    limit: u64,
+) -> Result<Cow<'_, [u8]>, DecompressError> {
+    let too_large = || DecompressError::TooLarge { limit };
+    match compression {
+        Compression::None if raw.len() as u64 > limit => Err(too_large()),
+        Compression::None => Ok(Cow::Borrowed(raw)),
+        Compression::Gzip => {
+            // A tile rarely inflates by more than ~10x; cap the initial
+            // reservation so a tiny bomb cannot reserve `limit` up front.
+            let hint = raw.len().saturating_mul(4).min(limit as usize);
+            let mut out = Vec::with_capacity(hint);
+            flate2::read::GzDecoder::new(raw)
+                .take(limit.saturating_add(1))
+                .read_to_end(&mut out)
+                .map_err(DecompressError::Corrupt)?;
+            if out.len() as u64 > limit {
+                return Err(too_large());
+            }
+            Ok(Cow::Owned(out))
+        }
+        other => Err(DecompressError::Unsupported(other)),
+    }
 }
 
 fn read_up_to(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -203,6 +260,58 @@ mod tests {
         for (h, expect) in cases {
             let err = validate_header(&h, 1277).expect_err(expect);
             assert!(err.contains(expect), "{expect}: {err}");
+        }
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data).expect("gzip");
+        enc.finish().expect("gzip")
+    }
+
+    #[test]
+    fn decompression_is_capped() {
+        let tile = vec![7u8; 1000];
+        let packed = gzip(&tile);
+        assert_eq!(
+            decompress_tile(&packed, Compression::Gzip, 1000)
+                .expect("fits")
+                .as_ref(),
+            &tile[..]
+        );
+        assert!(matches!(
+            decompress_tile(&packed, Compression::Gzip, 999),
+            Err(DecompressError::TooLarge { limit: 999 })
+        ));
+        // A bomb: 64 MiB of zeros packs into ~64 KiB.
+        let bomb = gzip(&vec![0u8; 64 << 20]);
+        assert!(bomb.len() < 1 << 20);
+        assert!(matches!(
+            decompress_tile(&bomb, Compression::Gzip, 1 << 20),
+            Err(DecompressError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            decompress_tile(&tile, Compression::None, 999),
+            Err(DecompressError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            decompress_tile(&tile, Compression::None, 1000),
+            Ok(Cow::Borrowed(_))
+        ));
+    }
+
+    #[test]
+    fn corrupt_and_unsupported_tiles_are_errors() {
+        assert!(matches!(
+            decompress_tile(b"not gzip at all", Compression::Gzip, 1 << 20),
+            Err(DecompressError::Corrupt(_))
+        ));
+        for c in [Compression::Brotli, Compression::Zstd, Compression::Unknown] {
+            assert!(matches!(
+                decompress_tile(b"x", c, 1 << 20),
+                Err(DecompressError::Unsupported(_))
+            ));
         }
     }
 
