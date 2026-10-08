@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum OsmicError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

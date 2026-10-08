@@ -9,6 +9,7 @@ use std::fmt;
 /// but this crate does not implement are reported as
 /// [`StyleError::Unsupported`] — they are never silently ignored.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum StyleError {
     /// The document is not valid JSON.
     #[error("invalid JSON: {0}")]
