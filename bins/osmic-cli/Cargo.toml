@@ -29,17 +29,26 @@ osmic-style = { workspace = true }
 osmic-tiles = { workspace = true, features = ["native", "reader"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
-ctrlc = { workspace = true }
 mimalloc = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["json"] }
 
+# Interrupt handling: signal-hook reports which signal arrived (for the
+# 128+N exit status); ctrlc covers Windows console events.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
+[target.'cfg(not(unix))'.dependencies]
+ctrlc = { workspace = true }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 bytes = { workspace = true }
+flate2 = { workspace = true }
+osmpbf = { workspace = true }
 pmtiles = { workspace = true }
 serde_json = { workspace = true }
 

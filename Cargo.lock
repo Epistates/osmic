@@ -2631,6 +2631,7 @@ dependencies = [
  "bytes",
  "clap",
  "ctrlc",
+ "flate2",
  "mimalloc",
  "osmic-core",
  "osmic-extract",
@@ -2639,9 +2640,11 @@ dependencies = [
  "osmic-serve",
  "osmic-style",
  "osmic-tiles",
+ "osmpbf",
  "pmtiles",
  "predicates",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "tokio",
  "tracing",
@@ -3810,6 +3813,16 @@ name = "sif-itree"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7f45b8998ced5134fb1d75732c77842a3e888f19c1ff98481822e8fbfbf930b"
+
+[[package]]
+name = "signal-hook"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b29ffa27d3d59a049bb328258de100f8012848d1b08d444e08bbc02ac468435e"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
 
 [[package]]
 name = "signal-hook-registry"

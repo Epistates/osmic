@@ -73,7 +73,11 @@ fn init_logging(cli: &Cli) {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(&cli);
-    cleanup::install();
+    // The server drains on SIGINT/SIGTERM itself (--drain-delay,
+    // --drain-timeout) and writes no temporaries.
+    if !matches!(cli.command, Command::Serve(_)) {
+        cleanup::install();
+    }
     let result = match cli.command {
         Command::GenerateTiles(a) => cmd::tiles::run(a),
         Command::Inspect(a) => cmd::inspect::run(a),

@@ -18,14 +18,11 @@ pub fn check_output(path: &Path, force: bool) -> anyhow::Result<()> {
             path.display()
         );
     }
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+    // Through symbolic links: the temporary goes next to the real file.
+    let dir = crate::cleanup::register_output(path)?;
     if !dir.is_dir() {
         bail!("output directory {} does not exist", dir.display());
     }
-    crate::cleanup::register_dir(dir);
     Ok(())
 }
 

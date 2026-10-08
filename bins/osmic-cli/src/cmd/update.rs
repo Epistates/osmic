@@ -64,9 +64,8 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
             o.clone()
         }
         None => {
-            if let Some(dir) = args.input.parent().filter(|p| !p.as_os_str().is_empty()) {
-                crate::cleanup::register_dir(dir);
-            }
+            // Also for a bare file name, whose temporary goes in ".".
+            crate::cleanup::register_output(&args.input)?;
             args.input.clone()
         }
     };
