@@ -76,6 +76,12 @@ impl Layer {
         }
     }
 
+    /// The layer named `name`, without allocating on a miss (unlike
+    /// [`FromStr`], whose error lists the available layers).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|l| l.as_str() == name)
+    }
+
     const fn bit(self) -> u32 {
         1 << self as u8
     }
@@ -89,23 +95,20 @@ impl fmt::Display for Layer {
 
 /// Error for an unrecognised layer name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown layer '{name}' (available: {available})")]
+#[error("unknown layer '{name}' (available: {})", LayerSet::all())]
+#[non_exhaustive]
 pub struct UnknownLayer {
+    /// The name that matched no layer.
     pub name: String,
-    available: String,
 }
 
 impl FromStr for Layer {
     type Err = UnknownLayer;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|l| l.as_str() == s)
-            .ok_or_else(|| UnknownLayer {
-                name: s.to_string(),
-                available: LayerSet::all().to_string(),
-            })
+        Self::from_name(s).ok_or_else(|| UnknownLayer {
+            name: s.to_string(),
+        })
     }
 }
 
@@ -202,7 +205,9 @@ mod tests {
     fn names_round_trip() {
         for l in Layer::ALL {
             assert_eq!(l.as_str().parse::<Layer>(), Ok(l));
+            assert_eq!(Layer::from_name(l.as_str()), Some(l));
         }
+        assert_eq!(Layer::from_name("waterway"), None);
         let set = LayerSet::from_names(" amenity, shop ,tourism,").expect("valid");
         assert_eq!(set.to_string(), "amenity,shop,tourism");
         assert_eq!(

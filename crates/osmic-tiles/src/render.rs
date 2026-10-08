@@ -302,13 +302,10 @@ fn shape_of(geometry: &Geometry, as_lines: bool) -> Shape {
 }
 
 /// Keys never written as plain attributes: classification keys are folded
-/// into `class`.
-///
-/// Runs for every tag of every feature, so it compares against the layer
-/// names directly rather than through `Layer::from_str`, which allocates an
-/// error on every miss.
+/// into `class`. Runs for every tag of every feature, so it must not
+/// allocate.
 fn is_class_key(k: &str) -> bool {
-    k == "waterway" || Layer::ALL.iter().any(|l| l.as_str() == k)
+    k == "waterway" || Layer::from_name(k).is_some()
 }
 
 /// Keys emitted in [`AttributeMode::Curated`].
