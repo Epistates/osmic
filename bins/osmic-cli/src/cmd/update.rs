@@ -87,7 +87,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
         report.from.sequence, report.to.sequence, report.latest_sequence
     );
     if let Some(t) = &report.to.timestamp {
-        println!("data as of      {t}");
+        println!("data as of      {}", printable(t));
     }
     println!("diffs applied   {:>12}", fmt_count(report.diffs_applied));
     println!("created         {:>12}", fmt_count(report.stats.created));
@@ -101,4 +101,24 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     }
     println!("total time      {:>11.1}s", start.elapsed().as_secs_f64());
     Ok(())
+}
+
+/// `text` from a replication server without control characters, so it
+/// cannot inject terminal escape sequences.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_text_is_stripped_of_control_characters() {
+        assert_eq!(
+            printable("2026-10-08T12:00:00Z\u{1b}]0;owned\u{7}\u{1b}[2J\r\n\u{9b}"),
+            "2026-10-08T12:00:00Z]0;owned[2J"
+        );
+        assert_eq!(printable("2026-10-08T12:00:00Z"), "2026-10-08T12:00:00Z");
+    }
 }
