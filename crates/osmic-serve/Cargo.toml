@@ -13,11 +13,21 @@ readme.workspace = true
 description = "HTTP tile server with Tower middleware pipeline"
 
 [dependencies]
-osmic-core = { workspace = true }
 osmic-app = { workspace = true }
 osmic-style = { workspace = true }
 axum = { workspace = true }
-tower-http = { workspace = true }
+tower = { workspace = true, features = ["limit", "load-shed"] }
+tower-http = { workspace = true, features = ["compression-gzip", "cors", "timeout", "trace"] }
 tokio = { workspace = true }
 pmtiles = { workspace = true, features = ["mmap-async-tokio"] }
 tracing = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+flate2 = "1"
+twox-hash = { version = "2", default-features = false, features = ["xxhash3_64"] }
+
+[dev-dependencies]
+pmtiles = { workspace = true, features = ["mmap-async-tokio", "write"] }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"

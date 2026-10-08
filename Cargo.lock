@@ -2738,13 +2738,19 @@ name = "osmic-serve"
 version = "0.1.1"
 dependencies = [
  "axum",
+ "bytes",
+ "flate2",
+ "http-body-util",
  "osmic-app",
- "osmic-core",
  "osmic-style",
  "pmtiles",
+ "serde_json",
+ "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
+ "twox-hash",
 ]
 
 [[package]]
@@ -4436,6 +4442,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -4460,6 +4467,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

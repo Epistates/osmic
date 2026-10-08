@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -21,6 +22,22 @@ struct Args {
     /// Cache-Control max-age in seconds
     #[arg(long, default_value = "3600")]
     cache_max_age: u32,
+
+    /// Externally visible base URL (e.g. https://tiles.example.com)
+    #[arg(long)]
+    public_url: Option<String>,
+
+    /// Allowed CORS origin (repeatable); any origin if omitted
+    #[arg(long = "cors-origin")]
+    cors_origins: Vec<String>,
+
+    /// Per-request timeout in seconds
+    #[arg(long, default_value = "30")]
+    request_timeout: u64,
+
+    /// Maximum concurrent requests before load shedding
+    #[arg(long, default_value = "1024")]
+    max_concurrency: usize,
 }
 
 #[tokio::main]
@@ -34,14 +51,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    let config = TileServerConfig {
-        bind_addr: args.bind,
-        pmtiles_path: args.pmtiles_file,
-        cache_max_age: args.cache_max_age,
-    };
+    let mut config = TileServerConfig::new(args.pmtiles_file)
+        .bind_addr(args.bind)
+        .cache_max_age(args.cache_max_age)
+        .cors_allowed_origins(args.cors_origins)
+        .request_timeout(Duration::from_secs(args.request_timeout))
+        .max_concurrency(args.max_concurrency);
+    if let Some(url) = args.public_url {
+        config = config.public_url(url);
+    }
 
-    let server = TileServer::new(config);
-    server.serve().await?;
+    TileServer::open(config).await?.serve().await?;
 
     Ok(())
 }
