@@ -13,10 +13,11 @@
 //! reproducible.
 
 use std::collections::BTreeMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use tracing::{info, warn};
@@ -229,6 +230,93 @@ fn encode_partition(
     Ok(tiles)
 }
 
+/// Wait for a message from jobs running on the rayon pool without ever
+/// parking a pool thread while there is pool work it could run.
+///
+/// On a pool thread, queued jobs (possibly the very ones being waited for)
+/// are run here; only when there is nothing to run does the thread sleep, and
+/// then briefly, to look for new work again. Off the pool, it simply blocks.
+fn recv_helping<M>(rx: &mpsc::Receiver<M>) -> Result<M, mpsc::RecvError> {
+    loop {
+        match rx.try_recv() {
+            Ok(m) => return Ok(m),
+            Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvError),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        match rayon::yield_now() {
+            Some(rayon::Yield::Executed) => {}
+            Some(rayon::Yield::Idle) => match rx.recv_timeout(Duration::from_millis(1)) {
+                Ok(m) => return Ok(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(mpsc::RecvError),
+            },
+            None => return rx.recv(),
+        }
+    }
+}
+
+/// Encode partitions `0..parts` with `encode` on the rayon pool, at most
+/// `window` at a time, and hand every item to `deliver` strictly in
+/// partition order on the calling thread.
+///
+/// Encoding is a sliding window: a new partition starts as soon as the
+/// oldest finished one is delivered, so threads never wait for a whole
+/// batch. Waiting for results goes through [`recv_helping`], which makes this
+/// safe to call from inside a rayon pool of any size, including a single
+/// thread. A panic in `encode` is re-raised here.
+///
+/// After an error, partitions not yet started are skipped and the error is
+/// returned.
+fn encode_in_order<T: Send, E: Send>(
+    parts: usize,
+    window: usize,
+    encode: impl Fn(usize) -> Result<Vec<T>, E> + Sync,
+    mut deliver: impl FnMut(T) -> Result<(), E>,
+) -> Result<(), E> {
+    let window = window.max(1);
+    let abort = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel::<(usize, std::thread::Result<Result<Vec<T>, E>>)>();
+    let (encode, abort_ref) = (&encode, &abort);
+    rayon::in_place_scope(|scope| {
+        let mut pending = BTreeMap::new();
+        let (mut spawned, mut delivered) = (0usize, 0usize);
+        let mut run = || -> Result<(), E> {
+            while delivered < parts {
+                while spawned < parts && spawned - delivered < window {
+                    let (tx, i) = (tx.clone(), spawned);
+                    scope.spawn(move |_| {
+                        if !abort_ref.load(Ordering::Relaxed) {
+                            let result = panic::catch_unwind(AssertUnwindSafe(|| encode(i)));
+                            let _ = tx.send((i, result));
+                        }
+                    });
+                    spawned += 1;
+                }
+                // The sender held here keeps the channel open, so this only
+                // fails if that invariant is broken.
+                let Ok((i, result)) = recv_helping(&rx) else {
+                    unreachable!("partition channel closed while a sender is held");
+                };
+                pending.insert(i, result);
+                while let Some(result) = pending.remove(&delivered) {
+                    let items = result.unwrap_or_else(|p| {
+                        abort_ref.store(true, Ordering::Relaxed);
+                        panic::resume_unwind(p)
+                    })?;
+                    items.into_iter().try_for_each(&mut deliver)?;
+                    delivered += 1;
+                }
+            }
+            Ok(())
+        };
+        let result = run();
+        if result.is_err() {
+            abort.store(true, Ordering::Relaxed);
+        }
+        result
+    })
+}
+
 /// Streams features into tiles. See the module docs.
 pub struct TileGenerator {
     config: TileGeneratorConfig,
@@ -361,44 +449,15 @@ impl TileGenerator {
         };
         let max_bytes = ctx.max_bytes;
 
-        // Partitions are encoded on the rayon pool, at most `window` at a
-        // time, and written here strictly in order.
-        let abort = AtomicBool::new(false);
-        let (tx, rx) = mpsc::channel::<(usize, Result<Vec<AssembledTile>, TileError>)>();
-        rayon::in_place_scope(|scope| -> Result<(), TileError> {
-            let mut pending = BTreeMap::new();
-            let (mut spawned, mut written) = (0usize, 0usize);
-            let result = (|| {
-                while written < parts {
-                    while spawned < parts && spawned - written < window {
-                        let (tx, runs, ctx, abort) = (tx.clone(), &runs, &ctx, &abort);
-                        let i = spawned;
-                        scope.spawn(move |_| {
-                            if !abort.load(Ordering::Relaxed) {
-                                let _ = tx.send((i, encode_partition(runs, i, ctx)));
-                            }
-                        });
-                        spawned += 1;
-                    }
-                    let (i, tiles) = rx
-                        .recv()
-                        .map_err(|_| TileError::Config("tile encoder stopped".into()))?;
-                    pending.insert(i, tiles);
-                    while let Some(tiles) = pending.remove(&written) {
-                        for t in &tiles? {
-                            summary.record(t);
-                            write(t)?;
-                        }
-                        written += 1;
-                    }
-                }
-                Ok(())
-            })();
-            if result.is_err() {
-                abort.store(true, Ordering::Relaxed);
-            }
-            result
-        })?;
+        encode_in_order(
+            parts,
+            window,
+            |i| encode_partition(&runs, i, &ctx),
+            |t| {
+                summary.record(&t);
+                write(&t)
+            },
+        )?;
         summary.encode_seconds = encode_start.elapsed().as_secs_f64();
         if summary.budget_limited_tiles > 0 {
             warn!(
@@ -745,6 +804,135 @@ mod tests {
             (14680961121889460320, 13951613413496947922, 16234),
             "all tags"
         );
+    }
+
+    /// Run `f` on its own thread; fail instead of hanging if it deadlocks.
+    fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(60))
+            .expect("finished (a timeout means a deadlock)")
+    }
+
+    fn pool(threads: usize) -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("pool")
+    }
+
+    #[test]
+    fn in_order_delivery_from_inside_small_pools() {
+        for threads in [1, 2] {
+            for (parts, window) in [(0, 1), (1, 1), (7, 1), (7, 2), (7, 3), (9, 0), (4, 100)] {
+                let got = within_a_minute(move || {
+                    pool(threads).install(|| {
+                        let mut got = Vec::new();
+                        encode_in_order(
+                            parts,
+                            window,
+                            |i| Ok::<_, ()>(vec![i * 10, i * 10 + 1]),
+                            |v| {
+                                got.push(v);
+                                Ok(())
+                            },
+                        )
+                        .map(|()| got)
+                    })
+                });
+                let want: Vec<usize> = (0..parts).flat_map(|i| [i * 10, i * 10 + 1]).collect();
+                assert_eq!(
+                    got,
+                    Ok(want),
+                    "{threads} threads, {parts} parts, window {window}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn in_order_delivery_stops_at_the_first_error() {
+        for threads in [1, 2] {
+            let (delivered, result) = within_a_minute(move || {
+                pool(threads).install(|| {
+                    let mut delivered = Vec::new();
+                    let result = encode_in_order(
+                        10,
+                        2,
+                        |i| if i == 5 { Err(i) } else { Ok(vec![i]) },
+                        |v| {
+                            delivered.push(v);
+                            Ok(())
+                        },
+                    );
+                    (delivered, result)
+                })
+            });
+            assert_eq!(delivered, [0, 1, 2, 3, 4]);
+            assert_eq!(result, Err(5));
+            let result = within_a_minute(move || {
+                pool(threads).install(|| {
+                    encode_in_order(
+                        10,
+                        2,
+                        |i| Ok(vec![i]),
+                        |v| if v == 3 { Err(v) } else { Ok(()) },
+                    )
+                })
+            });
+            assert_eq!(result, Err(3));
+        }
+    }
+
+    #[test]
+    fn a_panicking_encoder_propagates_instead_of_hanging() {
+        for threads in [1, 2] {
+            let outcome = within_a_minute(move || {
+                std::panic::catch_unwind(|| {
+                    pool(threads).install(|| {
+                        encode_in_order(
+                            6,
+                            2,
+                            |i| -> Result<Vec<usize>, ()> {
+                                assert!(i != 3, "encoder bug");
+                                Ok(vec![i])
+                            },
+                            |_| Ok(()),
+                        )
+                    })
+                })
+            });
+            assert!(outcome.is_err(), "{threads} threads");
+        }
+    }
+
+    #[test]
+    fn finish_inside_a_one_or_two_thread_pool_does_not_deadlock() {
+        for threads in [1, 2] {
+            let tiles = within_a_minute(move || {
+                pool(threads).install(|| {
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    let store = Arc::new(TagStore::new());
+                    let config = TileGeneratorConfig {
+                        temp_dir: Some(dir.path().to_path_buf()),
+                        ..Default::default()
+                    };
+                    let g = TileGenerator::new(config, Box::new(MvtEncoder), Arc::clone(&store))
+                        .expect("new");
+                    g.add_parallel(&features(&store)).expect("add");
+                    let mut tiles = 0u64;
+                    g.finish(|_| {
+                        tiles += 1;
+                        Ok(())
+                    })
+                    .expect("finish");
+                    tiles
+                })
+            });
+            assert!(tiles > 0, "{threads} threads");
+        }
     }
 
     #[test]
