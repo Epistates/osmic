@@ -1,13 +1,25 @@
-use std::io::Read;
-use std::path::Path;
+//! OsmChange (`.osc`) parsing.
+//!
+//! Change files come from the network, so parsing is defensive:
+//! - DTDs and entity references are rejected (XXE / billion laughs);
+//! - attributes are read in one pass without quick-xml's duplicate check,
+//!   which is quadratic in the attribute count (RUSTSEC-2026-0194);
+//! - decompressed input is capped (gzip bombs);
+//! - numeric attributes are parsed strictly — a malformed id or coordinate
+//!   is an error, never silently `0`;
+//! - `visible="false"` objects are treated as deletions.
 
-use flate2::read::GzDecoder;
-use quick_xml::Reader;
+use std::io::{BufRead, BufReader, Read};
+
+use flate2::read::MultiGzDecoder;
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
 
-use osmic_core::error::{OsmicError, OsmicResult};
+use osmic_core::{FixedCoord, OsmId, OsmType};
 
-/// The type of change in an OSC file.
+use crate::error::ReplError;
+
+/// The kind of change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeAction {
     Create,
@@ -15,412 +27,459 @@ pub enum ChangeAction {
     Delete,
 }
 
-/// A parsed change from an OSC file.
-#[derive(Debug, Clone)]
-pub struct OscChange {
-    pub action: ChangeAction,
-    pub element: OscElement,
-}
-
-/// An OSM element from a change file.
-#[derive(Debug, Clone)]
-pub enum OscElement {
-    Node {
-        id: i64,
-        lon: f64,
-        lat: f64,
-        version: u32,
-        visible: bool,
-        tags: Vec<(String, String)>,
-    },
-    Way {
-        id: i64,
-        version: u32,
-        visible: bool,
-        node_refs: Vec<i64>,
-        tags: Vec<(String, String)>,
-    },
-    Relation {
-        id: i64,
-        version: u32,
-        visible: bool,
-        members: Vec<RelMember>,
-        tags: Vec<(String, String)>,
-    },
-}
-
-/// A relation member reference.
-#[derive(Debug, Clone)]
-pub struct RelMember {
-    pub member_type: String,
-    pub ref_id: i64,
+/// A relation member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub osm_type: OsmType,
+    pub id: i64,
     pub role: String,
 }
 
-/// Transient element-being-parsed state for the OSC XML state machine.
-#[derive(Debug)]
-enum Parsing {
-    None,
+/// The new state of an object (absent for deletions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Element {
     Node {
         id: i64,
-        lon: f64,
-        lat: f64,
-        version: u32,
-        visible: bool,
+        location: FixedCoord,
+        tags: Vec<(String, String)>,
     },
     Way {
         id: i64,
-        version: u32,
-        visible: bool,
+        refs: Vec<i64>,
+        tags: Vec<(String, String)>,
     },
     Relation {
         id: i64,
-        version: u32,
-        visible: bool,
+        members: Vec<Member>,
+        tags: Vec<(String, String)>,
     },
 }
 
-impl OscElement {
-    pub fn id(&self) -> i64 {
+impl Element {
+    pub fn osm_id(&self) -> OsmId {
         match self {
-            OscElement::Node { id, .. } => *id,
-            OscElement::Way { id, .. } => *id,
-            OscElement::Relation { id, .. } => *id,
+            Self::Node { id, .. } => OsmId::node(*id),
+            Self::Way { id, .. } => OsmId::way(*id),
+            Self::Relation { id, .. } => OsmId::relation(*id),
         }
     }
 }
 
-/// Parse an .osc.gz file from disk.
-pub fn parse_osc_gz(path: &Path) -> OsmicResult<Vec<OscChange>> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| OsmicError::Other(format!("Failed to open {}: {e}", path.display())))?;
-    let decoder = GzDecoder::new(file);
-    parse_osc(decoder)
+/// One change from a change file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub action: ChangeAction,
+    pub id: OsmId,
+    pub version: Option<u32>,
+    /// The object after the change; `None` for deletions.
+    pub element: Option<Element>,
 }
 
-/// Parse an .osc.gz from raw bytes (e.g. downloaded from replication server).
-pub fn parse_osc_gz_bytes(data: &[u8]) -> OsmicResult<Vec<OscChange>> {
-    let decoder = GzDecoder::new(data);
-    parse_osc(decoder)
+/// Limits applied while reading change files.
+#[derive(Debug, Clone, Copy)]
+pub struct OscLimits {
+    /// Maximum decompressed size of one change file.
+    pub max_decompressed_bytes: u64,
 }
 
-/// Parse OSC XML from any reader.
-pub fn parse_osc<R: Read>(reader: R) -> OsmicResult<Vec<OscChange>> {
-    let mut xml = Reader::from_reader(std::io::BufReader::new(reader));
+impl Default for OscLimits {
+    fn default() -> Self {
+        // A daily planet diff is ~150 MB gzipped / ~1.5 GB of XML.
+        Self {
+            max_decompressed_bytes: 4 << 30,
+        }
+    }
+}
+
+/// Parse a gzip-compressed change file.
+pub fn parse_osc_gz(data: impl Read, limits: OscLimits) -> Result<Vec<Change>, ReplError> {
+    let limited = MultiGzDecoder::new(data).take(limits.max_decompressed_bytes + 1);
+    let mut counting = CountingReader {
+        inner: limited,
+        read: 0,
+    };
+    let result = parse_osc(BufReader::new(&mut counting));
+    if counting.read > limits.max_decompressed_bytes {
+        return Err(ReplError::TooLarge {
+            what: "decompressed change file",
+            limit: limits.max_decompressed_bytes,
+        });
+    }
+    result
+}
+
+struct CountingReader<R> {
+    inner: R,
+    read: u64,
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
+}
+
+struct Attrs<'a> {
+    pairs: Vec<(&'a str, String)>,
+}
+
+impl Attrs<'_> {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.pairs
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn required(&self, element: &str, name: &str) -> Result<&str, ReplError> {
+        self.get(name)
+            .ok_or_else(|| ReplError::Osc(format!("<{element}> without `{name}`")))
+    }
+
+    fn parse<T: std::str::FromStr>(&self, element: &str, name: &str) -> Result<T, ReplError> {
+        let raw = self.required(element, name)?;
+        raw.parse()
+            .map_err(|_| ReplError::Osc(format!("<{element}> has invalid {name}=\"{raw}\"")))
+    }
+}
+
+/// Read every attribute once (no duplicate-name check).
+fn attrs<'a>(e: &'a BytesStart<'_>) -> Result<Attrs<'a>, ReplError> {
+    let mut pairs = Vec::new();
+    for a in e.attributes().with_checks(false) {
+        let a = a.map_err(|err| ReplError::Osc(err.to_string()))?;
+        // Resolves predefined and character references only; general
+        // entities surface as `Event::GeneralRef` and are rejected.
+        let value = a
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|err| ReplError::Osc(err.to_string()))?
+            .into_owned();
+        pairs.push((a.key.into_inner(), value));
+    }
+    Ok(Attrs { pairs })
+}
+
+#[derive(Debug)]
+struct Open {
+    action: ChangeAction,
+    id: OsmId,
+    version: Option<u32>,
+    visible: bool,
+    location: Option<FixedCoord>,
+    tags: Vec<(String, String)>,
+    refs: Vec<i64>,
+    members: Vec<Member>,
+}
+
+impl Open {
+    fn finish(self) -> Change {
+        let deleted = self.action == ChangeAction::Delete || !self.visible;
+        let element = if deleted {
+            None
+        } else {
+            Some(match self.id.osm_type {
+                OsmType::Node => Element::Node {
+                    id: self.id.id,
+                    // Presence is checked when the element opens.
+                    location: self.location.unwrap_or(FixedCoord::new(0, 0)),
+                    tags: self.tags,
+                },
+                OsmType::Way => Element::Way {
+                    id: self.id.id,
+                    refs: self.refs,
+                    tags: self.tags,
+                },
+                OsmType::Relation => Element::Relation {
+                    id: self.id.id,
+                    members: self.members,
+                    tags: self.tags,
+                },
+            })
+        };
+        Change {
+            action: if deleted {
+                ChangeAction::Delete
+            } else {
+                self.action
+            },
+            id: self.id,
+            version: self.version,
+            element,
+        }
+    }
+}
+
+fn coordinate(a: &Attrs<'_>, name: &str, limit: f64) -> Result<f64, ReplError> {
+    let v: f64 = a.parse("node", name)?;
+    if !v.is_finite() || v.abs() > limit {
+        return Err(ReplError::Osc(format!("node {name}={v} out of range")));
+    }
+    Ok(v)
+}
+
+/// Parse an uncompressed change file.
+pub fn parse_osc(reader: impl BufRead) -> Result<Vec<Change>, ReplError> {
+    let mut xml = Reader::from_reader(reader);
     xml.config_mut().trim_text(true);
-
-    let mut changes = Vec::new();
-    let mut current_action: Option<ChangeAction> = None;
     let mut buf = Vec::new();
-
-    // Transient state for the element being parsed
-    let mut elem_tags: Vec<(String, String)> = Vec::new();
-    let mut elem_nd_refs: Vec<i64> = Vec::new();
-    let mut elem_members: Vec<RelMember> = Vec::new();
-    let mut parsing = Parsing::None;
+    let mut changes = Vec::new();
+    let mut action: Option<ChangeAction> = None;
+    let mut open: Option<Open> = None;
 
     loop {
-        let event = xml.read_event_into(&mut buf);
+        let event = xml.read_event_into(&mut buf).map_err(|e| {
+            ReplError::Osc(format!("XML error at byte {}: {e}", xml.error_position()))
+        })?;
+        let is_empty = matches!(event, Event::Empty(_));
         match event {
-            // Start and Empty share the same "open element" handling. For Empty
-            // (self-closing) elements we additionally finalize immediately since
-            // quick-xml will NOT fire a matching End event.
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let is_empty = matches!(event, Ok(Event::Empty(_)));
-                let qname = e.name();
-                let name_bytes = qname.as_ref();
-                let name = std::str::from_utf8(name_bytes).unwrap_or("");
-
-                match name {
-                    "create" => current_action = Some(ChangeAction::Create),
-                    "modify" => current_action = Some(ChangeAction::Modify),
-                    "delete" => current_action = Some(ChangeAction::Delete),
-                    "node" => {
-                        elem_tags.clear();
-                        parsing = Parsing::Node {
-                            id: attr_i64(e, "id"),
-                            lon: attr_f64(e, "lon"),
-                            lat: attr_f64(e, "lat"),
-                            version: attr_u32(e, "version"),
-                            visible: attr_bool(e, "visible"),
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let name = e.name();
+                match name.as_ref() {
+                    "create" => action = Some(ChangeAction::Create),
+                    "modify" => action = Some(ChangeAction::Modify),
+                    "delete" => action = Some(ChangeAction::Delete),
+                    tag @ ("node" | "way" | "relation") => {
+                        let Some(act) = action else {
+                            return Err(ReplError::Osc(
+                                "object outside <create>/<modify>/<delete>".into(),
+                            ));
                         };
-                    }
-                    "way" => {
-                        elem_tags.clear();
-                        elem_nd_refs.clear();
-                        parsing = Parsing::Way {
-                            id: attr_i64(e, "id"),
-                            version: attr_u32(e, "version"),
-                            visible: attr_bool(e, "visible"),
+                        let a = attrs(e)?;
+                        let (ty, label) = match tag {
+                            "node" => (OsmType::Node, "node"),
+                            "way" => (OsmType::Way, "way"),
+                            _ => (OsmType::Relation, "relation"),
                         };
-                    }
-                    "relation" => {
-                        elem_tags.clear();
-                        elem_members.clear();
-                        parsing = Parsing::Relation {
-                            id: attr_i64(e, "id"),
-                            version: attr_u32(e, "version"),
-                            visible: attr_bool(e, "visible"),
+                        let id: i64 = a.parse(label, "id")?;
+                        let visible = a.get("visible") != Some("false");
+                        let version = a
+                            .get("version")
+                            .map(|_| a.parse(label, "version"))
+                            .transpose()?;
+                        let location =
+                            if ty == OsmType::Node && act != ChangeAction::Delete && visible {
+                                let lon = coordinate(&a, "lon", 180.0)?;
+                                let lat = coordinate(&a, "lat", 90.0)?;
+                                Some(FixedCoord::from_degrees(lon, lat).ok_or_else(|| {
+                                    ReplError::Osc(format!("node {id} has invalid coordinates"))
+                                })?)
+                            } else {
+                                None
+                            };
+                        let o = Open {
+                            action: act,
+                            id: OsmId::new(ty, id),
+                            version,
+                            visible,
+                            location,
+                            tags: Vec::new(),
+                            refs: Vec::new(),
+                            members: Vec::new(),
                         };
+                        if is_empty {
+                            changes.push(o.finish());
+                        } else {
+                            open = Some(o);
+                        }
                     }
                     "tag" => {
-                        let k = attr_str(e, "k");
-                        let v = attr_str(e, "v");
-                        elem_tags.push((k, v));
+                        let a = attrs(e)?;
+                        if let Some(o) = open.as_mut() {
+                            o.tags.push((
+                                a.required("tag", "k")?.to_owned(),
+                                a.required("tag", "v")?.to_owned(),
+                            ));
+                        }
                     }
                     "nd" => {
-                        elem_nd_refs.push(attr_i64(e, "ref"));
+                        let a = attrs(e)?;
+                        if let Some(o) = open.as_mut() {
+                            o.refs.push(a.parse("nd", "ref")?);
+                        }
                     }
                     "member" => {
-                        elem_members.push(RelMember {
-                            member_type: attr_str(e, "type"),
-                            ref_id: attr_i64(e, "ref"),
-                            role: attr_str(e, "role"),
-                        });
-                    }
-                    _ => {}
-                }
-
-                // Self-closing node/way/relation elements must be finalized here
-                // because no End event will arrive.
-                if is_empty && matches!(name, "node" | "way" | "relation") {
-                    if let Some(action) = current_action
-                        && let Some(element) = finalize_element(
-                            &mut parsing,
-                            &mut elem_tags,
-                            &mut elem_nd_refs,
-                            &mut elem_members,
-                        )
-                    {
-                        changes.push(OscChange { action, element });
-                    }
-                    parsing = Parsing::None;
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                let qname = e.name();
-                let name = std::str::from_utf8(qname.as_ref()).unwrap_or("");
-                match name {
-                    "create" | "modify" | "delete" => current_action = None,
-                    "node" | "way" | "relation" => {
-                        if let Some(action) = current_action
-                            && let Some(element) = finalize_element(
-                                &mut parsing,
-                                &mut elem_tags,
-                                &mut elem_nd_refs,
-                                &mut elem_members,
-                            )
-                        {
-                            changes.push(OscChange { action, element });
+                        let a = attrs(e)?;
+                        if let Some(o) = open.as_mut() {
+                            let osm_type = match a.required("member", "type")? {
+                                "node" => OsmType::Node,
+                                "way" => OsmType::Way,
+                                "relation" => OsmType::Relation,
+                                other => {
+                                    return Err(ReplError::Osc(format!(
+                                        "unknown member type {other:?}"
+                                    )));
+                                }
+                            };
+                            o.members.push(Member {
+                                osm_type,
+                                id: a.parse("member", "ref")?,
+                                role: a.get("role").unwrap_or_default().to_owned(),
+                            });
                         }
-                        parsing = Parsing::None;
                     }
                     _ => {}
                 }
             }
-            // Reject DTDs outright — OSM replication files never contain them,
-            // and permitting them opens the door to XXE and billion-laughs attacks.
-            Ok(Event::DocType(_)) => {
-                return Err(OsmicError::Other(
-                    "DTD declarations are not allowed in OSC files".into(),
-                ));
+            Event::End(ref e) => match e.name().as_ref() {
+                "create" | "modify" | "delete" => action = None,
+                "node" | "way" | "relation" => {
+                    if let Some(o) = open.take() {
+                        changes.push(o.finish());
+                    }
+                }
+                _ => {}
+            },
+            Event::DocType(_) => {
+                return Err(ReplError::Osc("DTD declarations are not allowed".into()));
             }
-            // Reject user-defined entity references for the same reason. The
-            // five XML-predefined refs (&amp;lt; &amp;gt; &amp;amp; &amp;apos; &amp;quot;) and numeric
-            // character references are handled by BytesText::unescape() and
-            // never surface as GeneralRef events.
-            Ok(Event::GeneralRef(_)) => {
-                return Err(OsmicError::Other(
-                    "Entity references are not allowed in OSC files".into(),
-                ));
+            Event::GeneralRef(_) => {
+                return Err(ReplError::Osc("entity references are not allowed".into()));
             }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(OsmicError::Other(format!("XML parse error: {e}")));
-            }
+            Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
-
-    Ok(changes)
-}
-
-fn attr_str(e: &BytesStart, name: &str) -> String {
-    // Unescape predefined XML entities (&amp; &lt; &gt; &apos; &quot; and numeric
-    // character references). unescape_value() explicitly does NOT resolve
-    // user-defined entities — those surface as Event::GeneralRef and are
-    // rejected at the top of the parse loop for security.
-    e.attributes()
-        .flatten()
-        .find(|a| a.key.as_ref() == name.as_bytes())
-        .and_then(|a| a.unescape_value().ok().map(|c| c.into_owned()))
-        .unwrap_or_default()
-}
-
-fn attr_i64(e: &BytesStart, name: &str) -> i64 {
-    attr_str(e, name).parse().unwrap_or(0)
-}
-
-fn attr_u32(e: &BytesStart, name: &str) -> u32 {
-    attr_str(e, name).parse().unwrap_or(0)
-}
-
-fn attr_f64(e: &BytesStart, name: &str) -> f64 {
-    attr_str(e, name).parse().unwrap_or(0.0)
-}
-
-fn attr_bool(e: &BytesStart, name: &str) -> bool {
-    attr_str(e, name) != "false"
-}
-
-/// Consume the transient element-being-parsed state and produce the final
-/// `OscElement`. Returns `None` if we aren't currently parsing an element
-/// (e.g., a stray End event for an unknown element).
-fn finalize_element(
-    parsing: &mut Parsing,
-    elem_tags: &mut Vec<(String, String)>,
-    elem_nd_refs: &mut Vec<i64>,
-    elem_members: &mut Vec<RelMember>,
-) -> Option<OscElement> {
-    match std::mem::replace(parsing, Parsing::None) {
-        Parsing::Node {
-            id,
-            lon,
-            lat,
-            version,
-            visible,
-        } => Some(OscElement::Node {
-            id,
-            lon,
-            lat,
-            version,
-            visible,
-            tags: std::mem::take(elem_tags),
-        }),
-        Parsing::Way {
-            id,
-            version,
-            visible,
-        } => Some(OscElement::Way {
-            id,
-            version,
-            visible,
-            node_refs: std::mem::take(elem_nd_refs),
-            tags: std::mem::take(elem_tags),
-        }),
-        Parsing::Relation {
-            id,
-            version,
-            visible,
-        } => Some(OscElement::Relation {
-            id,
-            version,
-            visible,
-            members: std::mem::take(elem_members),
-            tags: std::mem::take(elem_tags),
-        }),
-        Parsing::None => None,
+    if open.is_some() {
+        return Err(ReplError::Osc("truncated change file".into()));
     }
+    Ok(changes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A well-formed minimal OSC file should parse without error.
-    #[test]
-    fn parse_minimal_osc() {
-        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
-<osmChange version="0.6" generator="test">
-    <create>
-        <node id="1" lon="1.0" lat="2.0" version="1" visible="true"/>
-    </create>
-    <modify>
-        <node id="2" lon="3.0" lat="4.0" version="2" visible="true">
-            <tag k="name" v="test"/>
-        </node>
-    </modify>
-    <delete>
-        <node id="3" lon="5.0" lat="6.0" version="3" visible="false"/>
-    </delete>
-</osmChange>"#;
-        let changes = parse_osc(&xml[..]).expect("valid OSC must parse");
-        assert_eq!(changes.len(), 3);
-        assert_eq!(changes[0].action, ChangeAction::Create);
-        assert_eq!(changes[1].action, ChangeAction::Modify);
-        assert_eq!(changes[2].action, ChangeAction::Delete);
+    fn parse(xml: &str) -> Result<Vec<Change>, ReplError> {
+        parse_osc(xml.as_bytes())
     }
 
-    /// XXE attempt: DTD declaration with external entity referencing a local file.
-    /// Must be rejected before any entity expansion or file I/O can occur.
-    #[test]
-    fn reject_xxe_external_entity() {
-        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE osmChange [
-    <!ENTITY xxe SYSTEM "file:///etc/passwd">
-]>
+    const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <osmChange version="0.6">
-    <modify>
-        <node id="1" lon="0" lat="0" version="1" visible="true">
-            <tag k="name" v="&xxe;"/>
-        </node>
-    </modify>
+  <create>
+    <node id="1" version="1" lat="37.7749295" lon="-122.4194155">
+      <tag k="amenity" v="cafe"/>
+      <tag k="name" v="Caf&#233; &amp; Bar"/>
+    </node>
+    <node id="2" version="1" lat="0" lon="0"/>
+  </create>
+  <modify>
+    <way id="10" version="3">
+      <nd ref="1"/><nd ref="2"/>
+      <tag k="highway" v="residential"/>
+    </way>
+    <relation id="100" version="2">
+      <member type="way" ref="10" role="outer"/>
+      <member type="node" ref="1" role=""/>
+      <tag k="type" v="multipolygon"/>
+    </relation>
+    <node id="3" version="4" visible="false"/>
+  </modify>
+  <delete>
+    <node id="5" version="2"/>
+    <way id="11" version="7"/>
+  </delete>
 </osmChange>"#;
-        let err = parse_osc(&xml[..]).expect_err("XXE payload must be rejected");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("DTD"),
-            "error should mention DTD rejection, got: {msg}"
+
+    #[test]
+    fn parses_every_kind_of_change_exactly() {
+        let c = parse(SAMPLE).expect("valid");
+        assert_eq!(c.len(), 7);
+        let Some(Element::Node { location, tags, .. }) = c[0].element.clone() else {
+            panic!("node");
+        };
+        assert_eq!(
+            location,
+            FixedCoord::new(-1_224_194_155, 377_749_295),
+            "exact 1e-7"
         );
-    }
-
-    /// Billion-laughs / quadratic blowup: nested DTD entity definitions.
-    /// Must be rejected up-front at the DOCTYPE event, not allowed to expand.
-    #[test]
-    fn reject_billion_laughs() {
-        let xml = br#"<?xml version="1.0"?>
-<!DOCTYPE osmChange [
-    <!ENTITY lol "lol">
-    <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
-    <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
-    <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
-]>
-<osmChange version="0.6">
-    <create>
-        <node id="1" lon="0" lat="0" version="1" visible="true">
-            <tag k="name" v="&lol4;"/>
-        </node>
-    </create>
-</osmChange>"#;
-        let err = parse_osc(&xml[..]).expect_err("billion-laughs payload must be rejected");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("DTD"),
-            "error should mention DTD rejection, got: {msg}"
+        assert_eq!(tags[1], ("name".to_string(), "Café & Bar".to_string()));
+        assert_eq!(
+            c[1].element,
+            Some(Element::Node {
+                id: 2,
+                location: FixedCoord::new(0, 0),
+                tags: vec![]
+            })
         );
+        assert!(matches!(&c[2].element, Some(Element::Way { refs, .. }) if refs == &[1, 2]));
+        let Some(Element::Relation { members, .. }) = &c[3].element else {
+            panic!("relation");
+        };
+        assert_eq!(
+            members[0],
+            Member {
+                osm_type: OsmType::Way,
+                id: 10,
+                role: "outer".into()
+            }
+        );
+        // visible="false" in a modify block is a deletion.
+        assert_eq!(
+            (c[4].action, c[4].element.as_ref()),
+            (ChangeAction::Delete, None)
+        );
+        assert_eq!(c[5].id, OsmId::node(5));
+        assert_eq!(c[6].id, OsmId::way(11));
+        assert_eq!(c[6].version, Some(7));
     }
 
-    /// The five predefined XML entities (lt, gt, amp, apos, quot) must still
-    /// work — they're unescaped by quick-xml itself, never surface as events.
     #[test]
-    fn predefined_entities_allowed() {
-        let xml = br#"<?xml version="1.0"?>
-<osmChange version="0.6">
-    <create>
-        <node id="1" lon="0" lat="0" version="1" visible="true">
-            <tag k="name" v="Fish &amp; Chips"/>
-        </node>
-    </create>
-</osmChange>"#;
-        let changes = parse_osc(&xml[..]).expect("predefined entities must parse");
-        assert_eq!(changes.len(), 1);
-        if let OscElement::Node { tags, .. } = &changes[0].element {
-            assert_eq!(tags.len(), 1);
-            assert_eq!(tags[0].0, "name");
-            assert_eq!(tags[0].1, "Fish & Chips");
-        } else {
-            panic!("expected Node, got {:?}", changes[0].element);
+    fn malformed_numbers_are_errors_not_zero() {
+        for bad in [
+            r#"<osmChange><create><node id="x" lat="1" lon="1"/></create></osmChange>"#,
+            r#"<osmChange><create><node id="1" lat="91" lon="1"/></create></osmChange>"#,
+            r#"<osmChange><create><node id="1" lon="1"/></create></osmChange>"#,
+            r#"<osmChange><create><node id="1" lat="NaN" lon="1"/></create></osmChange>"#,
+            r#"<osmChange><modify><way id="1"><nd ref="abc"/></way></modify></osmChange>"#,
+            r#"<osmChange><modify><relation id="1"><member type="area" ref="1" role=""/></relation></modify></osmChange>"#,
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn rejects_dtd_entities_and_structure_errors() {
+        assert!(parse(r#"<!DOCTYPE x [<!ENTITY a "b">]><osmChange/>"#).is_err());
+        assert!(parse(r#"<osmChange><create><node id="1" lat="1" lon="1"><tag k="a" v="&a;"/></node></create></osmChange>"#).is_err());
+        assert!(parse(r#"<osmChange><node id="1" lat="1" lon="1"/></osmChange>"#).is_err());
+        assert!(parse(r#"<osmChange><create><node id="1" lat="1" lon="1">"#).is_err());
+    }
+
+    #[test]
+    fn many_attributes_parse_in_linear_time() {
+        // 20k attributes on one element: quadratic duplicate checking would
+        // take seconds; a single pass is instant.
+        let mut xml = String::from(r#"<osmChange><delete><node id="1""#);
+        for i in 0..20_000 {
+            xml.push_str(&format!(r#" a{i}="x""#));
+        }
+        xml.push_str("/></delete></osmChange>");
+        let start = std::time::Instant::now();
+        assert_eq!(parse(&xml).expect("valid").len(), 1);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn gzip_input_and_size_limit() {
+        use std::io::Write;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(SAMPLE.as_bytes()).expect("write");
+        let bytes = gz.finish().expect("finish");
+        assert_eq!(
+            parse_osc_gz(&bytes[..], OscLimits::default())
+                .expect("valid")
+                .len(),
+            7
+        );
+        let tiny = OscLimits {
+            max_decompressed_bytes: 100,
+        };
+        assert!(matches!(
+            parse_osc_gz(&bytes[..], tiny),
+            Err(ReplError::TooLarge { .. })
+        ));
     }
 }

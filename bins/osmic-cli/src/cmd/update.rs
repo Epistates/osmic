@@ -1,82 +1,106 @@
 //! `osmic update`
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use clap::Args;
 
-use osmic_index::DenseNodeStore;
-use osmic_osm::{LayerSet, TagStore};
+use osmic_repl::{ClientOptions, OscLimits, UpdateOptions, update_pbf};
+
+use super::{check_output, fmt_count};
 
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
-    /// State directory for replication tracking
+    /// Sorted .osm.pbf file to bring up to date. Its header must carry the
+    /// replication state (osmium, Geofabrik and osmic write it), or pass
+    /// --server and --sequence.
+    pub input: PathBuf,
+
+    /// Write the updated file here instead of replacing the input
     #[arg(long)]
-    pub state_dir: PathBuf,
+    pub output: Option<PathBuf>,
 
-    /// Replication base URL
-    #[arg(
-        long,
-        default_value = "https://planet.openstreetmap.org/replication/minute/"
-    )]
-    pub replication_url: String,
-
-    /// Feature store database
-    #[arg(long, default_value = "osmic-features.redb")]
-    pub feature_store: PathBuf,
-
-    /// Persistent node store written by `generate-tiles --node-store file:PATH`
+    /// Replication base URL (overrides the one in the PBF header), e.g.
+    /// https://planet.openstreetmap.org/replication/minute/ or a Geofabrik
+    /// region's …-updates/ directory
     #[arg(long)]
-    pub node_store: PathBuf,
+    pub server: Option<String>,
 
-    /// Initialise replication at this sequence number (refuses to replace
-    /// existing state)
+    /// Starting sequence number when the PBF header has none
     #[arg(long)]
-    pub init_sequence: Option<u64>,
+    pub sequence: Option<u64>,
+
+    /// Maximum diffs to apply in one run
+    #[arg(long, default_value_t = 1440)]
+    pub max_diffs: u64,
+
+    /// Maximum size of one downloaded diff (MiB)
+    #[arg(long, default_value_t = 1024)]
+    pub max_diff_mb: u64,
+
+    /// Per-request timeout in seconds
+    #[arg(long, default_value_t = 300)]
+    pub timeout: u64,
+
+    /// Allow plain-HTTP replication servers (not recommended)
+    #[arg(long)]
+    pub allow_http: bool,
+
+    /// Overwrite --output if it exists
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
-    let mut state = match args.init_sequence {
-        Some(seq) => {
-            if args.state_dir.join("state.json").exists() {
-                bail!(
-                    "replication state already exists in {}; refusing to reinitialise",
-                    args.state_dir.display()
-                );
-            }
-            let s = osmic_repl::ReplicationState::init(&args.replication_url, seq);
-            s.save(&args.state_dir)?;
-            s
-        }
-        None => osmic_repl::ReplicationState::load(&args.state_dir)
-            .with_context(|| format!("loading state from {}", args.state_dir.display()))?,
-    };
-    let node_store = DenseNodeStore::open(&args.node_store)
-        .with_context(|| format!("opening node store {}", args.node_store.display()))?;
-    let store = osmic_repl::FeatureStore::open(&args.feature_store)?;
-    let tag_store = TagStore::new();
-    let config = osmic_tiles::TileGeneratorConfig::default();
-
-    let url = state.next_osc_url();
-    eprintln!("Downloading {url}");
-    let response = reqwest::blocking::get(&url)?;
-    if !response.status().is_success() {
-        bail!(
-            "replication server returned {} for {url}",
-            response.status()
-        );
+    let start = Instant::now();
+    if !args.input.is_file() {
+        bail!("input file {} does not exist", args.input.display());
     }
-    let changes = osmic_repl::osc::parse_osc_gz_bytes(&response.bytes()?)?;
-    let dirty = osmic_repl::apply_changes(
-        &changes,
-        &store,
-        &node_store,
-        &tag_store,
-        &LayerSet::all(),
-        &config,
-    )?;
-    state.sequence_number += 1;
-    state.save(&args.state_dir)?;
-    println!("changes {}  dirty tiles {}", changes.len(), dirty.len());
+    let output = match &args.output {
+        Some(o) => {
+            check_output(o, args.force)?;
+            o.clone()
+        }
+        None => {
+            if let Some(dir) = args.input.parent().filter(|p| !p.as_os_str().is_empty()) {
+                crate::cleanup::register_dir(dir);
+            }
+            args.input.clone()
+        }
+    };
+    let options = UpdateOptions {
+        server: args.server.clone(),
+        start_sequence: args.sequence,
+        max_diffs: args.max_diffs,
+        client: ClientOptions {
+            allow_http: args.allow_http,
+            request_timeout: Duration::from_secs(args.timeout),
+            max_diff_bytes: args.max_diff_mb.saturating_mul(1 << 20),
+            ..ClientOptions::default()
+        },
+        osc_limits: OscLimits::default(),
+    };
+    let report = update_pbf(&args.input, &output, &options)
+        .with_context(|| format!("updating {}", args.input.display()))?;
+
+    println!(
+        "sequence        {} -> {} (server at {})",
+        report.from.sequence, report.to.sequence, report.latest_sequence
+    );
+    if let Some(t) = &report.to.timestamp {
+        println!("data as of      {t}");
+    }
+    println!("diffs applied   {:>12}", fmt_count(report.diffs_applied));
+    println!("created         {:>12}", fmt_count(report.stats.created));
+    println!("modified        {:>12}", fmt_count(report.stats.modified));
+    println!("deleted         {:>12}", fmt_count(report.stats.deleted));
+    if report.diffs_applied > 0 {
+        println!("output          {}", output.display());
+    }
+    if !report.up_to_date() {
+        println!("not yet current: run again to continue");
+    }
+    println!("total time      {:>11.1}s", start.elapsed().as_secs_f64());
     Ok(())
 }

@@ -8,17 +8,21 @@
 //! relations for the file to be flagged `Sort.Type_then_ID` (when also
 //! sorted by id, see [`PbfWriterOptions::sorted`]).
 //!
-//! Metadata (version, timestamp, user) is not written.
+//! Metadata (version, timestamp, user) is not written. Blocks are
+//! compressed in parallel batches.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
+use rayon::prelude::*;
 
 use osmic_core::{BBox, FixedCoord, OsmType};
 
 const MAX_ENTITIES_PER_BLOCK: usize = 8_000;
+/// Blocks encoded before a parallel compression batch is written.
+const PENDING_BLOCKS: usize = 64;
 
 /// Header options for [`PbfWriter`].
 #[derive(Debug, Clone, Default)]
@@ -33,6 +37,12 @@ pub struct PbfWriterOptions {
     /// Additional `required_features` to declare (e.g. to produce test
     /// files that readers must reject).
     pub extra_required_features: Vec<String>,
+    /// Replication state (`osmosis_replication_*` header fields): the
+    /// timestamp (Unix seconds), sequence number and base URL the data is
+    /// current to.
+    pub replication_timestamp: Option<i64>,
+    pub replication_sequence: Option<i64>,
+    pub replication_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +65,8 @@ pub struct PbfWriter<W: Write> {
     keys_vals: Vec<u32>,
     // Ways / relations, already encoded.
     elements: Vec<u8>,
+    // Encoded, not yet compressed blocks.
+    pending: Vec<Vec<u8>>,
 }
 
 impl<W: Write> PbfWriter<W> {
@@ -80,7 +92,16 @@ impl<W: Write> PbfWriter<W> {
         }
         let program = options.writing_program.as_deref().unwrap_or("osmic");
         put_bytes(&mut header, 16, program.as_bytes());
-        write_blob(&mut out, "OSMHeader", &header)?;
+        if let Some(t) = options.replication_timestamp {
+            put_int64(&mut header, 32, t);
+        }
+        if let Some(seq) = options.replication_sequence {
+            put_int64(&mut header, 33, seq);
+        }
+        if let Some(url) = &options.replication_base_url {
+            put_bytes(&mut header, 34, url.as_bytes());
+        }
+        out.write_all(&frame_blob("OSMHeader", &header)?)?;
         Ok(Self {
             out,
             group: None,
@@ -91,6 +112,7 @@ impl<W: Write> PbfWriter<W> {
             lons: Vec::new(),
             keys_vals: Vec::new(),
             elements: Vec::new(),
+            pending: Vec::new(),
         })
     }
 
@@ -197,7 +219,10 @@ impl<W: Write> PbfWriter<W> {
         }
         put_bytes(&mut block, 1, &table);
         put_bytes(&mut block, 2, &group_buf);
-        write_blob(&mut self.out, "OSMData", &block)?;
+        self.pending.push(block);
+        if self.pending.len() >= PENDING_BLOCKS {
+            self.write_pending()?;
+        }
 
         self.strings = StringTable::default();
         self.count = 0;
@@ -209,9 +234,24 @@ impl<W: Write> PbfWriter<W> {
         Ok(())
     }
 
+    /// Compress pending blocks in parallel and write them in order.
+    fn write_pending(&mut self) -> io::Result<()> {
+        let framed: Vec<Vec<u8>> = self
+            .pending
+            .par_iter()
+            .map(|block| frame_blob("OSMData", block))
+            .collect::<io::Result<_>>()?;
+        for f in framed {
+            self.out.write_all(&f)?;
+        }
+        self.pending.clear();
+        Ok(())
+    }
+
     /// Flush the last block and return the underlying writer.
     pub fn finish(mut self) -> io::Result<W> {
         self.flush_block()?;
+        self.write_pending()?;
         self.out.flush()?;
         Ok(self.out)
     }
@@ -247,7 +287,8 @@ impl StringTable {
     }
 }
 
-fn write_blob(out: &mut impl Write, kind: &str, payload: &[u8]) -> io::Result<()> {
+/// Compress `payload` and frame it as a blob (length, header, blob).
+fn frame_blob(kind: &str, payload: &[u8]) -> io::Result<Vec<u8>> {
     let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
     z.write_all(payload)?;
     let compressed = z.finish()?;
@@ -258,9 +299,11 @@ fn write_blob(out: &mut impl Write, kind: &str, payload: &[u8]) -> io::Result<()
     put_bytes(&mut header, 1, kind.as_bytes());
     put_varint_field(&mut header, 3, blob.len() as u64);
     let header_len = u32::try_from(header.len()).map_err(io::Error::other)?;
-    out.write_all(&header_len.to_be_bytes())?;
-    out.write_all(&header)?;
-    out.write_all(&blob)
+    let mut out = Vec::with_capacity(4 + header.len() + blob.len());
+    out.extend_from_slice(&header_len.to_be_bytes());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&blob);
+    Ok(out)
 }
 
 // ── Protobuf encoding ───────────────────────────────────────────────────────
@@ -334,6 +377,9 @@ mod tests {
         let path = dir.path().join("t.osm.pbf");
         let opts = PbfWriterOptions {
             sorted: true,
+            replication_timestamp: Some(1_791_460_800),
+            replication_sequence: Some(4_242),
+            replication_base_url: Some("https://example.org/r/".into()),
             ..Default::default()
         };
         let mut w =
@@ -364,6 +410,12 @@ mod tests {
 
         let header = crate::pbf::read_header(&path).expect("header");
         assert!(header.is_sorted());
+        assert_eq!(header.replication_sequence, Some(4_242));
+        assert_eq!(header.replication_timestamp, Some(1_791_460_800));
+        assert_eq!(
+            header.replication_base_url.as_deref(),
+            Some("https://example.org/r/")
+        );
         assert_eq!(header.writing_program.as_deref(), Some("osmic"));
 
         let mut nodes = 0;

@@ -59,7 +59,11 @@ pub fn run(args: ServeArgs) -> anyhow::Result<()> {
     runtime
         .block_on(async {
             let server = TileServer::open(config).await?;
-            eprintln!("Serving {} at http://{}/", args.pmtiles.display(), args.bind);
+            eprintln!(
+                "Serving {} at http://{}/",
+                args.pmtiles.display(),
+                args.bind
+            );
             server.serve().await
         })
         .with_context(|| format!("serving {}", args.pmtiles.display()))

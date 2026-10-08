@@ -44,7 +44,7 @@ enum Command {
     Extract(cmd::extract::ExtractArgs),
     /// Serve a PMTiles archive over HTTP with a built-in map viewer
     Serve(cmd::serve::ServeArgs),
-    /// Apply OSM replication diffs
+    /// Bring a PBF file up to date with an OSM replication server
     Update(cmd::update::UpdateArgs),
 }
 

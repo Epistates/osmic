@@ -93,6 +93,48 @@ pub fn read_header(path: &Path) -> Result<PbfHeader, OsmError> {
     Err(OsmError::MissingHeader(path.to_path_buf()))
 }
 
+/// Decode blocks in parallel, `window` at a time, and hand the results of
+/// `decode` to `consume` in file order. At most `window` decoded blocks are
+/// held in memory, so this streams files of any size in order (unlike
+/// [`par_blocks`], which collects every result).
+pub fn for_each_block_ordered<T, D, C>(
+    path: &Path,
+    window: usize,
+    decode: D,
+    mut consume: C,
+) -> Result<(), OsmError>
+where
+    T: Send,
+    D: Fn(&PrimitiveBlock) -> Result<T, OsmError> + Sync,
+    C: FnMut(T) -> Result<(), OsmError>,
+{
+    let mut reader = BlobReader::from_path(path)
+        .map_err(|e| OsmError::pbf(path, e))?
+        .enumerate();
+    let window = window.max(1);
+    loop {
+        let mut blobs = Vec::with_capacity(window);
+        for (seq, blob) in reader.by_ref().take(window) {
+            blobs.push((seq as u64, blob.map_err(|e| OsmError::pbf(path, e))?));
+        }
+        if blobs.is_empty() {
+            return Ok(());
+        }
+        let decoded: Vec<Option<T>> = blobs
+            .into_par_iter()
+            .map(
+                |(seq, blob)| match blob.decode().map_err(|e| OsmError::block(path, seq, e))? {
+                    BlobDecode::OsmData(block) => decode(&block).map(Some),
+                    BlobDecode::OsmHeader(_) | BlobDecode::Unknown(_) => Ok(None),
+                },
+            )
+            .collect::<Result<_, _>>()?;
+        for item in decoded.into_iter().flatten() {
+            consume(item)?;
+        }
+    }
+}
+
 /// Decode every data block of `path` in parallel and apply `f` to it.
 ///
 /// Returns `(block_sequence, result)` pairs sorted by sequence (file

@@ -190,10 +190,15 @@ impl ExternalSorter {
             c.sort();
         }
 
-        // Merge files in rounds until the final merge's fan-in fits.
+        // Only spilled files hold file handles. If there are too many for
+        // one merge, merge just enough of the smallest ones (each round of
+        // k files reduces the count by k - 1), so as little data as
+        // possible is rewritten.
         let mut round = 0usize;
-        while files.len() + chunks.len() > self.fan_in {
-            let group: Vec<PathBuf> = files.drain(..self.fan_in.min(files.len())).collect();
+        while files.len() > self.fan_in {
+            let k = (files.len() - self.fan_in + 1).clamp(2, self.fan_in);
+            files.sort_by_key(|p| std::fs::metadata(p).map_or(0, |m| m.len()));
+            let group: Vec<PathBuf> = files.drain(..k).collect();
             let out = self.dir.path().join(format!("merge-{round:04}.bin"));
             round += 1;
             let mut w = BufWriter::with_capacity(IO_BUFFER, File::create(&out)?);
@@ -504,6 +509,28 @@ mod tests {
             out.windows(2)
                 .all(|w| (w[0].key, w[0].secondary) <= (w[1].key, w[1].secondary))
         );
+    }
+
+    #[test]
+    fn files_within_fan_in_are_merged_without_rewriting() {
+        let mut s = ExternalSorter::new(None, 0).expect("sorter");
+        s.chunk_bytes = 4096;
+        {
+            let mut w = s.writer();
+            for i in 0..5_000u64 {
+                w.push(i, 0, &[0; 8]).expect("push");
+            }
+        }
+        let dir = s.temp_dir().to_path_buf();
+        let spilled = std::fs::read_dir(&dir).expect("dir").count();
+        assert!(spilled > 2 && spilled < MAX_FAN_IN, "{spilled}");
+        let out = s.finish().expect("finish");
+        let merged = std::fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with("merge-"));
+        assert!(!merged, "no intermediate merge round when files fit");
+        assert_eq!(out.count(), 5_000);
     }
 
     #[test]

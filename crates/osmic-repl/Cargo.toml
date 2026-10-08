@@ -10,17 +10,19 @@ authors.workspace = true
 categories = ["science::geo", "parser-implementations"]
 keywords = ["osm", "replication", "diff", "incremental", "tiles"]
 readme.workspace = true
-description = "OSM replication: change file parsing, feature store, incremental tile updates"
+description = "OSM replication: hardened change-file parsing and keeping PBF files current with a replication server"
 
 [dependencies]
 osmic-core = { workspace = true }
-osmic-osm = { workspace = true }
-osmic-tiles = { workspace = true }
-osmic-geo = { workspace = true }
-geo-types = { workspace = true }
-quick-xml = "0.39"
-flate2 = "1"
-redb = "2"
+osmic-osm = { workspace = true, features = ["native"] }
+flate2 = { workspace = true }
+osmpbf = { workspace = true }
+quick-xml = "0.42"
+tempfile = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+ureq = "3.4"
+
+[dev-dependencies]
+osmpbf = { workspace = true }
+tempfile = { workspace = true }
