@@ -1,9 +1,14 @@
-use crate::error::RenderResult;
+//! The backend abstraction and its configuration.
 
+use crate::error::RenderResult;
 use crate::scene::SceneGraph;
 
 /// Configuration for rendering.
+///
+/// Build with [`RenderConfig::new`] (or [`Default`]) and the `with_*`
+/// methods.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RenderConfig {
     /// Width in logical pixels.
     pub width: u32,
@@ -18,13 +23,34 @@ pub struct RenderConfig {
 }
 
 impl Default for RenderConfig {
+    /// 1024 x 1024 logical pixels at ratio 1 on a transparent target.
     fn default() -> Self {
+        Self::new(1024, 1024)
+    }
+}
+
+impl RenderConfig {
+    /// A `width` x `height` logical-pixel target at pixel ratio 1,
+    /// initially transparent.
+    pub fn new(width: u32, height: u32) -> Self {
         Self {
-            width: 1024,
-            height: 1024,
+            width,
+            height,
             background: osmic_core::Color::TRANSPARENT,
             pixel_ratio: 1.0,
         }
+    }
+
+    /// This configuration at device pixel ratio `ratio`.
+    pub fn with_pixel_ratio(mut self, ratio: f32) -> Self {
+        self.pixel_ratio = ratio;
+        self
+    }
+
+    /// This configuration with the target initially filled with `color`.
+    pub fn with_background(mut self, color: osmic_core::Color) -> Self {
+        self.background = color;
+        self
     }
 }
 

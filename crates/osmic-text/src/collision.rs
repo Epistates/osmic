@@ -6,11 +6,14 @@ use rstar::{AABB, RTree, RTreeObject};
 /// exclusive in the overlap test).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
+    /// Top-left corner `[x, y]`.
     pub min: [f32; 2],
+    /// Bottom-right corner `[x, y]`.
     pub max: [f32; 2],
 }
 
 impl Rect {
+    /// The rectangle from `(x0, y0)` to `(x1, y1)`.
     pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
         Self {
             min: [x0, y0],
@@ -18,10 +21,12 @@ impl Rect {
         }
     }
 
+    /// Width (`max.x - min.x`).
     pub fn width(&self) -> f32 {
         self.max[0] - self.min[0]
     }
 
+    /// Height (`max.y - min.y`).
     pub fn height(&self) -> f32 {
         self.max[1] - self.min[1]
     }
@@ -77,6 +82,7 @@ pub struct CollisionIndex {
 }
 
 impl CollisionIndex {
+    /// An empty index.
     pub fn new() -> Self {
         Self::default()
     }
@@ -86,6 +92,7 @@ impl CollisionIndex {
         self.tree.size()
     }
 
+    /// Whether nothing is stored.
     pub fn is_empty(&self) -> bool {
         self.tree.size() == 0
     }

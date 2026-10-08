@@ -33,7 +33,9 @@ pub trait PropertyValue: Sized + Clone + PartialEq + std::fmt::Debug {
 /// zoom.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Property<T> {
+    /// A constant value.
     Constant(T),
+    /// An expression evaluated per feature and zoom.
     Expr(Expr),
 }
 
@@ -253,6 +255,7 @@ macro_rules! string_enum {
     ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident => $text:literal),+ $(,)? }) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
         pub enum $name {
             $($(#[$vmeta])* $variant),+
         }
@@ -294,8 +297,11 @@ macro_rules! string_enum {
 string_enum! {
     /// `line-cap`.
     LineCap {
+        /// The line stops square at its end point.
         Butt => "butt",
+        /// A semicircle past the end point.
         Round => "round",
+        /// A half-square past the end point.
         Square => "square",
     }
 }
@@ -303,8 +309,12 @@ string_enum! {
 string_enum! {
     /// `line-join`.
     LineJoin {
+        /// The corner is cut flat.
         Bevel => "bevel",
+        /// The corner is rounded.
         Round => "round",
+        /// The edges are extended to a point (beveled past the miter
+        /// limit, 2).
         Miter => "miter",
     }
 }
@@ -316,7 +326,7 @@ string_enum! {
         Point => "point",
         /// Labels follow the line geometry.
         Line => "line",
-        /// A single label following the middle of the line.
+        /// A single label following the line, centred on its middle.
         LineCenter => "line-center",
     }
 }
@@ -324,14 +334,23 @@ string_enum! {
 string_enum! {
     /// `text-anchor`: which part of the text sits on the anchor point.
     TextAnchor {
+        /// The centre of the text.
         Center => "center",
+        /// The middle of the left edge.
         Left => "left",
+        /// The middle of the right edge.
         Right => "right",
+        /// The middle of the top edge.
         Top => "top",
+        /// The middle of the bottom edge.
         Bottom => "bottom",
+        /// The top-left corner.
         TopLeft => "top-left",
+        /// The top-right corner.
         TopRight => "top-right",
+        /// The bottom-left corner.
         BottomLeft => "bottom-left",
+        /// The bottom-right corner.
         BottomRight => "bottom-right",
     }
 }
@@ -357,8 +376,11 @@ impl TextAnchor {
 string_enum! {
     /// `text-transform`.
     TextTransform {
+        /// The text as given.
         None => "none",
+        /// Upper case.
         Uppercase => "uppercase",
+        /// Lower case.
         Lowercase => "lowercase",
     }
 }
@@ -376,9 +398,16 @@ impl TextTransform {
 
 string_enum! {
     /// `text-rotation-alignment`.
+    ///
+    /// osmic renders without bearing, so `Map` and `Viewport` only differ
+    /// for line placement: `Map` (and `Auto`) rotate glyphs along the line,
+    /// `Viewport` keeps the text horizontal.
     Alignment {
+        /// Aligned with the map (along the line for line placement).
         Map => "map",
+        /// Aligned with the screen: horizontal.
         Viewport => "viewport",
+        /// `Map` for line placement, `Viewport` for point placement.
         Auto => "auto",
     }
 }

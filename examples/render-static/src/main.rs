@@ -168,12 +168,7 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
     );
 
     let render_start = Instant::now();
-    let config = RenderConfig {
-        width: args.width,
-        height: args.height,
-        pixel_ratio: args.pixel_ratio,
-        ..RenderConfig::default()
-    };
+    let config = RenderConfig::new(args.width, args.height).with_pixel_ratio(args.pixel_ratio);
     let mut backend = SkiaBackend::with_text_engine(&config, text)?;
     backend.render(&scene)?;
     info!("rendered in {:.2}s", render_start.elapsed().as_secs_f64());

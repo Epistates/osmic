@@ -31,6 +31,8 @@
 //! classified by their `class` attribute). It is defined once, as data, in
 //! this crate.
 
+#![warn(missing_docs)]
+
 mod default;
 mod error;
 mod expr;

@@ -11,7 +11,12 @@ pub enum RenderError {
     InvalidPixelRatio(f32),
     /// The render target could not be allocated (zero-sized or too large).
     #[error("cannot create a {width}x{height} render target")]
-    Target { width: u32, height: u32 },
+    Target {
+        /// Requested width in physical pixels.
+        width: u32,
+        /// Requested height in physical pixels.
+        height: u32,
+    },
     /// A color with non-finite components.
     #[error("invalid color {0:?}")]
     InvalidColor(Color),

@@ -18,6 +18,8 @@
 //! There is no GPU glyph atlas: consumers composite the CPU-rasterised
 //! labels, for example as an overlay texture.
 
+#![warn(missing_docs)]
+
 mod blend;
 mod collision;
 mod engine;

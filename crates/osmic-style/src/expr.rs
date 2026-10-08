@@ -19,11 +19,17 @@ use crate::value::{EvalContext, Value, ValueRef, number_json, type_error};
 /// A comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
+    /// `==`: equal values of the same type.
     Eq,
+    /// `!=`: not `==`.
     Ne,
+    /// `<` (numbers or strings).
     Lt,
+    /// `<=` (numbers or strings).
     Le,
+    /// `>` (numbers or strings).
     Gt,
+    /// `>=` (numbers or strings).
     Ge,
 }
 
@@ -55,6 +61,7 @@ impl CompareOp {
 /// How `interpolate` blends between stops.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Interpolation {
+    /// `["linear"]`.
     Linear,
     /// Exponential easing with the given base (`1` is linear).
     Exponential(f64),
@@ -63,44 +70,77 @@ pub enum Interpolation {
 /// One `match` arm: the input equals any of `labels`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchBranch {
+    /// The values this arm matches: all strings or all numbers.
     pub labels: Vec<Value>,
+    /// The result when it matches.
     pub output: Expr,
 }
 
 /// A parsed expression.
+///
+/// Built by [`Expr::parse`] / [`Expr::parse_filter`] (or the helper
+/// constructors), evaluated with [`Expr::evaluate`] and written back with
+/// [`Expr::to_json`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Expr {
+    /// A constant (including `["literal", ...]` arrays).
     Literal(Value),
+    /// `["zoom"]`.
     Zoom,
+    /// `["get", key]`: the feature attribute, or null.
     Get(Box<Expr>),
+    /// `["has", key]`.
     Has(Box<Expr>),
+    /// `["!", x]`.
     Not(Box<Expr>),
+    /// `[op, a, b]` for the comparison operators.
     Compare(CompareOp, Box<Expr>, Box<Expr>),
+    /// `["all", ...]`: true when every operand is (short-circuits).
     All(Vec<Expr>),
+    /// `["any", ...]`: true when some operand is (short-circuits).
     Any(Vec<Expr>),
     /// `["in", needle, haystack]`: array membership or substring.
     In(Box<Expr>, Box<Expr>),
+    /// `["match", input, labels, output, ..., fallback]`.
     Match {
+        /// The value compared with the labels.
         input: Box<Expr>,
+        /// The arms, tried in order.
         branches: Vec<MatchBranch>,
+        /// The result when no arm matches.
         fallback: Box<Expr>,
     },
+    /// `["case", condition, output, ..., fallback]`.
     Case {
+        /// `(condition, output)` pairs, tried in order.
         branches: Vec<(Expr, Expr)>,
+        /// The result when no condition holds.
         fallback: Box<Expr>,
     },
+    /// `["coalesce", ...]`: the first non-null operand.
     Coalesce(Vec<Expr>),
+    /// `["interpolate", interpolation, input, stop, output, ...]`.
     Interpolate {
+        /// How to blend between stops.
         interpolation: Interpolation,
+        /// The numeric input (usually `["zoom"]`).
         input: Box<Expr>,
+        /// `(stop input, output)` pairs, strictly ascending.
         stops: Vec<(f64, Expr)>,
     },
+    /// `["step", input, base, stop, output, ...]`.
     Step {
+        /// The numeric input.
         input: Box<Expr>,
+        /// The result below the first stop.
         base: Box<Expr>,
+        /// `(stop input, output)` pairs, strictly ascending.
         stops: Vec<(f64, Expr)>,
     },
+    /// `["to-string", x]`.
     ToString(Box<Expr>),
+    /// `["to-number", x, ...]`: the first operand convertible to a number.
     ToNumber(Vec<Expr>),
 }
 

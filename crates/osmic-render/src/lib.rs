@@ -19,6 +19,8 @@
 //! * [`Camera`] is the Web Mercator camera shared by interactive and static
 //!   rendering.
 
+#![warn(missing_docs)]
+
 pub mod backend;
 pub mod camera;
 mod error;

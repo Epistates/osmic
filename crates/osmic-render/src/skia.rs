@@ -1,3 +1,5 @@
+//! The software backend: tiny-skia geometry and `osmic-text` labels.
+
 use tiny_skia::{
     Color as SkiaColor, FillRule, IntRect, LineCap as SkiaCap, LineJoin as SkiaJoin, Paint, Path,
     PathBuilder, Pixmap, PixmapMut, Stroke, StrokeDash, Transform,
@@ -381,15 +383,16 @@ fn draw_stroke(
 
     let stroke = Stroke {
         width,
+        // Values newer than this renderer get MapLibre's defaults.
         line_cap: match cap {
-            LineCap::Butt => SkiaCap::Butt,
             LineCap::Round => SkiaCap::Round,
             LineCap::Square => SkiaCap::Square,
+            _ => SkiaCap::Butt,
         },
         line_join: match join {
-            LineJoin::Miter => SkiaJoin::Miter,
             LineJoin::Round => SkiaJoin::Round,
             LineJoin::Bevel => SkiaJoin::Bevel,
+            _ => SkiaJoin::Miter,
         },
         miter_limit: MITER_LIMIT,
         // The dash is applied in path space, before `transform`, so its

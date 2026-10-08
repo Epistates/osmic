@@ -31,12 +31,7 @@ const CHANNEL_TOLERANCE: i16 = 3;
 
 fn backend(width: u32, height: u32, ratio: f32) -> SkiaBackend {
     let fonts = [include_bytes!("fonts/Cantarell-Regular.ttf").to_vec()];
-    let config = RenderConfig {
-        width,
-        height,
-        pixel_ratio: ratio,
-        ..RenderConfig::default()
-    };
+    let config = RenderConfig::new(width, height).with_pixel_ratio(ratio);
     SkiaBackend::with_text_engine(
         &config,
         TextEngine::with_fonts(fonts).expect("bundled font"),

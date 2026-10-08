@@ -128,8 +128,9 @@ struct GlyphBitmap {
 /// A label rasterised into coverage masks, ready to composite.
 #[derive(Debug, Clone)]
 pub struct LabelBitmap {
-    /// Canvas position of the masks' top-left corner.
+    /// Canvas x of the masks' top-left corner.
     pub x: i32,
+    /// Canvas y of the masks' top-left corner.
     pub y: i32,
     /// Glyph coverage.
     pub text: Mask,

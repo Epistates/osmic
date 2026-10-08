@@ -121,6 +121,7 @@ pub fn build_scene(
 }
 
 impl<'a> SceneBuilder<'a> {
+    /// A builder for `style`.
     pub fn new(style: &'a Style) -> Self {
         Self { style }
     }
@@ -214,6 +215,7 @@ fn build_layer(
     let constant_ctx = EvalContext::at_zoom(zoom);
 
     match &layer.kind {
+        // Backgrounds are handled by the caller.
         LayerKind::Background(_) => {}
         LayerKind::Fill(l) => {
             let constant = (!data_driven).then(|| l.resolve(&constant_ctx));
@@ -362,6 +364,13 @@ fn build_layer(
                 }
             }
         }
+        // `osmic-style` only parses the types above; a newer one is skipped
+        // visibly rather than misdrawn.
+        kind => tracing::warn!(
+            layer = %layer.id,
+            kind = kind.type_name(),
+            "layer type not supported by the renderer"
+        ),
     }
 }
 

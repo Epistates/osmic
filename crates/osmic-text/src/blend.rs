@@ -10,8 +10,11 @@ use osmic_core::Color;
 /// An 8-bit coverage mask (0 = outside, 255 = fully covered).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mask {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
+    /// Coverage, row-major, `width * height` bytes.
     pub data: Vec<u8>,
 }
 
@@ -205,10 +208,12 @@ impl<'a> Canvas<'a> {
         })
     }
 
+    /// Width in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Height in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }

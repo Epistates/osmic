@@ -23,7 +23,9 @@ pub struct VectorSource {
     pub url: Option<String>,
     /// Tile URL templates (`{z}/{x}/{y}`), used when `url` is absent.
     pub tiles: Vec<String>,
+    /// Lowest zoom the source has tiles for.
     pub min_zoom: Option<u8>,
+    /// Highest zoom the source has tiles for (clients overzoom beyond).
     pub max_zoom: Option<u8>,
     /// Attribution shown by clients.
     pub attribution: Option<String>,
@@ -135,59 +137,90 @@ impl VectorSource {
 /// `background` layer properties.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BackgroundLayer {
+    /// `background-color`.
     pub color: Option<Property<Color>>,
+    /// `background-opacity`.
     pub opacity: Option<Property<f64>>,
 }
 
 /// `fill` layer properties.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FillLayer {
+    /// `fill-color`.
     pub color: Option<Property<Color>>,
+    /// `fill-opacity`.
     pub opacity: Option<Property<f64>>,
 }
 
 /// `line` layer properties.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LineLayer {
+    /// `line-cap`.
     pub cap: Option<Property<LineCap>>,
+    /// `line-join`.
     pub join: Option<Property<LineJoin>>,
+    /// `line-color`.
     pub color: Option<Property<Color>>,
+    /// `line-width`, in pixels.
     pub width: Option<Property<f64>>,
+    /// `line-opacity`.
     pub opacity: Option<Property<f64>>,
-    /// Dash lengths in multiples of the line width.
+    /// `line-dasharray`: dash lengths in multiples of the line width.
     pub dasharray: Option<Property<Vec<f64>>>,
 }
 
 /// `circle` layer properties.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CircleLayer {
+    /// `circle-radius`, in pixels.
     pub radius: Option<Property<f64>>,
+    /// `circle-color`.
     pub color: Option<Property<Color>>,
+    /// `circle-opacity` (the fill only).
     pub opacity: Option<Property<f64>>,
+    /// `circle-stroke-color`.
     pub stroke_color: Option<Property<Color>>,
+    /// `circle-stroke-width`, in pixels, outside the radius.
     pub stroke_width: Option<Property<f64>>,
+    /// `circle-stroke-opacity` (the stroke only).
     pub stroke_opacity: Option<Property<f64>>,
 }
 
 /// `symbol` layer properties (text labels only; icons are unsupported).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SymbolLayer {
+    /// `symbol-placement`.
     pub placement: Option<Property<SymbolPlacement>>,
+    /// `symbol-sort-key`: lower keys are placed first.
     pub sort_key: Option<Property<f64>>,
+    /// `text-field`.
     pub text_field: Option<Property<String>>,
+    /// `text-font`: the font stack, first available name wins.
     pub text_font: Option<Property<Arc<[String]>>>,
+    /// `text-size`, in pixels.
     pub text_size: Option<Property<f64>>,
+    /// `text-transform`.
     pub text_transform: Option<Property<TextTransform>>,
+    /// `text-anchor`.
     pub text_anchor: Option<Property<TextAnchor>>,
-    /// Offset in ems.
+    /// `text-offset`, in ems.
     pub text_offset: Option<Property<Vec<f64>>>,
+    /// `text-padding`, in pixels.
     pub text_padding: Option<Property<f64>>,
+    /// `text-allow-overlap`.
     pub text_allow_overlap: Option<Property<bool>>,
+    /// `text-max-angle`, in degrees, for line labels.
     pub text_max_angle: Option<Property<f64>>,
+    /// `text-rotation-alignment`.
     pub text_rotation_alignment: Option<Property<Alignment>>,
+    /// `text-color`.
     pub text_color: Option<Property<Color>>,
+    /// `text-halo-color`.
     pub text_halo_color: Option<Property<Color>>,
+    /// `text-halo-width`, in pixels (drawn at most a quarter of the text
+    /// size wide, like MapLibre).
     pub text_halo_width: Option<Property<f64>>,
+    /// `text-opacity` (text and halo).
     pub text_opacity: Option<Property<f64>>,
 }
 
@@ -205,7 +238,9 @@ pub struct LineStyle {
     pub color: Color,
     /// Width in logical pixels.
     pub width: f32,
+    /// End caps.
     pub cap: LineCap,
+    /// Joins.
     pub join: LineJoin,
     /// Dash pattern in multiples of `width`; empty = solid.
     pub dasharray: Vec<f32>,
@@ -216,32 +251,44 @@ pub struct LineStyle {
 pub struct CircleStyle {
     /// Radius in logical pixels.
     pub radius: f32,
+    /// Fill color with `circle-opacity` folded into alpha.
     pub color: Color,
+    /// Stroke color with `circle-stroke-opacity` folded into alpha.
     pub stroke_color: Color,
+    /// Stroke width in logical pixels, drawn outside the radius.
     pub stroke_width: f32,
 }
 
 /// A symbol (text label) with its resolved paint and layout.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolStyle {
+    /// Where labels attach.
     pub placement: SymbolPlacement,
+    /// Placement priority within the layer (lower first).
     pub sort_key: f32,
     /// The label text, after `text-transform`.
     pub text: String,
+    /// The font stack.
     pub font: Arc<[String]>,
     /// Size in logical pixels.
     pub size: f32,
+    /// Which part of the text sits on the anchor.
     pub anchor: TextAnchor,
     /// Offset in ems.
     pub offset: [f32; 2],
+    /// Clearance around the label, in logical pixels.
     pub padding: f32,
+    /// Whether the label may overlap others.
     pub allow_overlap: bool,
+    /// Largest bend between neighbouring glyphs of a line label.
     pub max_angle_degrees: f32,
+    /// How glyphs are rotated.
     pub rotation_alignment: Alignment,
     /// Text color with `text-opacity` folded into alpha.
     pub color: Color,
     /// Halo color with `text-opacity` folded into alpha.
     pub halo_color: Color,
+    /// Halo width in logical pixels.
     pub halo_width: f32,
 }
 
@@ -265,6 +312,7 @@ impl BackgroundLayer {
 }
 
 impl FillLayer {
+    /// The paint for the feature (and zoom) in `ctx`.
     pub fn resolve(&self, ctx: &EvalContext<'_>) -> FillStyle {
         FillStyle {
             color: eval_or(&self.color, ctx, Color::BLACK)
@@ -274,6 +322,7 @@ impl FillLayer {
 }
 
 impl LineLayer {
+    /// The paint and layout for the feature (and zoom) in `ctx`.
     pub fn resolve(&self, ctx: &EvalContext<'_>) -> LineStyle {
         LineStyle {
             color: eval_or(&self.color, ctx, Color::BLACK)
@@ -305,6 +354,7 @@ impl CircleLayer {
 }
 
 impl SymbolLayer {
+    /// The paint and layout for the feature (and zoom) in `ctx`.
     pub fn resolve(&self, ctx: &EvalContext<'_>) -> SymbolStyle {
         let op = opacity(&self.text_opacity, ctx);
         // Missing offset components are 0, so the default needs no
@@ -344,11 +394,17 @@ impl SymbolLayer {
 // immaterial; boxing it would only make construction clumsier.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LayerKind {
+    /// `background`: a color under (or over) everything.
     Background(BackgroundLayer),
+    /// `fill`: polygons.
     Fill(FillLayer),
+    /// `line`: strokes.
     Line(LineLayer),
+    /// `circle`: dots at points.
     Circle(CircleLayer),
+    /// `symbol`: text labels.
     Symbol(SymbolLayer),
 }
 
@@ -409,6 +465,7 @@ impl LayerKind {
 /// One style layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layer {
+    /// Unique layer id.
     pub id: String,
     /// Source id (absent for `background`).
     pub source: Option<String>,
@@ -418,11 +475,13 @@ pub struct Layer {
     pub min_zoom: Option<f64>,
     /// Exclusive upper zoom bound.
     pub max_zoom: Option<f64>,
+    /// Which features the layer draws (legacy filters are normalised).
     pub filter: Option<Expr>,
     /// `layout.visibility`.
     pub visible: bool,
     /// Opaque editor metadata, preserved verbatim.
     pub metadata: Option<Json>,
+    /// The layer type and its properties.
     pub kind: LayerKind,
 }
 
@@ -482,7 +541,9 @@ impl Layer {
 /// through [`Style::vector_source`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Style {
+    /// Style spec version; always 8.
     pub version: u8,
+    /// Display name (omitted from JSON when empty).
     pub name: String,
     /// Glyph (SDF font) URL template used by MapLibre clients for text.
     pub glyphs: Option<String>,
@@ -490,8 +551,11 @@ pub struct Style {
     pub center: Option<[f64; 2]>,
     /// Initial zoom.
     pub zoom: Option<f64>,
+    /// Opaque editor metadata, preserved verbatim.
     pub metadata: Option<Json>,
+    /// The `sources` object, raw (validated on parse).
     pub sources: Json,
+    /// The layers, bottom to top.
     pub layers: Vec<Layer>,
 }
 

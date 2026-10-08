@@ -130,10 +130,12 @@ impl Camera {
         Self::new(c.lon, c.lat, zoom, width, height)
     }
 
+    /// The zoom (MapLibre convention).
     pub fn zoom(&self) -> f64 {
         self.zoom
     }
 
+    /// Viewport `[width, height]` in logical pixels.
     pub fn size(&self) -> [f64; 2] {
         [self.width, self.height]
     }
@@ -153,6 +155,7 @@ impl Camera {
         TILE_SIZE * self.zoom.exp2()
     }
 
+    /// Set the zoom, clamped to `MIN_ZOOM..=MAX_ZOOM` (NaN is `MIN_ZOOM`).
     pub fn set_zoom(&mut self, zoom: f64) {
         self.zoom = if zoom.is_nan() {
             MIN_ZOOM

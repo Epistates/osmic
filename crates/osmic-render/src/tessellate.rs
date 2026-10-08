@@ -61,7 +61,9 @@ pub struct MeshVertex {
 /// Triangle list mesh.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mesh {
+    /// The vertices.
     pub vertices: Vec<MeshVertex>,
+    /// Three vertex indices per triangle.
     pub indices: Vec<u32>,
     /// Primitives that could not be tessellated (degenerate geometry).
     pub skipped: usize,
@@ -71,9 +73,18 @@ pub struct Mesh {
 
 /// Limits for [`tessellate_scene`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TessellationOptions {
     /// Stop adding primitives once the mesh has this many vertices.
     pub max_vertices: usize,
+}
+
+impl TessellationOptions {
+    /// The defaults with a vertex budget of `max_vertices`.
+    pub fn with_max_vertices(mut self, max_vertices: usize) -> Self {
+        self.max_vertices = max_vertices;
+        self
+    }
 }
 
 impl Default for TessellationOptions {
@@ -256,15 +267,16 @@ fn tessellate_stroke(
     // supplies the real half width.
     let nominal = spec.width[0].max(spec.width[1]);
     let half_widths = [spec.width[0] / 2.0, spec.width[1] / 2.0];
+    // Values newer than this renderer get MapLibre's defaults.
     let cap = match spec.cap {
-        LineCap::Butt => LyonCap::Butt,
         LineCap::Round => LyonCap::Round,
         LineCap::Square => LyonCap::Square,
+        _ => LyonCap::Butt,
     };
     let join = match spec.join {
-        LineJoin::Miter => LyonJoin::Miter,
         LineJoin::Round => LyonJoin::Round,
         LineJoin::Bevel => LyonJoin::Bevel,
+        _ => LyonJoin::Miter,
     };
     let color = spec.color;
     tess.tessellate_path(
