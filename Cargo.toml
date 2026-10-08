@@ -52,7 +52,7 @@ osmic-repl = { version = "0.1.1", path = "crates/osmic-repl" }
 # Parsing & data
 osmpbf = "0.3"
 rayon = "1.11"
-memmap2 = "0.9"
+memmap2 = "0.9.11"
 lasso = { version = "0.7", features = ["multi-threaded"] }
 
 # Geometry
@@ -63,7 +63,6 @@ proj4rs = "0.1"
 
 # Tile & format
 geozero = "0.15"
-mvt = "0.12"
 pmtiles = { version = "0.21", default-features = false }
 
 # Rendering
@@ -89,6 +88,13 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smallvec = { version = "1.15", features = ["serde"] }
+rustc-hash = "2"
+flate2 = "1"
+tempfile = "3"
+csv = "1.3"
+anyhow = "1"
+ctrlc = { version = "3.4", features = ["termination"] }
+unicode-normalization = "0.1"
 clap = { version = "4", features = ["derive"] }
 
 [profile.release]

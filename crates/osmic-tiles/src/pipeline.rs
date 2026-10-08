@@ -1,479 +1,506 @@
-use std::collections::HashMap;
-#[cfg(feature = "native")]
-use std::env;
+//! Tile generation: features → rendered pieces → external sort → tiles.
+//!
+//! [`TileGenerator`] implements [`FeatureSink`], so the PBF pipeline can
+//! stream features straight into it: every feature is rendered for every
+//! zoom and tile as it arrives (in parallel, on the PBF worker threads) and
+//! the pieces go to an [`ExternalSorter`] keyed by Hilbert tile id. Memory is
+//! bounded by the sort budget, not by the number of features.
+//!
+//! [`TileGenerator::finish`] then merges the sorted pieces tile by tile;
+//! a reader thread groups records while a rayon pool encodes and compresses
+//! batches of tiles, which are delivered in tile-id order — so archives are
+//! clustered and byte-for-byte reproducible.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-#[cfg(feature = "native")]
 use rayon::prelude::*;
-use tracing::info;
+use tracing::{info, warn};
 
-use osmic_core::bbox::BBox;
-use osmic_core::clip::clip_geometry;
-use osmic_core::error::OsmicResult;
-use osmic_core::tile::{TileCoord, Zoom};
-use osmic_geo::projection::bbox_to_tile_range;
-use osmic_geo::simplify::simplify_geometry;
-use osmic_osm::feature::Feature;
-use osmic_osm::tags::TagStore;
+use osmic_core::BBox;
+use osmic_osm::{Feature, FeatureSink, TagStore};
 
-use osmic_core::geometry::Geometry;
-use osmic_osm::feature::FeatureKind;
-use osmic_osm::tags::Tags;
+use crate::assemble::{AssembledTile, TileCompression, assemble, secondary_key};
+use crate::encode::TileEncoder;
+use crate::error::TileError;
+use crate::model::TileFeature;
+use crate::pmtiles::{
+    ArchiveInfo, ArchiveOptions, LayerStats, PmTilesArchive, metadata_json, tile_coord, tile_id,
+};
+use crate::render::{RenderConfig, Renderer};
+use crate::sorter::{ExternalSorter, Record};
 
-use crate::coord::TileTransform;
-use crate::encode::{TileEncoder, TileFeature};
-
-#[cfg(feature = "native")]
-use crate::sort::{ExternalFeatureSort, tile_sort_key};
-
-/// A feature with geometry clipped to a tile bbox.
-struct ClippedFeature<'a> {
-    id: i64,
-    kind: FeatureKind,
-    geometry: Geometry,
-    tags: &'a Tags,
-}
-
-impl<'a> TileFeature for ClippedFeature<'a> {
-    fn id(&self) -> i64 {
-        self.id
-    }
-    fn kind(&self) -> FeatureKind {
-        self.kind
-    }
-    fn geometry(&self) -> &Geometry {
-        &self.geometry
-    }
-    fn tags(&self) -> &Tags {
-        self.tags
-    }
-}
-
-/// Configuration for tile generation.
+/// Tile generation settings.
 #[derive(Debug, Clone)]
 pub struct TileGeneratorConfig {
-    pub min_zoom: u8,
-    pub max_zoom: u8,
-    pub extent: u32,
-    pub batch_size: usize,
-    /// If set, switch to the streaming (external-sort) path when the estimated
-    /// in-memory cost exceeds this threshold.  Estimation uses 256 bytes per
-    /// feature as a conservative combined overhead for geometry, tags, and
-    /// HashMap bookkeeping.
-    ///
-    /// `Some(0)` always uses the streaming path.
-    /// `None` (default) always uses the in-memory path.
-    pub max_memory_mb: Option<usize>,
+    pub render: RenderConfig,
+    /// Compressed size budget per tile; least important features are
+    /// dropped from tiles that exceed it.
+    pub max_tile_bytes: usize,
+    pub compression: TileCompression,
+    /// Memory for buffering rendered pieces before spilling to disk.
+    pub memory_budget: usize,
+    /// Parent directory for temporary sort files (system temp if `None`).
+    pub temp_dir: Option<PathBuf>,
 }
 
 impl Default for TileGeneratorConfig {
     fn default() -> Self {
         Self {
-            min_zoom: 0,
-            max_zoom: 14,
-            extent: 4096,
-            batch_size: 10_000,
-            max_memory_mb: None,
+            render: RenderConfig::default(),
+            max_tile_bytes: 500_000,
+            compression: TileCompression::Gzip,
+            memory_budget: 4 << 30,
+            temp_dir: None,
         }
     }
 }
 
-/// Parallel tile generator.
-///
-/// For each zoom level, computes which tiles contain features (via feature-to-tile
-/// mapping), then generates those tiles in parallel with rayon.
-pub struct TileGenerator<'a> {
-    features: &'a [Feature],
-    tag_store: &'a TagStore,
-    data_bbox: BBox,
-    config: TileGeneratorConfig,
-    encoder: &'a dyn TileEncoder,
+impl TileGeneratorConfig {
+    fn validate(&self) -> Result<(), TileError> {
+        let r = &self.render;
+        let bad = |m: String| Err(TileError::Config(m));
+        if r.min_zoom > r.max_zoom {
+            return bad(format!(
+                "min zoom {} exceeds max zoom {}",
+                r.min_zoom, r.max_zoom
+            ));
+        }
+        if r.max_zoom > osmic_core::Zoom::MAX.0 {
+            return bad(format!(
+                "max zoom {} exceeds {}",
+                r.max_zoom,
+                osmic_core::Zoom::MAX.0
+            ));
+        }
+        if r.extent == 0 || r.extent > 1 << 16 {
+            return bad(format!("extent {} must be in 1..=65536", r.extent));
+        }
+        for (name, v) in [
+            ("buffer", r.buffer_px),
+            ("simplify tolerance", r.simplify_px),
+            ("max-zoom simplify tolerance", r.simplify_px_max_zoom),
+            ("minimum feature size", r.min_size_px),
+        ] {
+            if !v.is_finite() || v < 0.0 {
+                return bad(format!("{name} must be a non-negative number, got {v}"));
+            }
+        }
+        if r.buffer_px > 128.0 {
+            return bad(format!("buffer {} px exceeds half a tile", r.buffer_px));
+        }
+        if self.max_tile_bytes == 0 {
+            return bad("max tile bytes must be positive".into());
+        }
+        Ok(())
+    }
 }
 
-impl<'a> TileGenerator<'a> {
-    pub fn new(
-        features: &'a [Feature],
-        tag_store: &'a TagStore,
-        data_bbox: BBox,
-        config: TileGeneratorConfig,
-        encoder: &'a dyn TileEncoder,
-    ) -> Self {
+/// Statistics collected while rendering.
+#[derive(Debug, Clone)]
+struct RenderStats {
+    layers: BTreeMap<String, LayerStats>,
+    bbox: BBox,
+    features: u64,
+    min_zoom: Option<u8>,
+    max_zoom: Option<u8>,
+}
+
+impl Default for RenderStats {
+    fn default() -> Self {
         Self {
-            features,
-            tag_store,
-            data_bbox,
+            layers: BTreeMap::new(),
+            bbox: BBox::empty(),
+            features: 0,
+            min_zoom: None,
+            max_zoom: None,
+        }
+    }
+}
+
+impl RenderStats {
+    fn note_zoom(&mut self, z: u8) {
+        self.min_zoom = Some(self.min_zoom.map_or(z, |m| m.min(z)));
+        self.max_zoom = Some(self.max_zoom.map_or(z, |m| m.max(z)));
+    }
+
+    fn merge(&mut self, other: RenderStats) {
+        for (k, v) in &other.layers {
+            self.layers.entry(k.clone()).or_default().merge(v);
+        }
+        self.bbox.extend(&other.bbox);
+        self.features += other.features;
+        for z in other.min_zoom.into_iter().chain(other.max_zoom) {
+            self.note_zoom(z);
+        }
+    }
+}
+
+/// Summary of a finished run.
+#[derive(Debug, Clone, Default)]
+pub struct TileSummary {
+    /// Features rendered (before slicing into tiles).
+    pub input_features: u64,
+    pub tiles: u64,
+    /// Feature pieces written into tiles.
+    pub features: u64,
+    /// Feature pieces dropped to meet the tile size budget.
+    pub dropped_features: u64,
+    /// Tiles that hit the size budget.
+    pub budget_limited_tiles: u64,
+    pub largest_tile_bytes: usize,
+    pub total_bytes: u64,
+    /// Tiles per zoom level.
+    pub tiles_per_zoom: BTreeMap<u8, u64>,
+    /// Bytes spilled to temporary files by the external sort.
+    pub spilled_bytes: u64,
+    /// Time from generator creation to the start of the merge.
+    pub render_seconds: f64,
+    pub encode_seconds: f64,
+}
+
+impl TileSummary {
+    /// Lowest and highest zoom with at least one tile.
+    pub fn zoom_range(&self) -> Option<(u8, u8)> {
+        Some((
+            *self.tiles_per_zoom.keys().next()?,
+            *self.tiles_per_zoom.keys().last()?,
+        ))
+    }
+}
+
+/// Streams features into tiles. See the module docs.
+pub struct TileGenerator {
+    config: TileGeneratorConfig,
+    encoder: Box<dyn TileEncoder>,
+    tag_store: Arc<TagStore>,
+    sorter: ExternalSorter,
+    stats: Mutex<RenderStats>,
+    started: Instant,
+}
+
+fn poisoned<T>(_: T) -> TileError {
+    TileError::Config("render statistics lock poisoned".into())
+}
+
+impl TileGenerator {
+    /// `tag_store` must be the store the features' tags were interned in.
+    pub fn new(
+        config: TileGeneratorConfig,
+        encoder: Box<dyn TileEncoder>,
+        tag_store: Arc<TagStore>,
+    ) -> Result<Self, TileError> {
+        config.validate()?;
+        let sorter = ExternalSorter::new(config.temp_dir.as_deref(), config.memory_budget)?;
+        Ok(Self {
             config,
             encoder,
-        }
+            tag_store,
+            sorter,
+            stats: Mutex::new(RenderStats::default()),
+            started: Instant::now(),
+        })
     }
 
-    /// Generate all tiles and write via the callback.
-    ///
-    /// The callback receives `(TileCoord, &[u8])` for each generated tile.
-    /// Returns the total number of tiles generated.
-    ///
-    /// When `config.max_memory_mb` is set and the estimated RAM required
-    /// exceeds that limit, this delegates to `generate_all_streaming()`,
-    /// which performs an external merge sort so only one tile's worth of
-    /// features resides in memory at a time.
-    pub fn generate_all<F>(&self, mut write_tile: F) -> OsmicResult<u64>
-    where
-        F: FnMut(TileCoord, &[u8]) -> OsmicResult<()>,
-    {
-        // 512 bytes per feature is a realistic upper bound for the full
-        // working set: Feature struct (~96 B) + average Geometry vertex
-        // payload (~200 B for mixed point/line/polygon inputs) + Tags
-        // SmallVec overflow (~64 B avg with --all-tags) + HashMap<tile,
-        // Vec<usize>> scatter overhead (~8 B × avg 2 tiles per feature
-        // across all zoom levels ≈ 16 B). The old estimate of 256 was
-        // measured on the curated-whitelist path and is now too low; a
-        // US-scale run with --all-tags OOMed at 156 M features because
-        // the estimate underpredicted and the streaming path didn't fire.
-        const BYTES_PER_FEATURE: usize = 512;
-
-        let estimated_mb = self.features.len().saturating_mul(BYTES_PER_FEATURE) / (1024 * 1024);
-
-        // Auto-adapt rayon batch size to feature count. With large inputs
-        // (US-scale: 150M+ features), keeping the default 10 000-tile
-        // batch means up to N concurrent per-tile allocations — and each
-        // tile at z4-z8 can hold 200K features × ~500 B of clipped geom,
-        // so running 145 tiles in parallel adds ~14 GB of peak working
-        // memory on top of the Feature vec. That's what OOM'd at z6 on
-        // the US 2026-04 extract. Shrink the batch so at most a few tens
-        // of tiles are in flight at once.
-        let effective_batch_size = if self.features.len() > 50_000_000 {
-            8
-        } else if self.features.len() > 10_000_000 {
-            32
-        } else {
-            self.config.batch_size
-        };
-
-        info!(
-            features = self.features.len(),
-            estimated_mb,
-            max_memory_mb = ?self.config.max_memory_mb,
-            configured_batch = self.config.batch_size,
-            effective_batch = effective_batch_size,
-            "Tile generation planning"
-        );
-
-        #[cfg(feature = "native")]
-        if let Some(limit_mb) = self.config.max_memory_mb
-            && estimated_mb >= limit_mb
-        {
-            info!(
-                features = self.features.len(),
-                estimated_mb,
-                limit_mb,
-                "Switching to streaming tile generation (estimated RAM exceeds limit)"
-            );
-            return self.generate_all_streaming(&mut write_tile);
-        }
-
-        let mut total_tiles = 0u64;
-        let total_start = Instant::now();
-
-        for z in self.config.min_zoom..=self.config.max_zoom {
-            let zoom_start = Instant::now();
-
-            // Step 1: Collect which tiles have features at this zoom
-            let tile_features = self.collect_tile_features(z);
-            let occupied_count = tile_features.len();
-
-            if occupied_count == 0 {
-                info!(zoom = z, "No tiles at this zoom, skipping");
-                continue;
-            }
-
-            info!(
-                zoom = z,
-                occupied_tiles = occupied_count,
-                "Generating tiles"
-            );
-
-            // Step 2: Generate tiles
-            let tile_entries: Vec<_> = tile_features.into_iter().collect();
-
-            for batch in tile_entries.chunks(effective_batch_size) {
-                #[cfg(feature = "native")]
-                let tiles: Vec<_> = batch
-                    .par_iter()
-                    .filter_map(|((x, y), feature_indices)| {
-                        let coord = TileCoord::new(*x, *y, Zoom::new(z));
-                        self.generate_single_tile(coord, feature_indices)
-                            .map(|bytes| (coord, bytes))
-                    })
-                    .collect();
-
-                #[cfg(not(feature = "native"))]
-                let tiles: Vec<_> = batch
-                    .iter()
-                    .filter_map(|((x, y), feature_indices)| {
-                        let coord = TileCoord::new(*x, *y, Zoom::new(z));
-                        self.generate_single_tile(coord, feature_indices)
-                            .map(|bytes| (coord, bytes))
-                    })
-                    .collect();
-
-                for (coord, bytes) in &tiles {
-                    write_tile(*coord, bytes)?;
-                    total_tiles += 1;
-                }
-            }
-
-            info!(
-                zoom = z,
-                tiles = total_tiles,
-                elapsed_s = zoom_start.elapsed().as_secs_f64(),
-                "Zoom level complete"
-            );
-        }
-
-        info!(
-            total_tiles,
-            elapsed_s = total_start.elapsed().as_secs_f64(),
-            "Tile generation complete"
-        );
-
-        Ok(total_tiles)
+    pub fn config(&self) -> &TileGeneratorConfig {
+        &self.config
     }
 
-    /// Build a map of (tile_x, tile_y) → [feature_indices] for a given zoom.
-    fn collect_tile_features(&self, zoom: u8) -> HashMap<(u32, u32), Vec<usize>> {
-        let mut tile_map: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-
-        // Clamp to data bbox tile range to avoid iterating the whole world
-        let (range_min_x, range_min_y, range_max_x, range_max_y) =
-            bbox_to_tile_range(&self.data_bbox, zoom);
-
-        for (idx, feature) in self.features.iter().enumerate() {
-            if feature.kind.min_zoom() > zoom {
-                continue;
-            }
-
-            let bb = feature.bbox();
-            let (min_x, min_y, max_x, max_y) = bbox_to_tile_range(&bb, zoom);
-
-            // Clamp to data bbox range
-            let min_x = min_x.max(range_min_x);
-            let min_y = min_y.max(range_min_y);
-            let max_x = max_x.min(range_max_x);
-            let max_y = max_y.min(range_max_y);
-
-            for y in min_y..=max_y {
-                for x in min_x..=max_x {
-                    tile_map.entry((x, y)).or_default().push(idx);
+    /// Render `features` into the sort buffer. Safe to call from many
+    /// threads at once.
+    pub fn add(&self, features: &[Feature]) -> Result<(), TileError> {
+        let renderer = Renderer::new(&self.config.render, &self.tag_store);
+        let mut writer = self.sorter.writer();
+        let mut local = RenderStats::default();
+        let mut failure: Option<TileError> = None;
+        for feature in features {
+            local.features += 1;
+            local.bbox.extend(&feature.bbox());
+            renderer.render(feature, &mut |piece| {
+                if failure.is_some() {
+                    return;
                 }
-            }
-        }
-
-        tile_map
-    }
-
-    /// Streaming tile generation using an external merge sort.
-    ///
-    /// This path is chosen by `generate_all()` when the estimated in-memory
-    /// footprint exceeds `config.max_memory_mb`.  Instead of building a full
-    /// `HashMap<tile → Vec<feature_idx>>` for every zoom level, it:
-    ///
-    /// 1. Iterates features once per zoom level, writing `(sort_key, feature_idx)`
-    ///    pairs to disk in sorted chunks (via `ExternalFeatureSort`).
-    /// 2. Merges all chunks back in sort-key order using a min-heap.
-    /// 3. Groups consecutive records that share the same sort key (same tile)
-    ///    and calls `generate_single_tile()` for each group.
-    ///
-    /// Peak memory per zoom level is bounded by the sort chunk size plus the
-    /// features belonging to a single tile — not the entire feature set.
-    #[cfg(feature = "native")]
-    pub fn generate_all_streaming<F>(&self, write_tile: &mut F) -> OsmicResult<u64>
-    where
-        F: FnMut(TileCoord, &[u8]) -> OsmicResult<()>,
-    {
-        use osmic_core::error::OsmicError;
-
-        // Place temp files in the system temp directory.
-        let tmp_dir = env::temp_dir().join("osmic_tile_sort");
-        std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-            OsmicError::Tile(format!("Cannot create sort tmp dir {tmp_dir:?}: {e}"))
-        })?;
-
-        // Chunk size: each record is 16 bytes; target ~64 MB of RAM per chunk.
-        const CHUNK_RECORDS: usize = 4_000_000; // 4 M records × 16 B = 64 MB
-
-        let mut total_tiles = 0u64;
-        let total_start = Instant::now();
-
-        for z in self.config.min_zoom..=self.config.max_zoom {
-            let zoom_start = Instant::now();
-
-            // ── Phase 1: scatter features into the external sorter ────────────
-            let mut sorter = ExternalFeatureSort::new(&tmp_dir, CHUNK_RECORDS);
-
-            let (range_min_x, range_min_y, range_max_x, range_max_y) =
-                bbox_to_tile_range(&self.data_bbox, z);
-
-            let mut scatter_count = 0u64;
-            for (idx, feature) in self.features.iter().enumerate() {
-                if feature.kind.min_zoom() > z {
-                    continue;
-                }
-
-                let bb = feature.bbox();
-                let (min_x, min_y, max_x, max_y) = bbox_to_tile_range(&bb, z);
-
-                let min_x = min_x.max(range_min_x);
-                let min_y = min_y.max(range_min_y);
-                let max_x = max_x.min(range_max_x);
-                let max_y = max_y.min(range_max_y);
-
-                for ty in min_y..=max_y {
-                    for tx in min_x..=max_x {
-                        let key = tile_sort_key(z, tx, ty);
-                        sorter.add(key, idx).map_err(|e| {
-                            OsmicError::Tile(format!("External sort write failed: {e}"))
-                        })?;
-                        scatter_count += 1;
+                let key = match tile_id(piece.tile) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        failure = Some(e);
+                        return;
                     }
-                }
-            }
-
-            if scatter_count == 0 {
-                info!(zoom = z, "No tiles at this zoom, skipping");
-                continue;
-            }
-
-            // ── Phase 2: merge-sort and group by tile ─────────────────────────
-            let sorted = sorter
-                .finish()
-                .map_err(|e| OsmicError::Tile(format!("External sort finish failed: {e}")))?;
-
-            // Decode sort key back to (x, y): key layout is zoom<<48 | x<<24 | y
-            let decode_xy = |key: u64| -> (u32, u32) {
-                let x = ((key >> 24) & 0x00FF_FFFF) as u32;
-                let y = (key & 0x00FF_FFFF) as u32;
-                (x, y)
-            };
-
-            let mut current_key: Option<u64> = None;
-            let mut current_indices: Vec<usize> = Vec::new();
-            let mut occupied_count = 0u64;
-
-            for (key, feat_idx) in sorted {
-                if Some(key) != current_key {
-                    // Flush the previous tile group.
-                    if let Some(prev_key) = current_key {
-                        let (x, y) = decode_xy(prev_key);
-                        let coord = TileCoord::new(x, y, Zoom::new(z));
-                        if let Some(bytes) = self.generate_single_tile(coord, &current_indices) {
-                            write_tile(coord, &bytes)?;
-                            total_tiles += 1;
-                        }
-                        current_indices.clear();
-                    }
-                    current_key = Some(key);
-                    occupied_count += 1;
-                }
-                current_indices.push(feat_idx);
-            }
-
-            // Flush the final tile group.
-            if let Some(last_key) = current_key {
-                let (x, y) = decode_xy(last_key);
-                let coord = TileCoord::new(x, y, Zoom::new(z));
-                if let Some(bytes) = self.generate_single_tile(coord, &current_indices) {
-                    write_tile(coord, &bytes)?;
-                    total_tiles += 1;
-                }
-            }
-
-            info!(
-                zoom = z,
-                occupied_tiles = occupied_count,
-                tiles = total_tiles,
-                elapsed_s = zoom_start.elapsed().as_secs_f64(),
-                "Zoom level complete (streaming)"
-            );
-        }
-
-        info!(
-            total_tiles,
-            elapsed_s = total_start.elapsed().as_secs_f64(),
-            "Streaming tile generation complete"
-        );
-
-        Ok(total_tiles)
-    }
-
-    /// Generate a single tile from pre-computed feature indices.
-    ///
-    /// Clips all feature geometries to the tile bbox (with 5% buffer)
-    /// before encoding to prevent "geometry exceeds extent" issues.
-    fn generate_single_tile(&self, coord: TileCoord, feature_indices: &[usize]) -> Option<Vec<u8>> {
-        let transform = TileTransform::new(&coord, self.config.extent);
-        let tile_bbox = coord.bbox();
-
-        // Cap features per tile to prevent pathological memory blow-up on
-        // dense low-zoom tiles. At zoom 6 covering a continent, a single
-        // tile can reference tens of millions of features. Clipping and
-        // encoding all of them exhausts RAM and produces an unusable
-        // multi-gigabyte MVT. Caps are zoom-dependent because low-zoom
-        // tiles need aggressive decimation — an MVT tile over 1 MB is
-        // basically unusable in any renderer regardless of source data.
-        //
-        // Features beyond the cap are dropped in feature-id order. A
-        // future improvement would sort by an importance score (kind
-        // priority + geometry area) before truncating.
-        let max_per_tile = match coord.z.0 {
-            0..=3 => 5_000,     // continent-level: sparse overview
-            4..=6 => 20_000,    // country-level: major roads + large areas
-            7..=9 => 60_000,    // region-level: detailed road network
-            10..=12 => 150_000, // metro-level: full detail
-            _ => 500_000,       // city / block level: cap relaxed
-        };
-        let use_indices = if feature_indices.len() > max_per_tile {
-            &feature_indices[..max_per_tile]
-        } else {
-            feature_indices
-        };
-
-        // Simplify, clip, and group features by layer
-        let zoom = coord.z.0;
-        let mut layer_map: HashMap<&str, Vec<ClippedFeature>> = HashMap::new();
-        for &idx in use_indices {
-            let feature = &self.features[idx];
-            // Simplify geometry for current zoom level (reduces vertex count)
-            let simplified = simplify_geometry(&feature.geometry, zoom);
-            // Clip to tile bbox with 5% buffer for anti-aliasing
-            if let Some(clipped_geom) = clip_geometry(&simplified, &tile_bbox, 0.05) {
-                let layer_name = feature.kind.layer_name();
-                layer_map
-                    .entry(layer_name)
+                };
+                let z = piece.tile.z.0;
+                local.note_zoom(z);
+                local
+                    .layers
+                    .entry(piece.layer.as_str().to_string())
                     .or_default()
-                    .push(ClippedFeature {
-                        id: feature.id,
-                        kind: feature.kind,
-                        geometry: clipped_geom,
-                        tags: &feature.tags,
-                    });
+                    .record(z, piece.feature.attributes.iter().map(|(k, _)| k));
+                let secondary = secondary_key(piece.layer, piece.importance, piece.size_class);
+                if let Err(e) = writer.push_with(key, secondary, |buf| piece.feature.encode(buf)) {
+                    failure = Some(e.into());
+                }
+            });
+            if let Some(e) = failure.take() {
+                return Err(e);
             }
         }
+        self.stats.lock().map_err(poisoned)?.merge(local);
+        Ok(())
+    }
 
-        // Build layer entries with trait object references for the encoder
-        let layer_entries: Vec<(&str, Vec<&dyn TileFeature>)> = layer_map
-            .iter()
-            .map(|(name, features)| {
-                let refs: Vec<&dyn TileFeature> =
-                    features.iter().map(|f| f as &dyn TileFeature).collect();
-                (*name, refs)
-            })
+    /// Render an in-memory feature slice using all cores.
+    pub fn add_parallel(&self, features: &[Feature]) -> Result<(), TileError> {
+        features.par_chunks(1024).try_for_each(|c| self.add(c))
+    }
+
+    fn stats(&self) -> Result<RenderStats, TileError> {
+        Ok(self.stats.lock().map_err(poisoned)?.clone())
+    }
+
+    /// Bounds of every feature added so far.
+    pub fn bbox(&self) -> Result<BBox, TileError> {
+        Ok(self.stats()?.bbox)
+    }
+
+    /// Merge, encode and deliver every tile in tile-id order to `write`.
+    pub fn finish(
+        self,
+        mut write: impl FnMut(&AssembledTile) -> Result<(), TileError>,
+    ) -> Result<TileSummary, TileError> {
+        let render_seconds = self.started.elapsed().as_secs_f64();
+        let encode_start = Instant::now();
+        let mut summary = TileSummary {
+            input_features: self.stats()?.features,
+            spilled_bytes: self.sorter.spilled_bytes(),
+            render_seconds,
+            ..Default::default()
+        };
+        info!(
+            pieces = self.sorter.records(),
+            spilled_mib = self.sorter.spilled_bytes() >> 20,
+            secs = render_seconds,
+            "Rendering complete; merging tiles"
+        );
+        let records = self.sorter.finish()?;
+        let extent = self.config.render.extent;
+        let encoder = self.encoder.as_ref();
+        let compression = self.config.compression;
+        let max_bytes = self.config.max_tile_bytes;
+
+        type Batch = Vec<(u64, Vec<Record>)>;
+        std::thread::scope(|scope| -> Result<(), TileError> {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Batch, TileError>>(2);
+            scope.spawn(move || {
+                const BATCH_TILES: usize = 1024;
+                const BATCH_BYTES: usize = 64 << 20;
+                let mut batch: Batch = Vec::new();
+                let mut bytes = 0usize;
+                let mut current: Option<(u64, Vec<Record>)> = None;
+                for rec in records {
+                    let rec = match rec {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = tx.send(Err(e.into()));
+                            return;
+                        }
+                    };
+                    bytes += rec.payload.len();
+                    match &mut current {
+                        Some((key, recs)) if *key == rec.key => recs.push(rec),
+                        _ => {
+                            if let Some(done) = current.take() {
+                                batch.push(done);
+                                if batch.len() >= BATCH_TILES || bytes >= BATCH_BYTES {
+                                    if tx.send(Ok(std::mem::take(&mut batch))).is_err() {
+                                        return; // consumer stopped (error)
+                                    }
+                                    bytes = 0;
+                                }
+                            }
+                            current = Some((rec.key, vec![rec]));
+                        }
+                    }
+                }
+                batch.extend(current);
+                if !batch.is_empty() {
+                    let _ = tx.send(Ok(batch));
+                }
+            });
+
+            for batch in rx {
+                let tiles: Vec<AssembledTile> = batch?
+                    .into_par_iter()
+                    .map(|(key, recs)| {
+                        let coord = tile_coord(key)?;
+                        let features = recs
+                            .into_iter()
+                            .map(|r| Ok((r.secondary, TileFeature::decode(&r.payload)?)))
+                            .collect::<Result<Vec<_>, TileError>>()?;
+                        assemble(coord, features, extent, encoder, compression, max_bytes)
+                    })
+                    .collect::<Result<_, _>>()?;
+                for t in tiles.iter().filter(|t| !t.data.is_empty()) {
+                    summary.tiles += 1;
+                    summary.features += t.features as u64;
+                    summary.dropped_features += t.dropped as u64;
+                    summary.budget_limited_tiles += u64::from(t.dropped > 0);
+                    summary.largest_tile_bytes = summary.largest_tile_bytes.max(t.data.len());
+                    summary.total_bytes += t.data.len() as u64;
+                    *summary.tiles_per_zoom.entry(t.coord.z.0).or_default() += 1;
+                    write(t)?;
+                }
+            }
+            Ok(())
+        })?;
+        summary.encode_seconds = encode_start.elapsed().as_secs_f64();
+        if summary.budget_limited_tiles > 0 {
+            warn!(
+                tiles = summary.budget_limited_tiles,
+                dropped_features = summary.dropped_features,
+                max_tile_bytes = max_bytes,
+                "Tiles over the size budget had their least important features dropped"
+            );
+        }
+        info!(
+            tiles = summary.tiles,
+            bytes = summary.total_bytes,
+            largest = summary.largest_tile_bytes,
+            secs = summary.encode_seconds,
+            "Tiles encoded"
+        );
+        Ok(summary)
+    }
+
+    /// Finish and write a PMTiles archive to `path` (atomically).
+    pub fn write_pmtiles(
+        self,
+        path: &Path,
+        info: &ArchiveInfo,
+        overwrite: bool,
+    ) -> Result<TileSummary, TileError> {
+        let stats = self.stats()?;
+        let bounds = if stats.bbox.is_valid() {
+            let m = osmic_core::mercator::MAX_LATITUDE;
+            BBox::new(
+                stats.bbox.min_lon.max(-180.0),
+                stats.bbox.min_lat.max(-m),
+                stats.bbox.max_lon.min(180.0),
+                stats.bbox.max_lat.min(m),
+            )
+        } else {
+            BBox::world()
+        };
+        let render = &self.config.render;
+        let options = ArchiveOptions {
+            format: self.encoder.format(),
+            compression: self.config.compression,
+            bounds,
+            min_zoom: stats.min_zoom.unwrap_or(render.min_zoom),
+            max_zoom: stats.max_zoom.unwrap_or(render.max_zoom),
+            metadata: metadata_json(info, self.encoder.format(), &stats.layers),
+            overwrite,
+        };
+        let mut archive = PmTilesArchive::create(path, &options)?;
+        let summary = self.finish(|t| archive.add_tile(t.coord, &t.data))?;
+        archive.finalize()?;
+        Ok(summary)
+    }
+}
+
+impl FeatureSink for TileGenerator {
+    fn accept(
+        &self,
+        features: Vec<Feature>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.add(&features)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::MvtEncoder;
+    use geo_types::{LineString, Point};
+    use osmic_core::{Geometry, OsmId};
+    use osmic_osm::TagRetention;
+    use osmic_osm::feature::{AmenityKind, FeatureKind, HighwayKind};
+
+    fn features(store: &TagStore) -> Vec<Feature> {
+        let mut out = Vec::new();
+        for i in 0..500 {
+            let lon = -122.5 + f64::from(i) * 0.001;
+            out.push(Feature {
+                id: OsmId::node(i64::from(i)),
+                kind: FeatureKind::Amenity(AmenityKind::Cafe),
+                geometry: Geometry::Point(Point::new(lon, 37.77)),
+                tags: store.intern_tags([("amenity", "cafe"), ("name", "c")], &TagRetention::All),
+            });
+        }
+        out.push(Feature {
+            id: OsmId::way(1),
+            kind: FeatureKind::Highway(HighwayKind::Motorway),
+            geometry: Geometry::Line(LineString::from(vec![(-123.0, 37.0), (-121.0, 38.5)])),
+            tags: store.intern_tags([("highway", "motorway")], &TagRetention::All),
+        });
+        out
+    }
+
+    fn generate(dir: &Path, name: &str) -> (PathBuf, TileSummary) {
+        let store = Arc::new(TagStore::new());
+        let config = TileGeneratorConfig {
+            temp_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        };
+        let g = TileGenerator::new(config, Box::new(MvtEncoder), Arc::clone(&store)).expect("new");
+        g.add_parallel(&features(&store)).expect("add");
+        let path = dir.join(name);
+        let summary = g
+            .write_pmtiles(&path, &ArchiveInfo::default(), false)
+            .expect("write");
+        (path, summary)
+    }
+
+    #[test]
+    fn archive_is_reproducible_clustered_and_complete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (a, sa) = generate(dir.path(), "a.pmtiles");
+        let (b, _) = generate(dir.path(), "b.pmtiles");
+        assert_eq!(
+            std::fs::read(&a).expect("a"),
+            std::fs::read(&b).expect("b"),
+            "deterministic"
+        );
+        assert!(sa.tiles > 0);
+        assert_eq!(
+            sa.zoom_range(),
+            Some((4, 14)),
+            "motorway from z4, cafés at z13-14"
+        );
+        assert_eq!(sa.dropped_features, 0);
+        assert_eq!(sa.input_features, 501);
+
+        let bytes = std::fs::read(&a).expect("read");
+        let header = pmtiles::Header::try_from_bytes(bytes::Bytes::from(bytes)).expect("header");
+        assert!(header.clustered(), "tiles written in Hilbert order");
+        assert_eq!((header.min_zoom, header.max_zoom), (4, 14));
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
             .collect();
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
 
-        self.encoder.encode_clipped(
-            self.config.extent,
-            &transform,
-            &layer_entries,
-            self.tag_store,
-        )
+    #[test]
+    fn invalid_configs_are_rejected() {
+        let store = Arc::new(TagStore::new());
+        let mut c = TileGeneratorConfig::default();
+        c.render.min_zoom = 10;
+        c.render.max_zoom = 5;
+        assert!(TileGenerator::new(c, Box::new(MvtEncoder), Arc::clone(&store)).is_err());
+        let mut c = TileGeneratorConfig::default();
+        c.render.buffer_px = f64::NAN;
+        assert!(TileGenerator::new(c, Box::new(MvtEncoder), store).is_err());
     }
 }

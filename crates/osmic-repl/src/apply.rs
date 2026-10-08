@@ -1,10 +1,11 @@
 use geo_types::{Coord, LineString, Point, Polygon};
 
 use osmic_core::NodeLocationStore;
+use osmic_core::OsmId;
 use osmic_core::error::OsmicResult;
 use osmic_core::geometry::Geometry;
 use osmic_osm::LayerSet;
-use osmic_osm::classify::classify;
+use osmic_osm::classify::{KeyValues, classify, closed_way_is_area};
 use osmic_osm::feature::Feature;
 use osmic_osm::tags::{TagStore, Tags};
 use osmic_tiles::TileGeneratorConfig;
@@ -38,13 +39,13 @@ pub fn apply_changes(
                     let new_bbox = feature.bbox();
 
                     // Upsert returns old bbox if feature existed
-                    let old_bbox = store.upsert(feature.id, &new_bbox)?;
+                    let old_bbox = store.upsert(feature.id.id, &new_bbox)?;
 
                     // Mark both old and new tile regions as dirty
                     if let Some(old) = old_bbox {
-                        dirty.mark_bbox(&old, config.min_zoom, config.max_zoom);
+                        dirty.mark_bbox(&old, config.render.min_zoom, config.render.max_zoom);
                     }
-                    dirty.mark_bbox(&new_bbox, config.min_zoom, config.max_zoom);
+                    dirty.mark_bbox(&new_bbox, config.render.min_zoom, config.render.max_zoom);
 
                     if change.action == ChangeAction::Create {
                         created += 1;
@@ -58,7 +59,7 @@ pub fn apply_changes(
             ChangeAction::Delete => {
                 let id = change.element.id();
                 if let Some(old_bbox) = store.delete(id)? {
-                    dirty.mark_bbox(&old_bbox, config.min_zoom, config.max_zoom);
+                    dirty.mark_bbox(&old_bbox, config.render.min_zoom, config.render.max_zoom);
                     deleted += 1;
                 }
             }
@@ -89,13 +90,13 @@ fn build_feature(
         OscElement::Node {
             id, lon, lat, tags, ..
         } => {
-            let interned_tags = intern_tags(tags, tag_store);
-            let kind = classify(&interned_tags, tag_store, layers)?;
+            let kv = KeyValues::scan(tags.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+            let kind = classify(&kv, *layers).first()?.kind;
             Some(Feature {
-                id: *id,
+                id: OsmId::node(*id),
                 kind,
                 geometry: Geometry::Point(Point::new(*lon, *lat)),
-                tags: interned_tags,
+                tags: intern_tags(tags, tag_store),
             })
         }
         OscElement::Way {
@@ -107,25 +108,22 @@ fn build_feature(
             // Resolve node references to coordinates
             let coords: Vec<Coord<f64>> = node_refs
                 .iter()
-                .filter_map(|&nid| {
-                    let lonlat = node_store.get(nid)?;
-                    Some(Coord {
-                        x: lonlat.lon,
-                        y: lonlat.lat,
-                    })
-                })
+                .filter_map(|&nid| Some(node_store.get(nid)?.to_coord()))
                 .collect();
 
             if coords.len() < 2 {
                 return None;
             }
 
+            let kv = KeyValues::scan(tags.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+            let classes = classify(&kv, *layers);
+            let class = classes.first()?;
+            let kind = class.kind;
             let interned_tags = intern_tags(tags, tag_store);
-            let kind = classify(&interned_tags, tag_store, layers)?;
 
             // Closed ways that are area types become polygons
             let is_closed = coords.len() >= 4 && coords.first() == coords.last();
-            let mut geometry = if is_closed && kind.is_area() {
+            let mut geometry = if is_closed && closed_way_is_area(class, kv.area()) {
                 Geometry::Polygon(Polygon::new(LineString::new(coords), vec![]))
             } else {
                 Geometry::Line(LineString::new(coords))
@@ -133,7 +131,7 @@ fn build_feature(
             osmic_geo::orient::orient_geometry(&mut geometry);
 
             Some(Feature {
-                id: *id,
+                id: OsmId::way(*id),
                 kind,
                 geometry,
                 tags: interned_tags,

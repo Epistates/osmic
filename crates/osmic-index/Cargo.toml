@@ -8,15 +8,14 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 categories = ["science::geo", "data-structures"]
-keywords = ["spatial-index", "rtree", "osm", "geo"]
+keywords = ["osm", "openstreetmap", "node-store", "index", "geo"]
 readme.workspace = true
-description = "Node location store (mmap) and spatial R-tree index"
+description = "Node location storage (sparse index and dense mmap store) for OSM processing"
 
 [dependencies]
 osmic-core = { workspace = true }
-osmic-osm = { workspace = true }
 memmap2 = { workspace = true }
-rstar = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

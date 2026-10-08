@@ -14,18 +14,22 @@ description = "MVT/MLT encoding, PMTiles archives, tile math"
 
 [features]
 default = ["native"]
-native = ["dep:rayon", "dep:pmtiles", "osmic-osm/native"]
+native = ["dep:rayon", "dep:pmtiles", "dep:tempfile", "osmic-osm/native"]
 mlt = ["dep:mlt-core"]
 
 [dependencies]
 osmic-core = { workspace = true }
-osmic-geo = { workspace = true }
 osmic-osm = { workspace = true, default-features = false }
+flate2 = { workspace = true }
+geo = { workspace = true }
 geo-types = { workspace = true }
-mvt = { workspace = true }
+mlt-core = { version = "0.6", optional = true }
 pmtiles = { workspace = true, features = ["write"], optional = true }
 rayon = { workspace = true, optional = true }
-tracing = { workspace = true }
 serde_json = { workspace = true }
-mlt-core = { version = "0.6", optional = true }
+tempfile = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
+[dev-dependencies]
+bytes = { workspace = true }

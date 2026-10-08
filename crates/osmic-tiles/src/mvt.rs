@@ -1,230 +1,201 @@
-use mvt::{GeomData, GeomEncoder, GeomType, Tile};
-use osmic_core::geometry::Geometry;
-use osmic_osm::tags::{TagStore, WellKnownKey};
-#[cfg(feature = "native")]
-use pmtiles::TileType;
+//! Mapbox Vector Tile 2.1 encoder.
+//!
+//! Encodes [`TileLayer`]s whose features are already clipped, quantised
+//! and wound per the spec (see [`crate::model::TileFeature`]). Keys and
+//! values are deduplicated per layer; geometry uses the standard
+//! MoveTo/LineTo/ClosePath command stream with the cursor carried across
+//! parts, and rings are written without their closing vertex.
 
-use crate::coord::TileTransform;
-use crate::encode::{TileEncoder, TileFeature, TileFormat};
+use std::collections::HashMap;
 
-/// Encode a geometry into MVT GeomData using the given tile transform.
-pub fn encode_geometry(
-    geometry: &Geometry,
-    transform: &TileTransform,
-) -> Result<GeomData, mvt::Error> {
-    match geometry {
-        Geometry::Point(p) => {
-            let (x, y) = transform.lon_lat_to_tile(p.x(), p.y());
-            GeomEncoder::new(GeomType::Point).point(x, y)?.encode()
-        }
-        Geometry::Line(ls) => {
-            let mut encoder = GeomEncoder::new(GeomType::Linestring);
-            for coord in ls.coords() {
-                let (x, y) = transform.lon_lat_to_tile(coord.x, coord.y);
-                encoder.add_point(x, y)?;
+use crate::model::{GeomType, TileFeature, TileLayer};
+use crate::proto::{
+    put_bytes_field, put_message, put_packed_varints, put_varint_field, zigzag_encode32,
+};
+
+const CMD_MOVE_TO: u32 = 1;
+const CMD_LINE_TO: u32 = 2;
+const CMD_CLOSE_PATH: u32 = 7;
+
+fn command(id: u32, count: usize) -> u64 {
+    u64::from((id & 0x7) | ((count as u32) << 3))
+}
+
+/// Append the MVT geometry command stream for `feature` to `out`.
+pub fn encode_geometry(feature: &TileFeature, out: &mut Vec<u64>) {
+    let (mut cx, mut cy) = (0i32, 0i32);
+    let mut point = |out: &mut Vec<u64>, [x, y]: [i32; 2]| {
+        out.push(u64::from(zigzag_encode32(x.wrapping_sub(cx))));
+        out.push(u64::from(zigzag_encode32(y.wrapping_sub(cy))));
+        (cx, cy) = (x, y);
+    };
+    match feature.geom_type {
+        GeomType::Point => {
+            let count: usize = feature.parts.iter().map(Vec::len).sum();
+            if count == 0 {
+                return;
             }
-            encoder.encode()
+            out.push(command(CMD_MOVE_TO, count));
+            for &p in feature.parts.iter().flatten() {
+                point(out, p);
+            }
         }
-        Geometry::Polygon(poly) => {
-            let mut encoder = GeomEncoder::new(GeomType::Polygon);
-            let rings: Vec<_> = std::iter::once(poly.exterior())
-                .chain(poly.interiors())
-                .collect();
-            for (i, ring) in rings.iter().enumerate() {
-                for coord in ring.coords() {
-                    let (x, y) = transform.lon_lat_to_tile(coord.x, coord.y);
-                    encoder.add_point(x, y)?;
+        GeomType::LineString | GeomType::Polygon => {
+            let polygon = feature.geom_type == GeomType::Polygon;
+            let min = if polygon { 3 } else { 2 };
+            for part in feature.parts.iter().filter(|p| p.len() >= min) {
+                out.push(command(CMD_MOVE_TO, 1));
+                point(out, part[0]);
+                out.push(command(CMD_LINE_TO, part.len() - 1));
+                for &p in &part[1..] {
+                    point(out, p);
                 }
-                if i < rings.len() - 1 {
-                    encoder.complete_geom()?;
+                if polygon {
+                    out.push(command(CMD_CLOSE_PATH, 1));
                 }
             }
-            encoder.encode()
         }
-        Geometry::MultiPolygon(mp) => {
-            let mut encoder = GeomEncoder::new(GeomType::Polygon);
-            let total_polys = mp.0.len();
-            for (pi, poly) in mp.iter().enumerate() {
-                let rings: Vec<_> = std::iter::once(poly.exterior())
-                    .chain(poly.interiors())
-                    .collect();
-                for (ri, ring) in rings.iter().enumerate() {
-                    for coord in ring.coords() {
-                        let (x, y) = transform.lon_lat_to_tile(coord.x, coord.y);
-                        encoder.add_point(x, y)?;
+    }
+}
+
+/// Encode layers into an MVT tile. Empty layers are omitted; returns an
+/// empty vector if nothing remains.
+pub fn encode_tile(layers: &[TileLayer]) -> Vec<u8> {
+    let mut tile = Vec::new();
+    let mut geometry = Vec::new();
+    for layer in layers.iter().filter(|l| !l.features.is_empty()) {
+        put_message(&mut tile, 3, |buf| {
+            put_varint_field(buf, 15, 2); // version
+            put_bytes_field(buf, 1, layer.name.as_bytes());
+            let mut keys: Vec<&str> = Vec::new();
+            let mut values: Vec<&str> = Vec::new();
+            let mut key_index: HashMap<&str, u32> = HashMap::new();
+            let mut value_index: HashMap<&str, u32> = HashMap::new();
+            for f in &layer.features {
+                geometry.clear();
+                encode_geometry(f, &mut geometry);
+                if geometry.is_empty() {
+                    continue;
+                }
+                let mut tags = Vec::with_capacity(f.attributes.len() * 2);
+                for (k, v) in &f.attributes {
+                    let ki = *key_index.entry(k).or_insert_with(|| {
+                        keys.push(k);
+                        keys.len() as u32 - 1
+                    });
+                    let vi = *value_index.entry(v).or_insert_with(|| {
+                        values.push(v);
+                        values.len() as u32 - 1
+                    });
+                    tags.push(u64::from(ki));
+                    tags.push(u64::from(vi));
+                }
+                put_message(buf, 2, |fb| {
+                    if let Some(id) = f.id {
+                        put_varint_field(fb, 1, id);
                     }
-                    let is_last = pi == total_polys - 1 && ri == rings.len() - 1;
-                    if !is_last {
-                        encoder.complete_geom()?;
-                    }
-                }
+                    put_packed_varints(fb, 2, tags);
+                    put_varint_field(fb, 3, f.geom_type as u64);
+                    put_packed_varints(fb, 4, geometry.iter().copied());
+                });
             }
-            encoder.encode()
-        }
-    }
-}
-
-/// Extra tag keys to encode for POI detail (address, contact, etc.)
-const EXTRA_TAG_KEYS: &[(WellKnownKey, &str)] = &[
-    (WellKnownKey::AddrStreet, "addr:street"),
-    (WellKnownKey::AddrHousenumber, "addr:housenumber"),
-    (WellKnownKey::AddrCity, "addr:city"),
-    (WellKnownKey::AddrPostcode, "addr:postcode"),
-    (WellKnownKey::Phone, "phone"),
-    (WellKnownKey::ContactPhone, "contact:phone"),
-    (WellKnownKey::Website, "website"),
-    (WellKnownKey::ContactWebsite, "contact:website"),
-    (WellKnownKey::OpeningHours, "opening_hours"),
-    (WellKnownKey::Cuisine, "cuisine"),
-    (WellKnownKey::Brand, "brand"),
-    (WellKnownKey::Operator, "operator"),
-    (WellKnownKey::Description, "description"),
-];
-
-fn encode_feature_tags(
-    mvt_feature: &mut mvt::Feature,
-    feature: &dyn TileFeature,
-    tag_store: &TagStore,
-    name_key: osmic_osm::tags::TagKey,
-    extra_keys: &[(osmic_osm::tags::TagKey, &str)],
-    include_all_tags: bool,
-) {
-    mvt_feature.add_tag_string("class", feature.kind().class_name());
-
-    if include_all_tags {
-        // Dump every tag on the feature, resolving interned keys/values
-        // through the TagStore. Skip "class" since we just set it above,
-        // and skip any key that produces an empty string.
-        for (k, v) in feature.tags().iter() {
-            let key_str = tag_store.resolve(*k);
-            if key_str.is_empty() || key_str == "class" {
-                continue;
+            for k in keys {
+                put_bytes_field(buf, 3, k.as_bytes());
             }
-            let val_str = tag_store.resolve(*v);
-            mvt_feature.add_tag_string(key_str, val_str);
-        }
-        return;
-    }
-
-    if let Some(name_val) = feature.tags().get(name_key) {
-        mvt_feature.add_tag_string("name", tag_store.resolve(name_val));
-    }
-
-    for &(key, mvt_name) in extra_keys {
-        if let Some(val) = feature.tags().get(key) {
-            mvt_feature.add_tag_string(mvt_name, tag_store.resolve(val));
-        }
-    }
-}
-
-fn resolve_extra_keys(tag_store: &TagStore) -> Vec<(osmic_osm::tags::TagKey, &'static str)> {
-    EXTRA_TAG_KEYS
-        .iter()
-        .map(|(wk, mvt_name)| (tag_store.well_known(*wk), *mvt_name))
-        .collect()
-}
-
-/// Build an MVT tile from clipped features grouped by layer name.
-pub fn build_tile_clipped(
-    extent: u32,
-    transform: &TileTransform,
-    layer_features: &[(&str, Vec<&dyn TileFeature>)],
-    tag_store: &TagStore,
-    include_all_tags: bool,
-) -> Option<Vec<u8>> {
-    let mut tile = Tile::new(extent);
-    let name_key = tag_store.well_known(WellKnownKey::Name);
-    let extra_keys = resolve_extra_keys(tag_store);
-
-    for &(layer_name, ref features) in layer_features {
-        if features.is_empty() {
-            continue;
-        }
-
-        let mut layer = tile.create_layer(layer_name);
-
-        for &feature in features {
-            match encode_geometry(feature.geometry(), transform) {
-                Ok(geom_data) => {
-                    let mut mvt_feature = layer.into_feature(geom_data);
-                    mvt_feature.set_id(feature.id() as u64);
-                    encode_feature_tags(
-                        &mut mvt_feature,
-                        feature,
-                        tag_store,
-                        name_key,
-                        &extra_keys,
-                        include_all_tags,
-                    );
-                    layer = mvt_feature.into_layer();
-                }
-                Err(_) => continue,
+            for v in values {
+                put_message(buf, 4, |vb| put_bytes_field(vb, 1, v.as_bytes()));
             }
-        }
-
-        if layer.num_features() > 0 {
-            let _ = tile.add_layer(layer);
-        }
+            put_varint_field(buf, 5, u64::from(layer.extent));
+        });
     }
-
-    if tile.num_layers() == 0 {
-        return None;
-    }
-
-    tile.to_bytes().ok()
+    tile
 }
 
-/// MVT tile encoder.
-///
-/// By default, only a curated whitelist of tag keys is written into each
-/// MVT feature (see `EXTRA_TAG_KEYS`). Set `include_all_tags = true` to
-/// emit every OSM tag present on the feature — useful for downstream
-/// consumers that want to slice by arbitrary attributes, at the cost of
-/// larger tiles (typically 3-5× on POI-dense areas).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MvtEncoder {
-    pub include_all_tags: bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl MvtEncoder {
-    /// Create an encoder that writes the curated whitelist of tags only.
-    pub fn new() -> Self {
-        Self {
-            include_all_tags: false,
+    fn point(parts: Vec<Vec<[i32; 2]>>) -> TileFeature {
+        TileFeature {
+            id: None,
+            geom_type: GeomType::Point,
+            parts,
+            attributes: vec![],
         }
     }
 
-    /// Create an encoder that emits every OSM tag on each feature.
-    pub fn with_all_tags() -> Self {
-        Self {
-            include_all_tags: true,
-        }
-    }
-}
+    #[test]
+    fn known_geometry_encodings_from_the_spec() {
+        // MVT 2.1 spec §4.3.5 examples.
+        let mut g = Vec::new();
+        encode_geometry(&point(vec![vec![[25, 17]]]), &mut g);
+        assert_eq!(g, [9, 50, 34]);
 
-impl TileEncoder for MvtEncoder {
-    fn encode_clipped(
-        &self,
-        extent: u32,
-        transform: &TileTransform,
-        layer_features: &[(&str, Vec<&dyn TileFeature>)],
-        tag_store: &TagStore,
-    ) -> Option<Vec<u8>> {
-        build_tile_clipped(
-            extent,
-            transform,
-            layer_features,
-            tag_store,
-            self.include_all_tags,
-        )
+        g.clear();
+        encode_geometry(&point(vec![vec![[5, 7], [3, 2]]]), &mut g);
+        assert_eq!(g, [17, 10, 14, 3, 9]);
+
+        let line = TileFeature {
+            geom_type: GeomType::LineString,
+            ..point(vec![vec![[2, 2], [2, 10], [10, 10]]])
+        };
+        g.clear();
+        encode_geometry(&line, &mut g);
+        assert_eq!(g, [9, 4, 4, 18, 0, 16, 16, 0]);
+
+        let polygon = TileFeature {
+            geom_type: GeomType::Polygon,
+            ..point(vec![vec![[3, 6], [8, 12], [20, 34]]])
+        };
+        g.clear();
+        encode_geometry(&polygon, &mut g);
+        assert_eq!(g, [9, 6, 12, 18, 10, 12, 24, 44, 15]);
     }
 
-    fn format(&self) -> TileFormat {
-        TileFormat::Mvt
+    #[test]
+    fn cursor_carries_across_parts() {
+        // Spec §4.3.5.4 multilinestring example.
+        let f = TileFeature {
+            geom_type: GeomType::LineString,
+            ..point(vec![vec![[2, 2], [2, 10], [10, 10]], vec![[1, 1], [3, 5]]])
+        };
+        let mut g = Vec::new();
+        encode_geometry(&f, &mut g);
+        assert_eq!(g, [9, 4, 4, 18, 0, 16, 16, 0, 9, 17, 17, 10, 4, 8]);
     }
 
-    #[cfg(feature = "native")]
-    fn tile_type(&self) -> TileType {
-        TileType::Mvt
+    #[test]
+    fn keys_and_values_are_deduplicated() {
+        let f = |name: &str| TileFeature {
+            id: Some(1),
+            attributes: vec![
+                ("class".into(), "cafe".into()),
+                ("name".into(), name.into()),
+            ],
+            ..point(vec![vec![[1, 1]]])
+        };
+        let tile = encode_tile(&[TileLayer {
+            name: "amenity".into(),
+            extent: 4096,
+            features: vec![f("A"), f("B"), f("A")],
+        }]);
+        let layers = crate::mvt_decode::decode_layers(&tile).expect("valid");
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].features.len(), 3);
+        let tables = crate::mvt_decode::layer_tables(&tile).expect("valid");
+        assert_eq!(tables[0].keys, ["class", "name"]);
+        assert_eq!(tables[0].values, ["cafe", "A", "B"]);
+    }
+
+    #[test]
+    fn empty_layers_are_omitted() {
+        assert!(
+            encode_tile(&[TileLayer {
+                name: "x".into(),
+                extent: 4096,
+                features: vec![]
+            }])
+            .is_empty()
+        );
     }
 }

@@ -12,19 +12,32 @@ keywords = ["osm", "pbf", "tiles", "cli", "map"]
 readme.workspace = true
 description = "CLI for tile generation, PBF inspection, render-to-image"
 
+[[bin]]
+name = "osmic"
+path = "src/main.rs"
+
 [features]
 default = []
 mlt = ["osmic-tiles/mlt"]
 
 [dependencies]
-osmic-osm = { workspace = true, features = ["native"] }
-osmic-index = { workspace = true }
+osmic-core = { workspace = true }
 osmic-extract = { workspace = true }
-osmic-tiles = { workspace = true }
+osmic-index = { workspace = true }
+osmic-osm = { workspace = true, features = ["native"] }
 osmic-repl = { workspace = true }
 osmic-serve = { workspace = true }
 osmic-style = { workspace = true }
-reqwest = { version = "0.12", features = ["blocking"] }
+osmic-tiles = { workspace = true }
+anyhow = { workspace = true }
 clap = { workspace = true }
+ctrlc = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tracing-subscriber = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

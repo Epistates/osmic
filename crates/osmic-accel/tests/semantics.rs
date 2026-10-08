@@ -4,10 +4,10 @@
 mod common;
 
 use geo_types::{Coord, LineString, MultiPolygon, Polygon};
-use osmic_accel::{clip_batch_cpu, ClipOptions, ClippedGeometry, WorkItem};
+use osmic_accel::{ClipOptions, ClippedGeometry, WorkItem, clip_batch_cpu};
 use osmic_core::geometry::Geometry;
 
-use common::{frame, TileFrame, EXTENT, TILE_X, TILE_Y, ZOOM};
+use common::{EXTENT, TILE_X, TILE_Y, TileFrame, ZOOM, frame};
 
 fn item(geometry: &Geometry) -> WorkItem<'_> {
     WorkItem {

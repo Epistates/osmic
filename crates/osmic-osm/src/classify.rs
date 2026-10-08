@@ -1,341 +1,358 @@
+//! Tag classification: which layers an OSM element belongs to, and whether a
+//! closed way is an area.
+//!
+//! Classification works directly on borrowed `&str` tags so nothing is
+//! interned or allocated for the (vast majority of) elements that do not
+//! become features.
+
+use smallvec::SmallVec;
+
 use crate::feature::*;
-use crate::layers::LayerSet;
-use crate::tags::{TagStore, Tags, WellKnownKey};
+use crate::layers::{Layer, LayerSet};
 
-/// Classify an OSM element's tags into a `FeatureKind`.
+/// One layer an element was classified into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Classified<'a> {
+    pub kind: FeatureKind,
+    /// The tag key that produced the classification (e.g. `"amenity"`).
+    pub key: &'static str,
+    /// Its raw value (e.g. `"cafe"`), used as the feature's class.
+    pub value: &'a str,
+}
+
+/// Number of classification-relevant keys tracked by [`KeyValues`].
+const KEY_COUNT: usize = 22;
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum K {
+    Amenity,
+    Shop,
+    Tourism,
+    Office,
+    Healthcare,
+    Craft,
+    Historic,
+    Club,
+    Emergency,
+    Education,
+    Leisure,
+    Highway,
+    Railway,
+    Waterway,
+    Water,
+    Natural,
+    Landuse,
+    Building,
+    Boundary,
+    Place,
+    Area,
+    Type,
+}
+
+#[inline]
+fn key_slot(key: &str) -> Option<K> {
+    Some(match key {
+        "amenity" => K::Amenity,
+        "shop" => K::Shop,
+        "tourism" => K::Tourism,
+        "office" => K::Office,
+        "healthcare" => K::Healthcare,
+        "craft" => K::Craft,
+        "historic" => K::Historic,
+        "club" => K::Club,
+        "emergency" => K::Emergency,
+        "education" => K::Education,
+        "leisure" => K::Leisure,
+        "highway" => K::Highway,
+        "railway" => K::Railway,
+        "waterway" => K::Waterway,
+        "water" => K::Water,
+        "natural" => K::Natural,
+        "landuse" => K::Landuse,
+        "building" => K::Building,
+        "boundary" => K::Boundary,
+        "place" => K::Place,
+        "area" => K::Area,
+        "type" => K::Type,
+        _ => return None,
+    })
+}
+
+/// The values of every classification-relevant key on one element.
+#[derive(Default, Clone, Copy)]
+pub struct KeyValues<'a>([Option<&'a str>; KEY_COUNT]);
+
+impl<'a> KeyValues<'a> {
+    /// Scan tags once. Empty values are treated as absent.
+    pub fn scan(tags: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut v = Self::default();
+        for (k, val) in tags {
+            if let Some(slot) = key_slot(k)
+                && !val.is_empty()
+            {
+                v.0[slot as usize] = Some(val);
+            }
+        }
+        v
+    }
+
+    #[inline]
+    fn get(&self, k: K) -> Option<&'a str> {
+        self.0[k as usize]
+    }
+
+    /// Value of `area=*`, if present.
+    pub fn area(&self) -> Option<&'a str> {
+        self.get(K::Area)
+    }
+
+    /// Value of `type=*` (relations), if present.
+    pub fn relation_type(&self) -> Option<&'a str> {
+        self.get(K::Type)
+    }
+
+    /// True if no classification-relevant key is present.
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+}
+
+/// Classify an element into at most one kind per layer, most important
+/// first. POI layers (amenity, shop, …) come before the physical layers, so
+/// the first entry is the element's primary role; e.g. `amenity=school` +
+/// `building=yes` yields `[Amenity(School), Building(Yes)]`.
+pub fn classify<'a>(kv: &KeyValues<'a>, layers: LayerSet) -> SmallVec<[Classified<'a>; 2]> {
+    let mut out: SmallVec<[Classified<'a>; 2]> = SmallVec::new();
+    let mut push = |layer: Layer, key: &'static str, value: &'a str, kind: FeatureKind| {
+        if layers.contains(layer) {
+            out.push(Classified { kind, key, value });
+        }
+    };
+
+    macro_rules! simple {
+        ($slot:ident, $key:literal, $variant:ident, $kind:ty) => {
+            if let Some(v) = kv.get(K::$slot) {
+                push(
+                    Layer::$variant,
+                    $key,
+                    v,
+                    FeatureKind::$variant(<$kind>::from_tag_value(v)),
+                );
+            }
+        };
+    }
+
+    simple!(Amenity, "amenity", Amenity, AmenityKind);
+    simple!(Shop, "shop", Shop, ShopKind);
+    simple!(Tourism, "tourism", Tourism, TourismKind);
+    simple!(Office, "office", Office, OfficeKind);
+    simple!(Healthcare, "healthcare", Healthcare, HealthcareKind);
+    simple!(Craft, "craft", Craft, CraftKind);
+    simple!(Historic, "historic", Historic, HistoricKind);
+    simple!(Club, "club", Club, ClubKind);
+    simple!(Emergency, "emergency", Emergency, EmergencyKind);
+    simple!(Education, "education", Education, EducationKind);
+    simple!(Leisure, "leisure", Leisure, LeisureKind);
+    simple!(Highway, "highway", Highway, HighwayKind);
+    simple!(Railway, "railway", Railway, RailwayKind);
+
+    // Water: waterway=*, then water=*, then natural=water.
+    let natural = kv.get(K::Natural);
+    if let Some(v) = kv.get(K::Waterway) {
+        push(
+            Layer::Water,
+            "waterway",
+            v,
+            FeatureKind::Water(WaterKind::from_waterway_value(v)),
+        );
+    } else if let Some(v) = kv.get(K::Water) {
+        push(
+            Layer::Water,
+            "water",
+            v,
+            FeatureKind::Water(WaterKind::from_water_value(v)),
+        );
+    } else if natural == Some("water") {
+        push(
+            Layer::Water,
+            "natural",
+            "water",
+            FeatureKind::Water(WaterKind::Lake),
+        );
+    }
+    if let Some(v) = natural.filter(|v| *v != "water") {
+        push(
+            Layer::Natural,
+            "natural",
+            v,
+            FeatureKind::Natural(NaturalKind::from_tag_value(v)),
+        );
+    }
+
+    simple!(Landuse, "landuse", Landuse, LanduseKind);
+    if let Some(v) = kv.get(K::Building).filter(|v| *v != "no") {
+        push(
+            Layer::Building,
+            "building",
+            v,
+            FeatureKind::Building(BuildingKind::from_tag_value(v)),
+        );
+    }
+    simple!(Boundary, "boundary", Boundary, BoundaryKind);
+    simple!(Place, "place", Place, PlaceKind);
+
+    out
+}
+
+/// Whether a *closed* way classified as `c` describes an area (polygon)
+/// rather than a closed line (ring road, fence, …).
 ///
-/// Returns `None` for elements that don't match any renderable category
-/// or if the matching layer is disabled in `layers`.
-/// Priority order matches typical map rendering importance.
-pub fn classify(tags: &Tags, store: &TagStore, layers: &LayerSet) -> Option<FeatureKind> {
-    // === POI / Business tags checked FIRST ===
-    // A building with amenity=restaurant should be classified as a restaurant,
-    // not a generic building. Check all POI tags before infrastructure.
-
-    if layers.is_enabled("amenity")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Amenity))
-    {
-        return Some(FeatureKind::Amenity(AmenityKind::from_tag_value(
-            store.resolve(val),
-        )));
+/// `area=yes`/`area=no` override everything. Otherwise the key decides,
+/// following the area-key conventions of iD and openstreetmap-carto: most
+/// POI and land-cover keys imply an area, transport and waterway keys imply
+/// a line except for a few area-like values.
+pub fn closed_way_is_area(c: &Classified<'_>, area_tag: Option<&str>) -> bool {
+    match area_tag {
+        Some("yes") => return true,
+        Some("no") => return false,
+        _ => {}
     }
-
-    if layers.is_enabled("shop")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Shop))
-    {
-        return Some(FeatureKind::Shop(ShopKind::from_tag_value(
-            store.resolve(val),
-        )));
+    match c.key {
+        "highway" => matches!(c.value, "rest_area" | "services" | "platform"),
+        "railway" => matches!(c.value, "platform" | "station" | "turntable" | "roundhouse"),
+        "waterway" => matches!(c.value, "riverbank" | "dock" | "boatyard" | "dam" | "fuel"),
+        "natural" => !matches!(
+            c.value,
+            "coastline"
+                | "cliff"
+                | "ridge"
+                | "arete"
+                | "tree_row"
+                | "valley"
+                | "gorge"
+                | "earth_bank"
+                | "dyke"
+        ),
+        "leisure" => !matches!(c.value, "track" | "slipway"),
+        "historic" => c.value != "citywalls",
+        // Boundaries are linear on ways; boundary areas come from relations.
+        "boundary" => false,
+        _ => true,
     }
-
-    if layers.is_enabled("tourism")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Tourism))
-    {
-        return Some(FeatureKind::Tourism(TourismKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("office")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Office))
-    {
-        return Some(FeatureKind::Office(OfficeKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("healthcare")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Healthcare))
-    {
-        return Some(FeatureKind::Healthcare(HealthcareKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("craft")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Craft))
-    {
-        return Some(FeatureKind::Craft(CraftKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("historic")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Historic))
-    {
-        return Some(FeatureKind::Historic(HistoricKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("club")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Club))
-    {
-        return Some(FeatureKind::Club(ClubKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("emergency")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Emergency))
-    {
-        return Some(FeatureKind::Emergency(EmergencyKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("education")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Education))
-    {
-        return Some(FeatureKind::Education(EducationKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("leisure")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Leisure))
-    {
-        return Some(FeatureKind::Leisure(LeisureKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    // === Infrastructure / geometry tags ===
-
-    if layers.is_enabled("highway")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Highway))
-    {
-        return Some(FeatureKind::Highway(HighwayKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("railway")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Railway))
-    {
-        return Some(FeatureKind::Railway(RailwayKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("water") {
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Waterway)) {
-            return Some(FeatureKind::Water(WaterKind::from_waterway_value(
-                store.resolve(val),
-            )));
-        }
-        if let Some(val) = tags.get(store.well_known(WellKnownKey::Water)) {
-            return Some(FeatureKind::Water(WaterKind::from_water_value(
-                store.resolve(val),
-            )));
-        }
-    }
-
-    if layers.is_enabled("natural")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Natural))
-    {
-        let kind = NaturalKind::from_tag_value(store.resolve(val));
-        if kind == NaturalKind::Water {
-            return Some(FeatureKind::Water(WaterKind::Lake));
-        }
-        return Some(FeatureKind::Natural(kind));
-    }
-
-    if layers.is_enabled("landuse")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Landuse))
-    {
-        return Some(FeatureKind::Landuse(LanduseKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    // === Building checked LAST among physical features ===
-    // So that building=yes + amenity=cafe → Amenity(Cafe), not Building(Yes)
-    if layers.is_enabled("building")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Building))
-    {
-        return Some(FeatureKind::Building(BuildingKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    // === Metadata layers ===
-
-    if layers.is_enabled("boundary")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Boundary))
-    {
-        return Some(FeatureKind::Boundary(BoundaryKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    if layers.is_enabled("place")
-        && let Some(val) = tags.get(store.well_known(WellKnownKey::Place))
-    {
-        return Some(FeatureKind::Place(PlaceKind::from_tag_value(
-            store.resolve(val),
-        )));
-    }
-
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Helper: build a `Tags` with a single key=value pair.
-    fn single_tag(store: &TagStore, key: WellKnownKey, value: &str) -> Tags {
-        let mut tags = Tags::new();
-        tags.push(store.well_known(key), store.intern_value(value));
-        tags
-    }
-
-    // --- Highway classification ---
-
-    #[test]
-    fn highway_tag_classifies_as_highway() {
-        let store = TagStore::new();
-        let tags = single_tag(&store, WellKnownKey::Highway, "residential");
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(matches!(
-            kind,
-            FeatureKind::Highway(HighwayKind::Residential)
-        ));
+    fn kinds(tags: &[(&str, &str)]) -> Vec<FeatureKind> {
+        let kv = KeyValues::scan(tags.iter().copied());
+        classify(&kv, LayerSet::all())
+            .iter()
+            .map(|c| c.kind)
+            .collect()
     }
 
     #[test]
-    fn highway_motorway_classifies_correctly() {
-        let store = TagStore::new();
-        let tags = single_tag(&store, WellKnownKey::Highway, "motorway");
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(matches!(kind, FeatureKind::Highway(HighwayKind::Motorway)));
-    }
-
-    // --- Building classification ---
-
-    #[test]
-    fn building_tag_classifies_as_building() {
-        let store = TagStore::new();
-        let tags = single_tag(&store, WellKnownKey::Building, "yes");
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(matches!(kind, FeatureKind::Building(BuildingKind::Yes)));
-    }
-
-    #[test]
-    fn building_house_classifies_correctly() {
-        let store = TagStore::new();
-        let tags = single_tag(&store, WellKnownKey::Building, "house");
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(matches!(kind, FeatureKind::Building(BuildingKind::House)));
-    }
-
-    // --- Priority: highway + building → highway wins ---
-
-    #[test]
-    fn highway_wins_over_building() {
-        let store = TagStore::new();
-        let mut tags = Tags::new();
-        tags.push(
-            store.well_known(WellKnownKey::Highway),
-            store.intern_value("primary"),
+    fn single_tag_classification() {
+        assert_eq!(
+            kinds(&[("highway", "residential")]),
+            [FeatureKind::Highway(HighwayKind::Residential)]
         );
-        tags.push(
-            store.well_known(WellKnownKey::Building),
-            store.intern_value("yes"),
+        assert_eq!(
+            kinds(&[("building", "house")]),
+            [FeatureKind::Building(BuildingKind::House)]
         );
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(
-            matches!(kind, FeatureKind::Highway(_)),
-            "highway must take priority over building, got {:?}",
-            kind
+        assert_eq!(
+            kinds(&[("waterway", "river")]),
+            [FeatureKind::Water(WaterKind::River)]
         );
-    }
-
-    // --- natural=water → Water(Lake) ---
-
-    #[test]
-    fn natural_water_classifies_as_water_lake() {
-        let store = TagStore::new();
-        let tags = single_tag(&store, WellKnownKey::Natural, "water");
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(
-            matches!(kind, FeatureKind::Water(WaterKind::Lake)),
-            "natural=water must produce Water(Lake), got {:?}",
-            kind
-        );
-    }
-
-    // --- No renderable tags → None ---
-
-    #[test]
-    fn no_renderable_tags_returns_none() {
-        let store = TagStore::new();
-        let mut tags = Tags::new();
-        // Only non-renderable tags.
-        tags.push(
-            store.well_known(WellKnownKey::Name),
-            store.intern_value("Test Street"),
-        );
-        tags.push(
-            store.well_known(WellKnownKey::Maxspeed),
-            store.intern_value("50"),
-        );
-        let result = classify(&tags, &store, &LayerSet::all());
-        assert!(result.is_none(), "non-renderable tags must return None");
-    }
-
-    #[test]
-    fn empty_tags_returns_none() {
-        let store = TagStore::new();
-        let tags = Tags::new();
-        assert!(classify(&tags, &store, &LayerSet::all()).is_none());
-    }
-
-    // --- Waterway vs Water tag priority ---
-
-    #[test]
-    fn waterway_tag_classifies_as_water() {
-        let store = TagStore::new();
-        let tags = single_tag(&store, WellKnownKey::Waterway, "river");
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(
-            matches!(kind, FeatureKind::Water(WaterKind::River)),
-            "waterway=river must produce Water(River), got {:?}",
-            kind
+        assert_eq!(
+            kinds(&[("water", "lake")]),
+            [FeatureKind::Water(WaterKind::Lake)]
         );
     }
 
     #[test]
-    fn water_tag_classifies_as_lake() {
-        let store = TagStore::new();
-        let tags = single_tag(&store, WellKnownKey::Water, "lake");
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(
-            matches!(kind, FeatureKind::Water(WaterKind::Lake)),
-            "water=lake must produce Water(Lake), got {:?}",
-            kind
+    fn poi_and_building_are_both_kept() {
+        assert_eq!(
+            kinds(&[("building", "yes"), ("amenity", "school")]),
+            [
+                FeatureKind::Amenity(AmenityKind::School),
+                FeatureKind::Building(BuildingKind::Yes)
+            ]
         );
     }
 
     #[test]
-    fn waterway_wins_over_water_tag() {
-        // waterway= is checked before water= in the priority chain.
-        let store = TagStore::new();
-        let mut tags = Tags::new();
-        tags.push(
-            store.well_known(WellKnownKey::Waterway),
-            store.intern_value("river"),
+    fn natural_water_goes_to_water_layer_only() {
+        assert_eq!(
+            kinds(&[("natural", "water")]),
+            [FeatureKind::Water(WaterKind::Lake)]
         );
-        tags.push(
-            store.well_known(WellKnownKey::Water),
-            store.intern_value("lake"),
+        assert_eq!(
+            kinds(&[("natural", "water"), ("water", "reservoir")]),
+            [FeatureKind::Water(WaterKind::Reservoir)]
         );
-        let kind = classify(&tags, &store, &LayerSet::all()).expect("must classify");
-        assert!(
-            matches!(kind, FeatureKind::Water(WaterKind::River)),
-            "waterway must take priority over water tag, got {:?}",
-            kind
+    }
+
+    #[test]
+    fn building_no_is_not_a_building() {
+        assert!(kinds(&[("building", "no")]).is_empty());
+        assert_eq!(
+            kinds(&[("building", "no"), ("amenity", "parking")]),
+            [FeatureKind::Amenity(AmenityKind::Parking)]
         );
+    }
+
+    #[test]
+    fn empty_values_and_irrelevant_tags_are_ignored() {
+        assert!(kinds(&[("name", "Main St"), ("maxspeed", "50")]).is_empty());
+        assert!(kinds(&[("highway", "")]).is_empty());
+        assert!(kinds(&[]).is_empty());
+    }
+
+    #[test]
+    fn disabled_layers_are_skipped() {
+        let kv = KeyValues::scan([("building", "yes"), ("amenity", "cafe")]);
+        let only_buildings: LayerSet = [Layer::Building].into_iter().collect();
+        let got: Vec<_> = classify(&kv, only_buildings)
+            .iter()
+            .map(|c| c.kind)
+            .collect();
+        assert_eq!(got, [FeatureKind::Building(BuildingKind::Yes)]);
+    }
+
+    #[test]
+    fn unknown_values_keep_raw_value() {
+        let kv = KeyValues::scan([("amenity", "bench")]);
+        let c = classify(&kv, LayerSet::all())[0];
+        assert_eq!(c.kind, FeatureKind::Amenity(AmenityKind::Other));
+        assert_eq!((c.key, c.value), ("amenity", "bench"));
+    }
+
+    #[test]
+    fn area_semantics() {
+        let first = |tags: &[(&str, &str)]| {
+            let kv = KeyValues::scan(tags.iter().copied());
+            let c = classify(&kv, LayerSet::all())[0];
+            closed_way_is_area(&c, kv.area())
+        };
+        // Area keys.
+        assert!(first(&[("amenity", "school")]));
+        assert!(first(&[("leisure", "playground")]));
+        assert!(first(&[("shop", "mall")]));
+        assert!(first(&[("building", "yes")]));
+        assert!(first(&[("natural", "wood")]));
+        // Line keys and exceptions.
+        assert!(!first(&[("highway", "residential")]));
+        assert!(!first(&[("natural", "coastline")]));
+        assert!(!first(&[("leisure", "track")]));
+        assert!(!first(&[("boundary", "administrative")]));
+        assert!(first(&[("railway", "platform")]));
+        // Explicit overrides.
+        assert!(first(&[("highway", "pedestrian"), ("area", "yes")]));
+        assert!(!first(&[("amenity", "parking"), ("area", "no")]));
     }
 }

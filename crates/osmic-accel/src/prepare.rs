@@ -5,20 +5,16 @@
 //! Items map to units through a [`Plan`], which is also what reassembles
 //! unit results into polygons-with-holes / multi-part lines.
 
-use std::f64::consts::PI;
-
 use geo_types::{LineString, Polygon};
 use osmic_core::geometry::Geometry;
+use osmic_core::mercator::{lat_to_unit_y, lon_to_unit_x};
 
-use crate::clip::{ClipOptions, WorkItem, MAX_ZOOM};
+use crate::clip::{ClipOptions, MAX_ZOOM, WorkItem};
 use crate::error::{AccelError, AccelResult};
 
 /// Largest supported tile extent. 2^24 keeps tile-local integers exactly
 /// representable in f32.
 const MAX_EXTENT: u32 = 1 << 24;
-
-/// Latitude limit of Web Mercator.
-const MAX_LAT: f64 = 85.051_129;
 
 /// Axis-aligned clip rectangle in tile-local space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,9 +52,9 @@ pub(crate) struct Unit {
 /// How an item's results are assembled from its units.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Plan {
-    /// A point, already tested against the clip box on the host (a GPU
-    /// round-trip for one containment test would cost far more than it saves).
-    Point(Option<[f32; 2]>),
+    /// Points inside the clip box, tested on the host (a GPU round-trip
+    /// for a containment test would cost far more than it saves).
+    Points(Vec<[f32; 2]>),
     /// `count` consecutive line units starting at `first_unit`.
     Lines { first_unit: u32, count: u32 },
     /// Consecutive ring units; `ring_counts[i]` rings (exterior first) per
@@ -74,7 +70,7 @@ impl Plan {
     #[cfg(osmic_metallib)]
     pub(crate) fn unit_range(&self) -> std::ops::Range<usize> {
         match self {
-            Plan::Point(_) => 0..0,
+            Plan::Points(_) => 0..0,
             Plan::Lines { first_unit, count } => {
                 *first_unit as usize..(*first_unit + *count) as usize
             }
@@ -115,9 +111,8 @@ impl TileProjection {
                 "non-finite coordinate ({lon}, {lat})"
             )));
         }
-        let lat_rad = lat.clamp(-MAX_LAT, MAX_LAT).to_radians();
-        let mx = (lon + 180.0) / 360.0;
-        let my = (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / PI) / 2.0;
+        let mx = lon_to_unit_x(lon);
+        let my = lat_to_unit_y(lat);
         Ok([
             ((mx * self.n - self.tx) * self.extent) as f32,
             ((my * self.n - self.ty) * self.extent) as f32,
@@ -179,7 +174,23 @@ impl Prepared {
         let plan = match item.geometry {
             Geometry::Point(p) => {
                 let projected = proj.project(p.x(), p.y())?;
-                Plan::Point(bounds.contains(projected).then_some(projected))
+                Plan::Points(
+                    bounds
+                        .contains(projected)
+                        .then_some(projected)
+                        .into_iter()
+                        .collect(),
+                )
+            }
+            Geometry::MultiPoint(mp) => {
+                let mut inside = Vec::with_capacity(mp.0.len());
+                for p in &mp.0 {
+                    let projected = proj.project(p.x(), p.y())?;
+                    if bounds.contains(projected) {
+                        inside.push(projected);
+                    }
+                }
+                Plan::Points(inside)
             }
             Geometry::Line(line) => {
                 let first_unit = self.next_unit_index()?;
@@ -188,6 +199,14 @@ impl Prepared {
                     first_unit,
                     count: u32::from(pushed),
                 }
+            }
+            Geometry::MultiLine(lines) => {
+                let first_unit = self.next_unit_index()?;
+                let mut count = 0u32;
+                for line in &lines.0 {
+                    count += u32::from(self.push_line(line, &proj, bounds)?);
+                }
+                Plan::Lines { first_unit, count }
             }
             Geometry::Polygon(poly) => {
                 let first_unit = self.next_unit_index()?;
@@ -307,7 +326,7 @@ impl Prepared {
 
 #[cfg(test)]
 mod tests {
-    use geo_types::{polygon, Coord, MultiPolygon};
+    use geo_types::{Coord, MultiPolygon, polygon};
 
     use super::*;
 

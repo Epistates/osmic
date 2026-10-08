@@ -4,7 +4,7 @@
 mod common;
 
 use geo_types::MultiPolygon;
-use osmic_accel::{clip_batch_cpu, AccelError, Backend, ClipOptions, Clipper, GpuAccelerator};
+use osmic_accel::{AccelError, Backend, ClipOptions, Clipper, GpuAccelerator, clip_batch_cpu};
 use osmic_core::geometry::Geometry;
 
 use common::*;

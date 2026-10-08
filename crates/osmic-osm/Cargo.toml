@@ -14,11 +14,16 @@ description = "OSM data model, PBF parsing, tag system, and classification"
 
 [features]
 default = ["native"]
-native = ["dep:osmpbf", "dep:rayon"]
+native = ["dep:osmpbf", "dep:rayon", "dep:flate2"]
 
 [dependencies]
 osmic-core = { workspace = true }
 osmic-geo = { workspace = true }
+osmic-index = { workspace = true }
+flate2 = { workspace = true, optional = true }
+rstar = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
 osmpbf = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 lasso = { workspace = true }
@@ -28,3 +33,7 @@ smallvec = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,41 +1,57 @@
-use geo::Simplify;
-use geo_types::{LineString, MultiPolygon, Polygon};
+//! Ramer–Douglas–Peucker simplification.
+//!
+//! The tolerance is in the coordinate units of the input. Callers that
+//! simplify for display should project first and pass a tolerance in
+//! pixels (the tile renderer does this per zoom level); simplifying raw
+//! degrees distorts shapes away from the equator.
 
-/// Simplify a line string using the Ramer-Douglas-Peucker algorithm.
+use geo::Simplify;
+use geo_types::{LineString, MultiLineString, MultiPolygon, Polygon};
+use osmic_core::Geometry;
+
+/// Simplify a line string.
 pub fn simplify_line(line: &LineString<f64>, tolerance: f64) -> LineString<f64> {
     line.simplify(tolerance)
 }
 
-/// Simplify a polygon (exterior and holes) using RDP.
-pub fn simplify_polygon(poly: &Polygon<f64>, tolerance: f64) -> Polygon<f64> {
-    poly.simplify(tolerance)
+/// Simplify a polygon's exterior and holes. Rings that collapse below four
+/// coordinates are dropped (a collapsed exterior yields `None`).
+pub fn simplify_polygon(poly: &Polygon<f64>, tolerance: f64) -> Option<Polygon<f64>> {
+    let exterior = poly.exterior().simplify(tolerance);
+    if exterior.0.len() < 4 {
+        return None;
+    }
+    let interiors = poly
+        .interiors()
+        .iter()
+        .map(|r| r.simplify(tolerance))
+        .filter(|r| r.0.len() >= 4)
+        .collect();
+    Some(Polygon::new(exterior, interiors))
 }
 
-/// Simplify a multi-polygon.
-pub fn simplify_multi_polygon(mp: &MultiPolygon<f64>, tolerance: f64) -> MultiPolygon<f64> {
-    mp.simplify(tolerance)
-}
-
-/// Compute an appropriate simplification tolerance for the given zoom level.
-///
-/// At zoom 0, a tile covers ~360 degrees; at zoom 14, ~0.022 degrees.
-/// We target sub-pixel precision at MVT extent of 4096.
-pub fn tolerance_for_zoom(zoom: u8) -> f64 {
-    let tile_degrees = 360.0 / (1u64 << zoom) as f64;
-    tile_degrees / 4096.0
-}
-
-/// Simplify geometry at the given zoom level.
-pub fn simplify_geometry(geom: &osmic_core::Geometry, zoom: u8) -> osmic_core::Geometry {
-    let tol = tolerance_for_zoom(zoom);
+/// Simplify any geometry. Returns `None` if nothing meaningful remains
+/// (every polygon collapsed or every line shrank to a single point).
+pub fn simplify_geometry(geom: &Geometry, tolerance: f64) -> Option<Geometry> {
+    let keep_line = |l: LineString<f64>| (l.0.len() >= 2).then_some(l);
     match geom {
-        osmic_core::Geometry::Point(p) => osmic_core::Geometry::Point(*p),
-        osmic_core::Geometry::Line(ls) => osmic_core::Geometry::Line(simplify_line(ls, tol)),
-        osmic_core::Geometry::Polygon(poly) => {
-            osmic_core::Geometry::Polygon(simplify_polygon(poly, tol))
+        Geometry::Point(_) | Geometry::MultiPoint(_) => Some(geom.clone()),
+        Geometry::Line(ls) => keep_line(simplify_line(ls, tolerance)).map(Geometry::Line),
+        Geometry::MultiLine(mls) => {
+            let parts: Vec<_> = mls
+                .0
+                .iter()
+                .filter_map(|l| keep_line(simplify_line(l, tolerance)))
+                .collect();
+            (!parts.is_empty()).then_some(Geometry::MultiLine(MultiLineString(parts)))
         }
-        osmic_core::Geometry::MultiPolygon(mp) => {
-            osmic_core::Geometry::MultiPolygon(simplify_multi_polygon(mp, tol))
+        Geometry::Polygon(p) => simplify_polygon(p, tolerance).map(Geometry::Polygon),
+        Geometry::MultiPolygon(mp) => {
+            let polys: Vec<_> =
+                mp.0.iter()
+                    .filter_map(|p| simplify_polygon(p, tolerance))
+                    .collect();
+            (!polys.is_empty()).then_some(Geometry::MultiPolygon(MultiPolygon(polys)))
         }
     }
 }
@@ -45,10 +61,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tolerance_decreases_with_zoom() {
-        let t0 = tolerance_for_zoom(0);
-        let t14 = tolerance_for_zoom(14);
-        assert!(t0 > t14);
-        assert!(t14 > 0.0);
+    fn collinear_points_are_removed() {
+        let l = LineString::from(vec![(0.0, 0.0), (1.0, 0.0001), (2.0, 0.0)]);
+        assert_eq!(simplify_line(&l, 0.01).0.len(), 2);
+    }
+
+    #[test]
+    fn tiny_polygon_collapses_to_none() {
+        let p = Polygon::new(
+            LineString::from(vec![
+                (0.0, 0.0),
+                (0.1, 0.0),
+                (0.1, 0.1),
+                (0.0, 0.1),
+                (0.0, 0.0),
+            ]),
+            vec![],
+        );
+        assert!(simplify_polygon(&p, 10.0).is_none());
+        assert!(simplify_polygon(&p, 0.001).is_some());
     }
 }

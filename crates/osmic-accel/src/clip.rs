@@ -109,6 +109,8 @@ pub enum ClippedGeometry {
     Empty,
     /// A point inside the clip box.
     Point([f32; 2]),
+    /// Several points inside the clip box (from a multi-point input).
+    MultiPoint(Vec<[f32; 2]>),
     /// One or more polylines (each at least 2 vertices). Every contiguous run
     /// of the input line inside the clip box is its own part, so no
     /// connecting segments are invented where the line leaves and re-enters
@@ -185,8 +187,11 @@ pub(crate) trait UnitResults {
 /// Build the public result for one item from its unit results.
 pub(crate) fn assemble(plan: &Plan, results: &impl UnitResults) -> ClippedGeometry {
     match plan {
-        Plan::Point(Some(p)) => ClippedGeometry::Point(*p),
-        Plan::Point(None) => ClippedGeometry::Empty,
+        Plan::Points(points) => match points.as_slice() {
+            [] => ClippedGeometry::Empty,
+            [p] => ClippedGeometry::Point(*p),
+            _ => ClippedGeometry::MultiPoint(points.clone()),
+        },
         Plan::Lines { first_unit, count } => {
             let mut lines = Vec::new();
             for unit in *first_unit..*first_unit + *count {

@@ -21,6 +21,10 @@ impl Color {
     /// Parse a hex color string (#RGB, #RGBA, #RRGGBB, #RRGGBBAA).
     pub fn from_hex(hex: &str) -> Option<Self> {
         let hex = hex.strip_prefix('#').unwrap_or(hex);
+        // Byte-indexed slicing below is only valid on ASCII input.
+        if !hex.is_ascii() {
+            return None;
+        }
         match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
@@ -176,6 +180,12 @@ mod tests {
     fn from_hex_invalid_chars_returns_none() {
         assert!(Color::from_hex("#zzzzzz").is_none());
         assert!(Color::from_hex("#gg0000").is_none());
+    }
+
+    #[test]
+    fn from_hex_non_ascii_returns_none_instead_of_panicking() {
+        assert!(Color::from_hex("é1").is_none());
+        assert!(Color::from_hex("#ffé").is_none());
     }
 
     // --- Shorthand vs full-form equivalence ---

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use lasso::{Spur, ThreadedRodeo};
 use smallvec::SmallVec;
 
@@ -286,6 +288,100 @@ impl Default for Tags {
     }
 }
 
+/// Tag keys kept by [`TagRetention::Curated`]: every classification key
+/// (so a feature's raw class value is available), names, references and
+/// the address/contact fields written into vector tiles.
+pub const CURATED_KEYS: &[&str] = &[
+    // Classification keys.
+    "highway",
+    "building",
+    "waterway",
+    "water",
+    "natural",
+    "landuse",
+    "railway",
+    "amenity",
+    "leisure",
+    "boundary",
+    "place",
+    "shop",
+    "tourism",
+    "office",
+    "healthcare",
+    "craft",
+    "historic",
+    "club",
+    "emergency",
+    "education",
+    // Identity and labelling.
+    "name",
+    "ref",
+    "admin_level",
+    // Address and contact.
+    "addr:street",
+    "addr:housenumber",
+    "addr:city",
+    "addr:postcode",
+    "phone",
+    "contact:phone",
+    "website",
+    "contact:website",
+    "opening_hours",
+    "cuisine",
+    "brand",
+    "operator",
+    "description",
+];
+
+/// Which tags a pipeline keeps on the features it produces.
+///
+/// Interned strings live for the whole run, so keeping only what the output
+/// needs bounds memory on large inputs.
+#[derive(Debug, Clone, Default)]
+pub enum TagRetention {
+    /// Keep every tag.
+    #[default]
+    All,
+    /// Keep only [`CURATED_KEYS`].
+    Curated,
+    /// Keep only the listed keys.
+    Keys(Arc<[String]>),
+}
+
+impl TagRetention {
+    /// Whether tags with this key are kept.
+    pub fn keeps(&self, key: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Curated => CURATED_KEYS.contains(&key),
+            Self::Keys(keys) => keys.iter().any(|k| k == key),
+        }
+    }
+}
+
+impl TagStore {
+    /// Intern the retained subset of `tags`.
+    pub fn intern_tags<'a>(
+        &self,
+        tags: impl IntoIterator<Item = (&'a str, &'a str)>,
+        retention: &TagRetention,
+    ) -> Tags {
+        let mut out = Tags::new();
+        for (k, v) in tags {
+            if retention.keeps(k) {
+                out.push(self.intern_key(k), self.intern_value(v));
+            }
+        }
+        out
+    }
+
+    /// Resolve every tag of `tags` to string slices.
+    pub fn resolve_tags<'s>(&'s self, tags: &Tags) -> impl Iterator<Item = (&'s str, &'s str)> {
+        tags.iter()
+            .map(|(k, v)| (self.resolve(*k), self.resolve(*v)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +485,29 @@ mod tests {
         // name was never pushed.
         assert!(tags.get(name_key).is_none());
         assert!(!tags.contains(name_key));
+    }
+
+    #[test]
+    fn retention_filters_interned_tags() {
+        let store = TagStore::new();
+        let raw = [
+            ("name", "Cafe"),
+            ("amenity", "cafe"),
+            ("fixme", "check"),
+            ("note", "x"),
+        ];
+        let all = store.intern_tags(raw, &TagRetention::All);
+        let curated = store.intern_tags(raw, &TagRetention::Curated);
+        let custom = store.intern_tags(raw, &TagRetention::Keys(vec!["note".to_string()].into()));
+        assert_eq!(all.len(), 4);
+        assert_eq!(curated.len(), 2);
+        assert_eq!(custom.len(), 1);
+        let resolved: Vec<_> = store.resolve_tags(&curated).collect();
+        assert_eq!(resolved, [("name", "Cafe"), ("amenity", "cafe")]);
+        // Nothing outside the retained set was interned by the curated pass.
+        let fresh = TagStore::new();
+        fresh.intern_tags(raw, &TagRetention::Curated);
+        assert!(fresh.get("fixme").is_none());
     }
 
     // --- Tags: capacity exceeding inline SmallVec ---

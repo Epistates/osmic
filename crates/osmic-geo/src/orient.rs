@@ -55,8 +55,11 @@ pub fn orient_geometry(geom: &mut OsmicGeometry) {
     match geom {
         OsmicGeometry::Polygon(p) => orient_polygon(p),
         OsmicGeometry::MultiPolygon(mp) => orient_multipolygon(mp),
-        // Point and Line don't have a meaningful winding to correct.
-        OsmicGeometry::Point(_) | OsmicGeometry::Line(_) => {}
+        // Points and lines don't have a meaningful winding to correct.
+        OsmicGeometry::Point(_)
+        | OsmicGeometry::MultiPoint(_)
+        | OsmicGeometry::Line(_)
+        | OsmicGeometry::MultiLine(_) => {}
     }
 }
 

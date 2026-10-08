@@ -1,270 +1,316 @@
-use geo_types::{Coord, LineString, MultiPolygon, Polygon};
+//! Planar clipping of points, lines and polygons to axis-aligned rectangles.
+//!
+//! Everything here works in any planar coordinate space — geographic degrees
+//! or projected tile pixels — so the same code serves geographic clipping and
+//! the tile renderer. A [`BBox`] is used as the rectangle type; in a
+//! projected space read `min_lon`/`max_lon` as x and `min_lat`/`max_lat` as y.
+//!
+//! The primitives clip to a *band* along one axis (`min <= coord <= max`); a
+//! rectangle is a band in x followed by a band in y. Bands are also what the
+//! tile renderer needs to split geometry recursively into tile columns and
+//! rows.
+//!
+//! Semantics:
+//! - Lines that leave and re-enter the rectangle become several parts; no
+//!   part is ever dropped.
+//! - Polygon rings are clipped with Sutherland–Hodgman. Concave rings that
+//!   cross the rectangle several times stay one ring joined by zero-width
+//!   edges along the rectangle boundary — the standard trade-off made by
+//!   geojson-vt and Planetiler; when clipping to a buffered tile those edges
+//!   fall in the invisible buffer. Ring orientation is preserved.
+//! - Intersection points are computed from the edge in a canonical
+//!   direction, so the two tiles sharing a boundary produce bit-identical
+//!   points for the same edge.
+
+use geo_types::{Coord, LineString, MultiLineString, MultiPoint, MultiPolygon, Polygon};
 
 use crate::bbox::BBox;
 use crate::geometry::Geometry;
 
-/// Cohen-Sutherland region codes.
-const INSIDE: u8 = 0b0000;
-const LEFT: u8 = 0b0001;
-const RIGHT: u8 = 0b0010;
-const BOTTOM: u8 = 0b0100;
-const TOP: u8 = 0b1000;
-
-fn region_code(x: f64, y: f64, bbox: &BBox) -> u8 {
-    let mut code = INSIDE;
-    if x < bbox.min_lon {
-        code |= LEFT;
-    } else if x > bbox.max_lon {
-        code |= RIGHT;
-    }
-    if y < bbox.min_lat {
-        code |= BOTTOM;
-    } else if y > bbox.max_lat {
-        code |= TOP;
-    }
-    code
+/// Coordinate axis for band clipping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    X,
+    Y,
 }
 
-/// Clip a line segment to a bbox using Cohen-Sutherland.
-/// Returns Some((x0,y0,x1,y1)) if visible, None if fully outside.
-fn clip_segment(
-    mut x0: f64,
-    mut y0: f64,
-    mut x1: f64,
-    mut y1: f64,
-    bbox: &BBox,
-) -> Option<(f64, f64, f64, f64)> {
-    let mut code0 = region_code(x0, y0, bbox);
-    let mut code1 = region_code(x1, y1, bbox);
-
-    loop {
-        if (code0 | code1) == 0 {
-            return Some((x0, y0, x1, y1));
-        }
-        if (code0 & code1) != 0 {
-            return None;
-        }
-
-        let code_out = if code0 != 0 { code0 } else { code1 };
-        let (x, y);
-
-        if code_out & TOP != 0 {
-            x = x0 + (x1 - x0) * (bbox.max_lat - y0) / (y1 - y0);
-            y = bbox.max_lat;
-        } else if code_out & BOTTOM != 0 {
-            x = x0 + (x1 - x0) * (bbox.min_lat - y0) / (y1 - y0);
-            y = bbox.min_lat;
-        } else if code_out & RIGHT != 0 {
-            y = y0 + (y1 - y0) * (bbox.max_lon - x0) / (x1 - x0);
-            x = bbox.max_lon;
-        } else {
-            y = y0 + (y1 - y0) * (bbox.min_lon - x0) / (x1 - x0);
-            x = bbox.min_lon;
-        }
-
-        if code_out == code0 {
-            x0 = x;
-            y0 = y;
-            code0 = region_code(x0, y0, bbox);
-        } else {
-            x1 = x;
-            y1 = y;
-            code1 = region_code(x1, y1, bbox);
+impl Axis {
+    #[inline]
+    fn get(self, c: Coord<f64>) -> f64 {
+        match self {
+            Self::X => c.x,
+            Self::Y => c.y,
         }
     }
 }
 
-/// Clip a polyline to a bbox, returning zero or more clipped segments.
-pub fn clip_line(line: &LineString<f64>, bbox: &BBox) -> Vec<LineString<f64>> {
-    let coords: Vec<_> = line.coords().collect();
-    if coords.len() < 2 {
-        return vec![];
+/// Point where segment `a`–`b` crosses `axis == k`. The axis coordinate is
+/// set exactly to `k`, and the computation is ordered by axis value so the
+/// result does not depend on the segment's direction.
+#[inline]
+fn intersect(a: Coord<f64>, b: Coord<f64>, axis: Axis, k: f64) -> Coord<f64> {
+    let (lo, hi) = if axis.get(a) <= axis.get(b) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let t = (k - axis.get(lo)) / (axis.get(hi) - axis.get(lo));
+    match axis {
+        Axis::X => Coord {
+            x: k,
+            y: lo.y + t * (hi.y - lo.y),
+        },
+        Axis::Y => Coord {
+            x: lo.x + t * (hi.x - lo.x),
+            y: k,
+        },
+    }
+}
+
+/// Clip a polyline to `min <= axis <= max`, appending every resulting part
+/// (each with at least two points) to `out`.
+pub fn clip_line_band(
+    pts: &[Coord<f64>],
+    axis: Axis,
+    min: f64,
+    max: f64,
+    out: &mut Vec<Vec<Coord<f64>>>,
+) {
+    fn flush(part: &mut Vec<Coord<f64>>, out: &mut Vec<Vec<Coord<f64>>>) {
+        if part.len() >= 2 {
+            out.push(std::mem::take(part));
+        } else {
+            part.clear();
+        }
     }
 
-    let mut result = Vec::new();
-    let mut current_segment: Vec<Coord<f64>> = Vec::new();
+    let mut part: Vec<Coord<f64>> = Vec::new();
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let (ak, bk) = (axis.get(a), axis.get(b));
+        let a_in = ak >= min && ak <= max;
+        let b_in = bk >= min && bk <= max;
 
-    for window in coords.windows(2) {
-        let (c0, c1) = (window[0], window[1]);
-        if let Some((x0, y0, x1, y1)) = clip_segment(c0.x, c0.y, c1.x, c1.y, bbox) {
-            let start = Coord { x: x0, y: y0 };
-            let end = Coord { x: x1, y: y1 };
+        // Where the segment enters the band. A segment that starts below
+        // and ends above (or vice versa) enters at the near edge and is
+        // given its exit point below.
+        let start = if a_in {
+            a
+        } else if ak < min && bk >= min {
+            intersect(a, b, axis, min)
+        } else if ak > max && bk <= max {
+            intersect(a, b, axis, max)
+        } else {
+            // Both endpoints on the same side: nothing inside.
+            flush(&mut part, out);
+            continue;
+        };
 
-            if current_segment.is_empty() {
-                current_segment.push(start);
-            } else if (current_segment.last().unwrap().x - start.x).abs() > 1e-10
-                || (current_segment.last().unwrap().y - start.y).abs() > 1e-10
-            {
-                if current_segment.len() >= 2 {
-                    result.push(LineString::new(std::mem::take(&mut current_segment)));
-                } else {
-                    current_segment.clear();
-                }
-                current_segment.push(start);
+        // Where it leaves (if it leaves through either edge).
+        let end = if b_in {
+            b
+        } else if bk > max {
+            intersect(a, b, axis, max)
+        } else {
+            intersect(a, b, axis, min)
+        };
+
+        if part.last() != Some(&start) {
+            flush(&mut part, out);
+            part.push(start);
+        }
+        if end != start {
+            part.push(end);
+        }
+        if !b_in {
+            flush(&mut part, out);
+        }
+    }
+    flush(&mut part, out);
+}
+
+/// Sutherland–Hodgman against one half-plane.
+fn clip_ring_half_plane(
+    input: &[Coord<f64>],
+    axis: Axis,
+    k: f64,
+    keep_greater: bool,
+) -> Vec<Coord<f64>> {
+    let mut out = Vec::with_capacity(input.len() + 4);
+    let Some(&last) = input.last() else {
+        return out;
+    };
+    let inside = |c: Coord<f64>| {
+        if keep_greater {
+            axis.get(c) >= k
+        } else {
+            axis.get(c) <= k
+        }
+    };
+    let mut prev = last;
+    let mut prev_in = inside(prev);
+    for &cur in input {
+        let cur_in = inside(cur);
+        if cur_in {
+            if !prev_in {
+                out.push(intersect(prev, cur, axis, k));
             }
-            current_segment.push(end);
-        } else if current_segment.len() >= 2 {
-            result.push(LineString::new(std::mem::take(&mut current_segment)));
-        } else {
-            current_segment.clear();
+            out.push(cur);
+        } else if prev_in {
+            out.push(intersect(prev, cur, axis, k));
         }
+        prev = cur;
+        prev_in = cur_in;
     }
-
-    if current_segment.len() >= 2 {
-        result.push(LineString::new(current_segment));
-    }
-
-    result
+    out
 }
 
-/// Clip a polygon to a bbox using Sutherland-Hodgman algorithm.
-pub fn clip_polygon(poly: &Polygon<f64>, bbox: &BBox) -> Option<Polygon<f64>> {
-    let exterior = sutherland_hodgman(&poly.exterior().0, bbox);
-    if exterior.len() < 3 {
+/// Strip the closing vertex and consecutive duplicates; returns an open ring.
+fn open_ring(ring: &[Coord<f64>]) -> Vec<Coord<f64>> {
+    let mut v: Vec<Coord<f64>> = Vec::with_capacity(ring.len());
+    for &c in ring {
+        if v.last() != Some(&c) {
+            v.push(c);
+        }
+    }
+    while v.len() > 1 && v.first() == v.last() {
+        v.pop();
+    }
+    v
+}
+
+/// Twice the signed area of an open ring (positive = counter-clockwise in a
+/// y-up space).
+pub fn ring_signed_area_2x(ring: &[Coord<f64>]) -> f64 {
+    let n = ring.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        sum += a.x * b.y - b.x * a.y;
+    }
+    sum
+}
+
+/// Close an open ring if it still describes an area; otherwise empty.
+fn close_ring(mut v: Vec<Coord<f64>>) -> Vec<Coord<f64>> {
+    v.dedup();
+    while v.len() > 1 && v.first() == v.last() {
+        v.pop();
+    }
+    if v.len() < 3 || ring_signed_area_2x(&v) == 0.0 {
+        return Vec::new();
+    }
+    let first = v[0];
+    v.push(first);
+    v
+}
+
+/// Clip a ring (open or closed) to `min <= axis <= max`. Returns a closed
+/// ring, or an empty vector if nothing with positive area remains.
+pub fn clip_ring_band(ring: &[Coord<f64>], axis: Axis, min: f64, max: f64) -> Vec<Coord<f64>> {
+    let open = open_ring(ring);
+    let lower = clip_ring_half_plane(&open, axis, min, true);
+    let both = clip_ring_half_plane(&lower, axis, max, false);
+    close_ring(both)
+}
+
+/// Clip a ring to a rectangle. Returns a closed ring or an empty vector.
+pub fn clip_ring(ring: &[Coord<f64>], rect: &BBox) -> Vec<Coord<f64>> {
+    let open = open_ring(ring);
+    let x1 = clip_ring_half_plane(&open, Axis::X, rect.min_lon, true);
+    let x2 = clip_ring_half_plane(&x1, Axis::X, rect.max_lon, false);
+    let y1 = clip_ring_half_plane(&x2, Axis::Y, rect.min_lat, true);
+    let y2 = clip_ring_half_plane(&y1, Axis::Y, rect.max_lat, false);
+    close_ring(y2)
+}
+
+/// Clip a polyline to a rectangle, returning every part that remains.
+pub fn clip_line(line: &LineString<f64>, rect: &BBox) -> Vec<LineString<f64>> {
+    let mut x_parts = Vec::new();
+    clip_line_band(&line.0, Axis::X, rect.min_lon, rect.max_lon, &mut x_parts);
+    let mut parts = Vec::new();
+    for p in &x_parts {
+        clip_line_band(p, Axis::Y, rect.min_lat, rect.max_lat, &mut parts);
+    }
+    parts.into_iter().map(LineString::new).collect()
+}
+
+/// Clip a polygon to a rectangle. Holes that vanish are dropped; returns
+/// `None` if the exterior vanishes.
+pub fn clip_polygon(poly: &Polygon<f64>, rect: &BBox) -> Option<Polygon<f64>> {
+    let exterior = clip_ring(&poly.exterior().0, rect);
+    if exterior.is_empty() {
         return None;
     }
-
-    let interiors: Vec<_> = poly
+    let interiors = poly
         .interiors()
         .iter()
-        .filter_map(|ring| {
-            let clipped = sutherland_hodgman(&ring.0, bbox);
-            if clipped.len() >= 3 {
-                Some(LineString::new(clipped))
-            } else {
-                None
-            }
-        })
+        .map(|r| clip_ring(&r.0, rect))
+        .filter(|r| !r.is_empty())
+        .map(LineString::new)
         .collect();
-
     Some(Polygon::new(LineString::new(exterior), interiors))
 }
 
-/// Clip a geometry to a bounding box with an optional buffer.
+/// Grow a rectangle by `fraction` of its width/height on every side.
+pub fn buffered(rect: &BBox, fraction: f64) -> BBox {
+    if fraction <= 0.0 {
+        return *rect;
+    }
+    let bw = rect.width() * fraction;
+    let bh = rect.height() * fraction;
+    BBox::new(
+        rect.min_lon - bw,
+        rect.min_lat - bh,
+        rect.max_lon + bw,
+        rect.max_lat + bh,
+    )
+}
+
+/// Clip any geometry to `rect` grown by `buffer_fraction`.
 ///
-/// Returns `None` if the geometry is entirely outside the bbox.
-/// For lines, may return multiple segments if the line crosses the bbox boundary.
-pub fn clip_geometry(geom: &Geometry, bbox: &BBox, buffer_fraction: f64) -> Option<Geometry> {
-    let buffered = if buffer_fraction > 0.0 {
-        let bw = bbox.width() * buffer_fraction;
-        let bh = bbox.height() * buffer_fraction;
-        BBox::new(
-            bbox.min_lon - bw,
-            bbox.min_lat - bh,
-            bbox.max_lon + bw,
-            bbox.max_lat + bh,
-        )
-    } else {
-        *bbox
+/// Returns `None` if nothing remains. Lines that cross the rectangle several
+/// times come back as [`Geometry::MultiLine`].
+pub fn clip_geometry(geom: &Geometry, rect: &BBox, buffer_fraction: f64) -> Option<Geometry> {
+    let rect = buffered(rect, buffer_fraction);
+    let lines = |ls: &mut dyn Iterator<Item = &LineString<f64>>| {
+        let parts: Vec<LineString<f64>> = ls.flat_map(|l| clip_line(l, &rect)).collect();
+        match parts.len() {
+            0 => None,
+            1 => parts.into_iter().next().map(Geometry::Line),
+            _ => Some(Geometry::MultiLine(MultiLineString(parts))),
+        }
     };
-
+    let polygons = |ps: &mut dyn Iterator<Item = &Polygon<f64>>| {
+        let polys: Vec<Polygon<f64>> = ps.filter_map(|p| clip_polygon(p, &rect)).collect();
+        match polys.len() {
+            0 => None,
+            1 => polys.into_iter().next().map(Geometry::Polygon),
+            _ => Some(Geometry::MultiPolygon(MultiPolygon(polys))),
+        }
+    };
     match geom {
-        Geometry::Point(p) => {
-            if buffered.contains_point(p.x(), p.y()) {
-                Some(Geometry::Point(*p))
-            } else {
-                None
+        Geometry::Point(p) => rect.contains_point(p.x(), p.y()).then_some(geom.clone()),
+        Geometry::MultiPoint(mp) => {
+            let pts: Vec<_> =
+                mp.0.iter()
+                    .filter(|p| rect.contains_point(p.x(), p.y()))
+                    .copied()
+                    .collect();
+            match pts.len() {
+                0 => None,
+                1 => Some(Geometry::Point(pts[0])),
+                _ => Some(Geometry::MultiPoint(MultiPoint(pts))),
             }
         }
-        Geometry::Line(ls) => {
-            let segments = clip_line(ls, &buffered);
-            if segments.is_empty() {
-                None
-            } else if segments.len() == 1 {
-                Some(Geometry::Line(segments.into_iter().next().unwrap()))
-            } else {
-                // Return the longest segment to keep the label position meaningful
-                let longest = segments
-                    .into_iter()
-                    .max_by_key(|s| s.coords().count())
-                    .unwrap();
-                Some(Geometry::Line(longest))
-            }
-        }
-        Geometry::Polygon(poly) => clip_polygon(poly, &buffered).map(Geometry::Polygon),
-        Geometry::MultiPolygon(mp) => {
-            let clipped: Vec<Polygon<f64>> = mp
-                .iter()
-                .filter_map(|poly| clip_polygon(poly, &buffered))
-                .collect();
-            if clipped.is_empty() {
-                None
-            } else {
-                Some(Geometry::MultiPolygon(MultiPolygon::new(clipped)))
-            }
-        }
-    }
-}
-
-fn sutherland_hodgman(vertices: &[Coord<f64>], bbox: &BBox) -> Vec<Coord<f64>> {
-    if vertices.is_empty() {
-        return vec![];
-    }
-
-    let mut output = vertices.to_vec();
-
-    type InsideFn = fn(&Coord<f64>, &BBox) -> bool;
-    type IntersectFn = fn(&Coord<f64>, &Coord<f64>, &BBox) -> Coord<f64>;
-
-    // Clip against each edge: left, right, bottom, top
-    let edges: [(InsideFn, IntersectFn); 4] = [
-        (
-            |p, b| p.x >= b.min_lon,
-            |s, e, b| intersect_x(s, e, b.min_lon),
-        ),
-        (
-            |p, b| p.x <= b.max_lon,
-            |s, e, b| intersect_x(s, e, b.max_lon),
-        ),
-        (
-            |p, b| p.y >= b.min_lat,
-            |s, e, b| intersect_y(s, e, b.min_lat),
-        ),
-        (
-            |p, b| p.y <= b.max_lat,
-            |s, e, b| intersect_y(s, e, b.max_lat),
-        ),
-    ];
-
-    for (inside, intersect) in &edges {
-        if output.is_empty() {
-            break;
-        }
-
-        let input = std::mem::take(&mut output);
-        let len = input.len();
-
-        for i in 0..len {
-            let current = &input[i];
-            let previous = &input[(i + len - 1) % len];
-
-            if inside(current, bbox) {
-                if !inside(previous, bbox) {
-                    output.push(intersect(previous, current, bbox));
-                }
-                output.push(*current);
-            } else if inside(previous, bbox) {
-                output.push(intersect(previous, current, bbox));
-            }
-        }
-    }
-
-    output
-}
-
-fn intersect_x(a: &Coord<f64>, b: &Coord<f64>, x: f64) -> Coord<f64> {
-    let t = (x - a.x) / (b.x - a.x);
-    Coord {
-        x,
-        y: a.y + t * (b.y - a.y),
-    }
-}
-
-fn intersect_y(a: &Coord<f64>, b: &Coord<f64>, y: f64) -> Coord<f64> {
-    let t = (y - a.y) / (b.y - a.y);
-    Coord {
-        x: a.x + t * (b.x - a.x),
-        y,
+        Geometry::Line(ls) => lines(&mut std::iter::once(ls)),
+        Geometry::MultiLine(mls) => lines(&mut mls.0.iter()),
+        Geometry::Polygon(p) => polygons(&mut std::iter::once(p)),
+        Geometry::MultiPolygon(mp) => polygons(&mut mp.0.iter()),
     }
 }
 
@@ -272,36 +318,162 @@ fn intersect_y(a: &Coord<f64>, b: &Coord<f64>, y: f64) -> Coord<f64> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_clip_line_inside() {
-        let bbox = BBox::new(-1.0, -1.0, 1.0, 1.0);
-        let line = LineString::new(vec![Coord { x: -0.5, y: -0.5 }, Coord { x: 0.5, y: 0.5 }]);
-        let result = clip_line(&line, &bbox);
-        assert_eq!(result.len(), 1);
+    fn c(x: f64, y: f64) -> Coord<f64> {
+        Coord { x, y }
+    }
+
+    fn unit() -> BBox {
+        BBox::new(0.0, 0.0, 10.0, 10.0)
     }
 
     #[test]
-    fn test_clip_line_outside() {
-        let bbox = BBox::new(-1.0, -1.0, 1.0, 1.0);
-        let line = LineString::new(vec![Coord { x: 2.0, y: 2.0 }, Coord { x: 3.0, y: 3.0 }]);
-        let result = clip_line(&line, &bbox);
-        assert!(result.is_empty());
+    fn line_inside_is_unchanged() {
+        let line = LineString::new(vec![c(1.0, 1.0), c(5.0, 5.0), c(9.0, 1.0)]);
+        assert_eq!(clip_line(&line, &unit()), vec![line]);
     }
 
     #[test]
-    fn test_clip_polygon_partial() {
-        let bbox = BBox::new(0.0, 0.0, 2.0, 2.0);
+    fn line_outside_vanishes() {
+        let line = LineString::new(vec![c(20.0, 20.0), c(30.0, 30.0)]);
+        assert!(clip_line(&line, &unit()).is_empty());
+    }
+
+    #[test]
+    fn line_leaving_and_reentering_keeps_both_parts() {
+        // Enters, exits through the top, re-enters, ends inside.
+        let line = LineString::new(vec![c(1.0, 5.0), c(3.0, 15.0), c(6.0, 15.0), c(8.0, 5.0)]);
+        let parts = clip_line(&line, &unit());
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert_eq!(parts[0].0.first(), Some(&c(1.0, 5.0)));
+        assert_eq!(parts[0].0.last().map(|p| p.y), Some(10.0));
+        assert_eq!(parts[1].0.first().map(|p| p.y), Some(10.0));
+        assert_eq!(parts[1].0.last(), Some(&c(8.0, 5.0)));
+    }
+
+    #[test]
+    fn segment_crossing_whole_band_is_kept() {
+        let line = LineString::new(vec![c(-5.0, 5.0), c(15.0, 5.0)]);
+        let parts = clip_line(&line, &unit());
+        assert_eq!(
+            parts,
+            vec![LineString::new(vec![c(0.0, 5.0), c(10.0, 5.0)])]
+        );
+    }
+
+    #[test]
+    fn clip_geometry_returns_multiline_for_multiple_parts() {
+        let g = Geometry::Line(LineString::new(vec![
+            c(1.0, 5.0),
+            c(1.0, 15.0),
+            c(9.0, 15.0),
+            c(9.0, 5.0),
+        ]));
+        match clip_geometry(&g, &unit(), 0.0) {
+            Some(Geometry::MultiLine(m)) => assert_eq!(m.0.len(), 2),
+            other => panic!("expected MultiLine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn polygon_partially_outside_is_cut_to_rect() {
         let poly = Polygon::new(
             LineString::new(vec![
-                Coord { x: -1.0, y: -1.0 },
-                Coord { x: 3.0, y: -1.0 },
-                Coord { x: 3.0, y: 3.0 },
-                Coord { x: -1.0, y: 3.0 },
-                Coord { x: -1.0, y: -1.0 },
+                c(-5.0, -5.0),
+                c(5.0, -5.0),
+                c(5.0, 5.0),
+                c(-5.0, 5.0),
+                c(-5.0, -5.0),
             ]),
             vec![],
         );
-        let result = clip_polygon(&poly, &bbox);
-        assert!(result.is_some());
+        let out = clip_polygon(&poly, &unit()).expect("overlaps");
+        let ring = &out.exterior().0;
+        assert_eq!(ring.first(), ring.last());
+        assert!(
+            ring.iter()
+                .all(|p| (0.0..=10.0).contains(&p.x) && (0.0..=10.0).contains(&p.y))
+        );
+        let area = ring_signed_area_2x(&ring[..ring.len() - 1]).abs() / 2.0;
+        assert!((area - 25.0).abs() < 1e-9, "area {area}");
+    }
+
+    #[test]
+    fn polygon_orientation_is_preserved() {
+        let ccw = vec![
+            c(-5.0, -5.0),
+            c(5.0, -5.0),
+            c(5.0, 5.0),
+            c(-5.0, 5.0),
+            c(-5.0, -5.0),
+        ];
+        let cw: Vec<_> = ccw.iter().rev().copied().collect();
+        let a = clip_ring(&ccw, &unit());
+        let b = clip_ring(&cw, &unit());
+        assert!(ring_signed_area_2x(&a[..a.len() - 1]) > 0.0);
+        assert!(ring_signed_area_2x(&b[..b.len() - 1]) < 0.0);
+    }
+
+    #[test]
+    fn hole_outside_rect_is_dropped() {
+        let poly = Polygon::new(
+            LineString::new(vec![
+                c(-20.0, -20.0),
+                c(30.0, -20.0),
+                c(30.0, 30.0),
+                c(-20.0, 30.0),
+                c(-20.0, -20.0),
+            ]),
+            vec![LineString::new(vec![
+                c(20.0, 20.0),
+                c(25.0, 20.0),
+                c(25.0, 25.0),
+                c(20.0, 25.0),
+                c(20.0, 20.0),
+            ])],
+        );
+        let out = clip_polygon(&poly, &unit()).expect("covers rect");
+        assert!(out.interiors().is_empty());
+    }
+
+    #[test]
+    fn polygon_outside_vanishes() {
+        let poly = Polygon::new(
+            LineString::new(vec![
+                c(20.0, 20.0),
+                c(30.0, 20.0),
+                c(30.0, 30.0),
+                c(20.0, 20.0),
+            ]),
+            vec![],
+        );
+        assert!(clip_polygon(&poly, &unit()).is_none());
+    }
+
+    #[test]
+    fn shared_edge_clips_identically_from_both_sides() {
+        // The same edge, traversed in opposite directions, must produce the
+        // same boundary point so neighbouring tiles line up exactly.
+        let a = c(-3.3, 1.7);
+        let b = c(7.9, 9.1);
+        assert_eq!(intersect(a, b, Axis::X, 0.0), intersect(b, a, Axis::X, 0.0));
+    }
+
+    #[test]
+    fn concave_ring_stays_one_ring() {
+        // A "U" crossing the bottom edge twice.
+        let u = vec![
+            c(1.0, -5.0),
+            c(9.0, -5.0),
+            c(9.0, 5.0),
+            c(7.0, 5.0),
+            c(7.0, -2.0),
+            c(3.0, -2.0),
+            c(3.0, 5.0),
+            c(1.0, 5.0),
+            c(1.0, -5.0),
+        ];
+        let out = clip_ring(&u, &unit());
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|p| p.y >= 0.0));
     }
 }

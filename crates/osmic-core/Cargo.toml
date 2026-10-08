@@ -16,8 +16,3 @@ description = "Shared types, errors, and coordinate primitives for osmic"
 thiserror = { workspace = true }
 serde = { workspace = true }
 geo-types = { workspace = true }
-
-[dev-dependencies]
-# Path-only (no version) — stripped from published manifest, avoids
-# circular dep during `cargo package` since osmic-geo depends on osmic-core.
-osmic-geo = { path = "../osmic-geo" }

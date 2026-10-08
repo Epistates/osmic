@@ -1,162 +1,324 @@
-//! PMTiles archive writer — native only (requires pmtiles with file I/O).
-#![cfg(feature = "native")]
+//! PMTiles v3 archive output.
+//!
+//! The archive is written to a temporary file next to the destination and
+//! renamed into place by [`PmTilesArchive::finalize`], so a crash or error
+//! never leaves a truncated archive at the destination path. Tiles must be
+//! added in strictly increasing tile-id (Hilbert) order, which yields a
+//! clustered archive with run-length–encoded duplicates.
 
+use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use pmtiles::{Compression, PmTilesStreamWriter, PmTilesWriter, TileType};
+use pmtiles::{Compression, PmTilesStreamWriter, PmTilesWriter, TileId, TileType};
 use tracing::info;
 
-use osmic_core::bbox::BBox;
-use osmic_core::error::{OsmicError, OsmicResult};
-use osmic_core::tile::TileCoord;
+use osmic_core::{BBox, TileCoord};
 
-/// Wrapper around PMTiles stream writer for tile archive creation.
-pub struct PmTilesArchive {
-    writer: PmTilesStreamWriter<File>,
+use crate::assemble::TileCompression;
+use crate::encode::TileFormat;
+use crate::error::TileError;
+
+/// What one layer contains, collected while rendering.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LayerStats {
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    pub features: u64,
+    /// Attribute keys seen on the layer's features.
+    pub fields: std::collections::BTreeSet<String>,
 }
 
-impl PmTilesArchive {
-    /// Create a new PMTiles archive at the given path.
-    pub fn create(
-        path: &Path,
-        bbox: &BBox,
-        min_zoom: u8,
-        max_zoom: u8,
-        tile_type: TileType,
-    ) -> OsmicResult<Self> {
-        info!(path = %path.display(), "Creating PMTiles archive");
-
-        let file = File::create(path)?;
-        let center = bbox.center();
-
-        let metadata = build_metadata(min_zoom, max_zoom);
-
-        let writer = PmTilesWriter::new(tile_type)
-            .tile_compression(Compression::Gzip)
-            .internal_compression(Compression::Gzip)
-            .min_zoom(min_zoom)
-            .max_zoom(max_zoom)
-            .bounds(bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat)
-            .center(center.lon, center.lat)
-            .center_zoom(min_zoom.saturating_add(max_zoom) / 2)
-            .metadata(&metadata)
-            .create(file)
-            .map_err(|e| OsmicError::Tile(format!("Failed to create PMTiles: {e}")))?;
-
-        Ok(Self { writer })
+impl LayerStats {
+    pub fn record(&mut self, zoom: u8, fields: impl IntoIterator<Item = impl AsRef<str>>) {
+        if self.features == 0 {
+            self.min_zoom = zoom;
+            self.max_zoom = zoom;
+        } else {
+            self.min_zoom = self.min_zoom.min(zoom);
+            self.max_zoom = self.max_zoom.max(zoom);
+        }
+        self.features += 1;
+        for f in fields {
+            if !self.fields.contains(f.as_ref()) {
+                self.fields.insert(f.as_ref().to_string());
+            }
+        }
     }
 
-    /// Add a tile to the archive.
-    pub fn add_tile(&mut self, coord: TileCoord, data: &[u8]) -> OsmicResult<()> {
-        let pm_coord = pmtiles::TileCoord::new(coord.z.0, coord.x, coord.y)
-            .map_err(|e| OsmicError::Tile(format!("Invalid tile coord {coord}: {e}")))?;
-
-        self.writer
-            .add_tile(pm_coord, data)
-            .map_err(|e| OsmicError::Tile(format!("Failed to write tile {coord}: {e}")))?;
-
-        Ok(())
-    }
-
-    /// Finalize the archive, writing the header and directory.
-    pub fn finalize(self) -> OsmicResult<()> {
-        self.writer
-            .finalize()
-            .map_err(|e| OsmicError::Tile(format!("Failed to finalize PMTiles: {e}")))?;
-
-        info!("PMTiles archive finalized");
-        Ok(())
+    pub fn merge(&mut self, other: &LayerStats) {
+        if other.features == 0 {
+            return;
+        }
+        if self.features == 0 {
+            *self = other.clone();
+            return;
+        }
+        self.min_zoom = self.min_zoom.min(other.min_zoom);
+        self.max_zoom = self.max_zoom.max(other.max_zoom);
+        self.features += other.features;
+        self.fields.extend(other.fields.iter().cloned());
     }
 }
 
-/// Build TileJSON-compatible metadata for the PMTiles archive.
-///
-/// The `vector_layers` array is consumed by downstream tile servers like
-/// [Martin](https://github.com/maplibre/martin) to advertise which layers
-/// and attributes are available. We emit the full 19-layer inventory so
-/// clients can introspect the schema via Martin's `/catalog` endpoint
-/// even if the current tile gen run was filtered to a subset.
-///
-/// The per-layer `minzoom` values mirror `osmic_osm::feature::min_tile_zoom`.
-/// The `fields` dictionary includes every key the MVT encoder knows about
-/// (both the curated whitelist and the common tags exposed in `--all-tags`
-/// mode). Martin does not require every field to actually appear on every
-/// feature — it uses the schema as a hint for clients.
-fn build_metadata(_min_zoom: u8, max_zoom: u8) -> String {
-    // (id, human description, per-layer minzoom). minzooms mirror
-    // `FeatureKind::min_tile_zoom` in `osmic-osm/src/feature.rs`.
-    const LAYER_SPEC: &[(&str, &str, u8)] = &[
-        ("highway", "Road network", 4),
-        ("building", "Buildings", 13),
-        ("water", "Water features", 0),
-        ("landuse", "Land use areas", 7),
-        ("natural", "Natural features", 0),
-        ("railway", "Railway lines", 8),
-        ("amenity", "Amenity points and areas", 13),
-        ("leisure", "Leisure areas", 8),
-        ("boundary", "Administrative boundaries", 2),
-        ("place", "Place labels", 4),
-        ("shop", "Retail points", 14),
-        ("tourism", "Tourism points", 13),
-        ("office", "Office points", 14),
-        ("healthcare", "Healthcare points", 14),
-        ("craft", "Craft / trade points", 14),
-        ("historic", "Historic points", 13),
-        ("club", "Club points", 14),
-        ("emergency", "Emergency services", 13),
-        ("education", "Education points", 13),
-    ];
+/// Descriptive metadata for an archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveInfo {
+    pub name: String,
+    pub description: String,
+    pub attribution: String,
+}
 
-    // Every tag key the MVT encoder can emit — the curated whitelist
-    // plus the pass-through keys most commonly present on POI features.
-    // Martin clients use this to populate schema introspection UIs.
-    let fields = serde_json::json!({
-        "class":            "String",
-        "name":             "String",
-        "addr:street":      "String",
-        "addr:housenumber": "String",
-        "addr:city":        "String",
-        "addr:postcode":    "String",
-        "phone":            "String",
-        "contact:phone":    "String",
-        "website":          "String",
-        "contact:website":  "String",
-        "opening_hours":    "String",
-        "cuisine":          "String",
-        "brand":            "String",
-        "operator":         "String",
-        "description":      "String",
-        "shop":             "String",
-        "amenity":          "String",
-        "tourism":          "String",
-        "office":           "String",
-        "craft":            "String",
-        "healthcare":       "String",
-        "historic":         "String",
-    });
+impl Default for ArchiveInfo {
+    fn default() -> Self {
+        Self {
+            name: "osmic".into(),
+            description: "Vector tiles generated by osmic from OpenStreetMap data".into(),
+            attribution: r#"<a href="https://www.openstreetmap.org/copyright" target="_blank">&copy; OpenStreetMap contributors</a>"#.into(),
+        }
+    }
+}
 
-    let layers: Vec<serde_json::Value> = LAYER_SPEC
+/// TileJSON-style metadata JSON describing the layers actually present.
+pub fn metadata_json(
+    info: &ArchiveInfo,
+    format: TileFormat,
+    layers: &BTreeMap<String, LayerStats>,
+) -> serde_json::Value {
+    let vector_layers: Vec<serde_json::Value> = layers
         .iter()
-        .map(|(id, desc, layer_min)| {
+        .filter(|(_, s)| s.features > 0)
+        .map(|(id, s)| {
+            let fields: serde_json::Map<String, serde_json::Value> = s
+                .fields
+                .iter()
+                .map(|k| (k.clone(), serde_json::Value::from("String")))
+                .collect();
             serde_json::json!({
                 "id": id,
-                "description": desc,
                 "fields": fields,
-                "minzoom": layer_min,
-                "maxzoom": max_zoom,
+                "minzoom": s.min_zoom,
+                "maxzoom": s.max_zoom,
             })
         })
         .collect();
-
     serde_json::json!({
-        "vector_layers": layers,
-        "name": "Osmic",
-        "description": "Generated by Osmic",
-        "attribution": "OpenStreetMap contributors",
+        "name": info.name,
+        "description": info.description,
+        "attribution": info.attribution,
         "type": "baselayer",
-        "format": "pbf",
-        "version": "2",
+        "format": format.metadata_format(),
+        "generator": concat!("osmic ", env!("CARGO_PKG_VERSION")),
+        "vector_layers": vector_layers,
     })
-    .to_string()
+}
+
+/// Header settings for a new archive.
+#[derive(Debug, Clone)]
+pub struct ArchiveOptions {
+    pub format: TileFormat,
+    pub compression: TileCompression,
+    pub bounds: BBox,
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    pub metadata: serde_json::Value,
+    /// Replace an existing file at the destination (atomically).
+    pub overwrite: bool,
+}
+
+/// A PMTiles archive being written.
+pub struct PmTilesArchive {
+    writer: PmTilesStreamWriter<File>,
+    temp: tempfile::NamedTempFile,
+    path: PathBuf,
+    overwrite: bool,
+    last_tile_id: Option<u64>,
+    tiles: u64,
+}
+
+fn archive_err(e: impl std::fmt::Display) -> TileError {
+    TileError::Archive(e.to_string())
+}
+
+impl PmTilesArchive {
+    /// Start an archive that will be renamed to `path` on finalize.
+    pub fn create(path: &Path, options: &ArchiveOptions) -> Result<Self, TileError> {
+        if !options.overwrite && path.exists() {
+            return Err(TileError::Archive(format!(
+                "{} already exists (refusing to overwrite)",
+                path.display()
+            )));
+        }
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let temp = tempfile::Builder::new()
+            .prefix(&osmic_core::fs::temp_file_prefix())
+            .suffix(".pmtiles.tmp")
+            .tempfile_in(parent)?;
+        let file = temp.reopen()?;
+        let tile_type = match options.format {
+            TileFormat::Mvt => TileType::Mvt,
+            TileFormat::Mlt => TileType::Mlt,
+        };
+        let tile_compression = match options.compression {
+            TileCompression::Gzip => Compression::Gzip,
+            TileCompression::None => Compression::None,
+        };
+        let b = options.bounds;
+        let center = b.center();
+        let writer = PmTilesWriter::new(tile_type)
+            .tile_compression(tile_compression)
+            .internal_compression(Compression::Gzip)
+            .min_zoom(options.min_zoom)
+            .max_zoom(options.max_zoom)
+            .bounds(b.min_lon, b.min_lat, b.max_lon, b.max_lat)
+            .center(center.lon, center.lat)
+            .center_zoom(options.min_zoom.midpoint(options.max_zoom))
+            .metadata(&options.metadata.to_string())
+            .create(file)
+            .map_err(archive_err)?;
+        info!(path = %path.display(), "Writing PMTiles archive");
+        Ok(Self {
+            writer,
+            temp,
+            path: path.to_path_buf(),
+            overwrite: options.overwrite,
+            last_tile_id: None,
+            tiles: 0,
+        })
+    }
+
+    /// Add an already-compressed tile. Tiles must arrive in strictly
+    /// increasing tile-id order.
+    pub fn add_tile(&mut self, coord: TileCoord, data: &[u8]) -> Result<(), TileError> {
+        let pm = pmtiles::TileCoord::new(coord.z.0, coord.x, coord.y).map_err(archive_err)?;
+        let id = TileId::from(pm).value();
+        if self.last_tile_id.is_some_and(|last| id <= last) {
+            return Err(TileError::Archive(format!(
+                "tile {coord} added out of order (archive must stay clustered)"
+            )));
+        }
+        self.last_tile_id = Some(id);
+        self.writer.add_raw_tile(pm, data).map_err(archive_err)?;
+        self.tiles += 1;
+        Ok(())
+    }
+
+    /// Number of tiles added.
+    pub fn tile_count(&self) -> u64 {
+        self.tiles
+    }
+
+    /// Write directories and header, flush to disk, and atomically move the
+    /// archive to its destination.
+    pub fn finalize(self) -> Result<PathBuf, TileError> {
+        self.writer.finalize().map_err(archive_err)?;
+        self.temp.as_file().sync_all()?;
+        let path = self.path;
+        if self.overwrite {
+            self.temp
+                .persist(&path)
+                .map_err(|e| TileError::Io(e.error))?;
+        } else {
+            self.temp
+                .persist_noclobber(&path)
+                .map_err(|e| TileError::Io(e.error))?;
+        }
+        info!(path = %path.display(), tiles = self.tiles, "PMTiles archive written");
+        Ok(path)
+    }
+}
+
+/// Hilbert tile id used to order an archive.
+pub fn tile_id(coord: TileCoord) -> Result<u64, TileError> {
+    let pm = pmtiles::TileCoord::new(coord.z.0, coord.x, coord.y).map_err(archive_err)?;
+    Ok(TileId::from(pm).value())
+}
+
+/// Inverse of [`tile_id`].
+pub fn tile_coord(id: u64) -> Result<TileCoord, TileError> {
+    let pm = pmtiles::TileCoord::from(TileId::new(id).map_err(archive_err)?);
+    Ok(TileCoord::new(pm.x(), pm.y(), osmic_core::Zoom(pm.z())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use osmic_core::Zoom;
+
+    fn options(overwrite: bool) -> ArchiveOptions {
+        ArchiveOptions {
+            format: TileFormat::Mvt,
+            compression: TileCompression::None,
+            bounds: BBox::new(-1.0, -1.0, 1.0, 1.0),
+            min_zoom: 0,
+            max_zoom: 1,
+            metadata: serde_json::json!({"name": "t"}),
+            overwrite,
+        }
+    }
+
+    #[test]
+    fn tile_id_round_trip_and_order() {
+        let a = TileCoord::new(0, 0, Zoom(0));
+        let b = TileCoord::new(1, 1, Zoom(1));
+        assert!(tile_id(a).expect("valid") < tile_id(b).expect("valid"));
+        assert_eq!(tile_coord(tile_id(b).expect("valid")).expect("valid"), b);
+    }
+
+    #[test]
+    fn out_of_order_tiles_are_rejected_and_nothing_is_left_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.pmtiles");
+        let mut a = PmTilesArchive::create(&path, &options(false)).expect("create");
+        a.add_tile(TileCoord::new(1, 1, Zoom(1)), b"x")
+            .expect("first");
+        assert!(a.add_tile(TileCoord::new(0, 0, Zoom(0)), b"y").is_err());
+        drop(a);
+        assert!(!path.exists(), "no partial archive at the destination");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("read").count(),
+            0,
+            "temp removed"
+        );
+    }
+
+    #[test]
+    fn finalize_persists_and_respects_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.pmtiles");
+        let mut a = PmTilesArchive::create(&path, &options(false)).expect("create");
+        a.add_tile(TileCoord::new(0, 0, Zoom(0)), b"tile")
+            .expect("add");
+        a.finalize().expect("finalize");
+        assert!(path.exists());
+        assert!(PmTilesArchive::create(&path, &options(false)).is_err());
+        let b = PmTilesArchive::create(&path, &options(true)).expect("overwrite allowed");
+        b.finalize().expect("finalize");
+    }
+
+    #[test]
+    fn metadata_lists_only_present_layers() {
+        let mut layers = BTreeMap::new();
+        let mut roads = LayerStats::default();
+        roads.record(5, ["class", "name"]);
+        roads.record(9, ["class", "ref"]);
+        layers.insert("highway".to_string(), roads);
+        layers.insert("shop".to_string(), LayerStats::default());
+        let m = metadata_json(&ArchiveInfo::default(), TileFormat::Mvt, &layers);
+        let vl = m["vector_layers"].as_array().expect("array");
+        assert_eq!(vl.len(), 1);
+        assert_eq!(vl[0]["id"], "highway");
+        assert_eq!(vl[0]["minzoom"], 5);
+        assert_eq!(vl[0]["maxzoom"], 9);
+        assert_eq!(vl[0]["fields"].as_object().expect("obj").len(), 3);
+        assert!(
+            m["attribution"]
+                .as_str()
+                .expect("str")
+                .contains("OpenStreetMap")
+        );
+    }
 }

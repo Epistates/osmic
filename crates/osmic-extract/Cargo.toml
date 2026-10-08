@@ -15,7 +15,15 @@ description = "Business entity extraction from OSM PBF — tag-based filtering, 
 [dependencies]
 osmic-core = { workspace = true }
 osmic-index = { workspace = true }
+osmic-osm = { workspace = true, features = ["native"] }
+csv = { workspace = true }
+geo = { workspace = true }
+geo-types = { workspace = true }
 osmpbf = { workspace = true }
+rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
+unicode-normalization = { workspace = true }

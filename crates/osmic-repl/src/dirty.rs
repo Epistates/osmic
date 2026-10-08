@@ -21,9 +21,9 @@ impl DirtyTileSet {
     /// across the specified zoom range.
     pub fn mark_bbox(&mut self, bbox: &BBox, min_zoom: u8, max_zoom: u8) {
         for z in min_zoom..=max_zoom {
-            let (min_x, min_y, max_x, max_y) = bbox_to_tile_range(bbox, z);
-            for y in min_y..=max_y {
-                for x in min_x..=max_x {
+            let r = bbox_to_tile_range(bbox, z);
+            for y in r.min_y..=r.max_y {
+                for x in r.min_x..=r.max_x {
                     self.dirty.insert(TileCoord::new(x, y, Zoom::new(z)));
                 }
             }

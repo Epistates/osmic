@@ -1,184 +1,215 @@
 //! Name + proximity deduplication for extracted entities.
 //!
-//! Groups entities by normalized name, then uses spatial proximity
-//! to collapse duplicates within a configurable radius. O(n * k)
-//! where k is the average group size (typically small).
+//! Entities are grouped by normalised name (Unicode NFKC, case-folded,
+//! whitespace collapsed). Within a group, the richest entity of each
+//! cluster is kept: entities are visited richest-first and dropped if a
+//! kept entity lies within the radius. A grid of radius-sized cells makes
+//! the neighbour search O(1) per entity, so large chains (thousands of
+//! identically named locations) stay linear. Entities without coordinates
+//! collapse to one per name. The result is deterministic and sorted by
+//! element type and id.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+use unicode_normalization::UnicodeNormalization;
 
 use crate::entity::Entity;
 
+const EARTH_RADIUS_M: f64 = 6_371_000.0;
+const METERS_PER_DEGREE: f64 = EARTH_RADIUS_M * std::f64::consts::PI / 180.0;
+
 /// Haversine distance between two WGS84 points in meters.
 fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    const R: f64 = 6_371_000.0; // Earth radius in meters
-    let phi1 = lat1.to_radians();
-    let phi2 = lat2.to_radians();
+    let (phi1, phi2) = (lat1.to_radians(), lat2.to_radians());
     let dphi = (lat2 - lat1).to_radians();
     let dlambda = (lon2 - lon1).to_radians();
     let a = (dphi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (dlambda / 2.0).sin().powi(2);
-    R * 2.0 * a.sqrt().atan2((1.0 - a).sqrt())
+    EARTH_RADIUS_M * 2.0 * a.sqrt().atan2((1.0 - a).sqrt())
 }
 
-/// Richness score for deduplication — prefer entities with more metadata.
-fn richness(entity: &Entity) -> usize {
-    let mut score = 0;
-    if !entity.address.is_empty() {
-        score += 3;
-    }
-    if !entity.phone.is_empty() {
-        score += 2;
-    }
-    if !entity.website.is_empty() {
-        score += 2;
-    }
-    if !entity.operator.is_empty() {
-        score += 1;
-    }
-    score += entity.tags.len();
-    score
+/// Normalised grouping key for a name.
+pub fn normalize_name(name: &str) -> String {
+    name.nfkc()
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Deduplicate entities by name + geographic proximity.
+/// Deduplicate entities by normalised name and proximity.
 ///
-/// Groups entities by normalized name, then within each group collapses
-/// entities that are within `radius_meters` of each other, keeping
-/// the one with the most metadata.
+/// Non-finite or non-positive radii disable deduplication (entities are
+/// returned unchanged apart from ordering).
 pub fn deduplicate(entities: Vec<Entity>, radius_meters: f64) -> Vec<Entity> {
-    if entities.is_empty() {
-        return entities;
-    }
-
-    // Group by normalized name
-    let mut by_name: HashMap<String, Vec<Entity>> = HashMap::new();
-    for entity in entities {
-        by_name
-            .entry(entity.name.to_lowercase())
-            .or_default()
-            .push(entity);
-    }
-
-    let mut unique: Vec<Entity> = Vec::new();
-    for (_, group) in by_name {
-        unique.extend(dedup_group(group, radius_meters));
-    }
-
-    unique
+    let mut out: Vec<Entity> = if !(radius_meters.is_finite() && radius_meters > 0.0) {
+        entities
+    } else {
+        let mut groups: BTreeMap<String, Vec<Entity>> = BTreeMap::new();
+        for e in entities {
+            groups.entry(normalize_name(&e.name)).or_default().push(e);
+        }
+        groups
+            .into_values()
+            .flat_map(|g| dedup_group(g, radius_meters))
+            .collect()
+    };
+    out.sort_by_key(Entity::sort_key);
+    out
 }
 
-/// Deduplicate a group of same-named entities by proximity.
-fn dedup_group(group: Vec<Entity>, radius_meters: f64) -> Vec<Entity> {
+fn dedup_group(mut group: Vec<Entity>, radius: f64) -> Vec<Entity> {
+    // Richest first; ties broken by element for determinism.
+    group.sort_by(|a, b| {
+        b.richness()
+            .cmp(&a.richness())
+            .then_with(|| a.sort_key().cmp(&b.sort_key()))
+    });
+    let cell_deg = radius / METERS_PER_DEGREE;
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     let mut kept: Vec<Entity> = Vec::new();
-
-    for candidate in group {
-        let merge_idx = find_merge_target(&kept, &candidate, radius_meters);
-
-        match merge_idx {
-            Some(i) => {
-                if richness(&candidate) > richness(&kept[i]) {
-                    kept[i] = candidate;
-                }
+    let mut kept_unlocated = false;
+    for e in group {
+        let (Some(lat), Some(lon)) = (e.lat, e.lon) else {
+            if !kept_unlocated {
+                kept_unlocated = true;
+                kept.push(e);
             }
-            None => kept.push(candidate),
+            continue;
+        };
+        // Longitude cells shrink with latitude; scale so a cell spans at
+        // least `radius` meters east-west.
+        let lon_scale = lat.to_radians().cos().max(1e-6);
+        let cell = (
+            (lat / cell_deg).floor() as i64,
+            (lon * lon_scale / cell_deg).floor() as i64,
+        );
+        let near = (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (cell.0 + dy, cell.1 + dx)));
+        let duplicate = near.filter_map(|c| grid.get(&c)).flatten().any(|&i| {
+            match (kept[i].lat, kept[i].lon) {
+                (Some(klat), Some(klon)) => haversine_meters(lat, lon, klat, klon) < radius,
+                _ => false,
+            }
+        });
+        if !duplicate {
+            grid.entry(cell).or_default().push(kept.len());
+            kept.push(e);
         }
     }
-
     kept
-}
-
-/// Find the index of an existing entity to merge with, if any.
-fn find_merge_target(kept: &[Entity], candidate: &Entity, radius_meters: f64) -> Option<usize> {
-    for (i, existing) in kept.iter().enumerate() {
-        match (existing.lat, existing.lon, candidate.lat, candidate.lon) {
-            // Both have coordinates — merge only if within radius
-            (Some(elat), Some(elon), Some(clat), Some(clon))
-                if haversine_meters(elat, elon, clat, clon) < radius_meters =>
-            {
-                return Some(i);
-            }
-            // Both lack coordinates — collapse same-name
-            (None, _, None, _) | (_, None, _, None)
-                if existing.lat.is_none() && candidate.lat.is_none() =>
-            {
-                return Some(i);
-            }
-            // Mixed (one has coords, one doesn't) — don't merge,
-            // they could be in different cities
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use osmic_core::OsmType;
 
-    fn entity(name: &str, lat: Option<f64>, lon: Option<f64>, phone: &str) -> Entity {
-        Entity {
-            name: name.to_string(),
-            osm_type: "node".to_string(),
-            osm_id: 1,
-            lat,
-            lon,
-            address: String::new(),
-            phone: phone.to_string(),
-            website: String::new(),
-            operator: String::new(),
-            tags: String::new(),
-            address_parts: std::collections::BTreeMap::new(),
+    fn entity(id: i64, name: &str, at: Option<(f64, f64)>, phone: &str) -> Entity {
+        let mut tags = vec![("name", name)];
+        if !phone.is_empty() {
+            tags.push(("phone", phone));
         }
+        Entity::new(
+            OsmType::Node,
+            id,
+            at.map(|(lat, lon)| geo_types::Coord { x: lon, y: lat }),
+            &tags,
+        )
     }
 
     #[test]
-    fn test_dedup_same_name_same_location() {
-        let entities = vec![
-            entity("Acme Corp", Some(25.7), Some(-80.2), ""),
-            entity("Acme Corp", Some(25.7), Some(-80.2), "555-1234"),
-        ];
-        let result = deduplicate(entities, 100.0);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].phone, "555-1234"); // kept richer one
+    fn same_name_same_place_keeps_richest() {
+        let out = deduplicate(
+            vec![
+                entity(1, "Acme Corp", Some((25.7, -80.2)), ""),
+                entity(2, "ACME  corp", Some((25.7001, -80.2)), "555-1234"),
+            ],
+            100.0,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].phone, "555-1234");
     }
 
     #[test]
-    fn test_dedup_same_name_different_location() {
-        let entities = vec![
-            entity("Acme Corp", Some(25.7), Some(-80.2), ""),
-            entity("Acme Corp", Some(40.7), Some(-74.0), ""), // NYC vs Miami
-        ];
-        let result = deduplicate(entities, 100.0);
-        assert_eq!(result.len(), 2); // different locations, not deduped
+    fn same_name_far_apart_are_kept() {
+        let out = deduplicate(
+            vec![
+                entity(1, "Acme", Some((25.7, -80.2)), ""),
+                entity(2, "Acme", Some((40.7, -74.0)), ""),
+            ],
+            100.0,
+        );
+        assert_eq!(out.len(), 2);
     }
 
     #[test]
-    fn test_dedup_no_coords_collapse() {
-        let entities = vec![
-            entity("Acme Corp", None, None, ""),
-            entity("Acme Corp", None, None, "555-1234"),
-        ];
-        let result = deduplicate(entities, 100.0);
-        assert_eq!(result.len(), 1);
+    fn unicode_normalisation_groups_equivalent_names() {
+        // Precomposed vs combining-accent "Café", and a full-width "Ｃafé".
+        assert_eq!(normalize_name("Café"), normalize_name("Cafe\u{301}"));
+        assert_eq!(normalize_name("Ｃafé  Bar"), "café bar");
     }
 
     #[test]
-    fn test_dedup_mixed_coords_not_collapsed() {
-        // Entity with coords should NOT be collapsed with same-named entity without coords
-        // (they could be in different cities)
-        let entities = vec![
-            entity("Acme Corp", Some(25.7), Some(-80.2), "555-1111"),
-            entity("Acme Corp", None, None, "555-2222"),
-        ];
-        let result = deduplicate(entities, 100.0);
-        assert_eq!(result.len(), 2);
+    fn unlocated_collapse_per_name_but_not_with_located() {
+        let out = deduplicate(
+            vec![
+                entity(1, "Acme", None, ""),
+                entity(2, "Acme", None, "555"),
+                entity(3, "Acme", Some((1.0, 1.0)), ""),
+            ],
+            100.0,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|e| e.lat.is_none() && e.phone == "555"));
     }
 
     #[test]
-    fn test_different_names_kept() {
-        let entities = vec![
-            entity("Acme Corp", Some(25.7), Some(-80.2), ""),
-            entity("Globex Corp", Some(25.7), Some(-80.2), ""),
+    fn neighbouring_cells_are_checked_near_high_latitudes() {
+        // Two points 50 m apart east-west at 70°N straddling a cell edge.
+        let lat: f64 = 70.0;
+        let dlon = 50.0 / (METERS_PER_DEGREE * lat.to_radians().cos());
+        let out = deduplicate(
+            vec![
+                entity(1, "X", Some((lat, 10.0)), ""),
+                entity(2, "X", Some((lat, 10.0 + dlon)), ""),
+            ],
+            100.0,
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn large_chain_is_linear_and_deterministic() {
+        let make = || {
+            (0..20_000)
+                .map(|i| {
+                    entity(
+                        i,
+                        "Big Chain",
+                        Some((
+                            f64::from(i as i32 % 200) * 0.01,
+                            f64::from(i as i32 / 200) * 0.01,
+                        )),
+                        "",
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let a = deduplicate(make(), 100.0);
+        let mut reversed = make();
+        reversed.reverse();
+        let b = deduplicate(reversed, 100.0);
+        assert_eq!(a.len(), 20_000, "points are ~1 km apart");
+        assert_eq!(a, b, "input order does not change the output");
+    }
+
+    #[test]
+    fn disabled_radius_keeps_everything() {
+        let e = vec![
+            entity(1, "A", Some((0.0, 0.0)), ""),
+            entity(2, "A", Some((0.0, 0.0)), ""),
         ];
-        let result = deduplicate(entities, 100.0);
-        assert_eq!(result.len(), 2);
+        assert_eq!(deduplicate(e.clone(), 0.0).len(), 2);
+        assert_eq!(deduplicate(e, f64::NAN).len(), 2);
     }
 }

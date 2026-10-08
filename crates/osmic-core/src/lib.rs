@@ -1,20 +1,29 @@
+//! Shared types for osmic: coordinates, typed OSM ids, geometry, bounding
+//! boxes, tile coordinates, Web Mercator projection, clipping and errors.
+
 pub mod bbox;
 pub mod clip;
 pub mod color;
 pub mod coord;
 pub mod error;
+pub mod fs;
 pub mod geometry;
+pub mod mercator;
+pub mod osm_id;
 pub mod tile;
 
 pub use bbox::BBox;
 pub use color::Color;
-pub use coord::{LonLat, PackedCoord};
+pub use coord::{FixedCoord, LonLat};
 pub use error::{OsmicError, OsmicResult};
-pub use geometry::Geometry;
+pub use geometry::{Geometry, GeometryType};
+pub use osm_id::{OsmId, OsmType};
 pub use tile::{TileCoord, Zoom};
 
-/// Coordinate lookup storage used by PBF decoding pipelines.
+/// Read access to node locations, keyed by node id.
+///
+/// Implementations live in `osmic-index`; pipelines only need lookups.
 pub trait NodeLocationStore: Send + Sync {
-    fn set(&self, node_id: i64, lon: f64, lat: f64);
-    fn get(&self, node_id: i64) -> Option<LonLat>;
+    /// The location of `node_id`, or `None` if the store has no such node.
+    fn get(&self, node_id: i64) -> Option<FixedCoord>;
 }

@@ -8,10 +8,11 @@
 //!
 //! ```text
 //! PBF file
-//!   → Pass 1: Store node locations (mmap via DenseNodeLocationStore)
-//!   → Pass 2: Filter nodes/ways/relations by tag rules, extract entities
-//!   → Deduplicate by name + proximity (R-tree backed)
-//!   → Output to CSV or JSON
+//!   → Pass 1: node locations (sparse index) + relations matching the filter
+//!   → Pass 2: match nodes and ways, cache member ways of matched relations
+//!   → Locate relations (assembled area or member centroid)
+//!   → Deduplicate by normalised name + proximity (grid index)
+//!   → Write CSV / JSON / GeoJSON atomically
 //! ```
 //!
 //! # GeoJSON output schema
@@ -79,7 +80,7 @@
 //! [`write_json`] emits the same structured `addr_*` fields flat on each
 //! entity object (via `#[serde(flatten)]`). [`write_csv`] does **not**
 //! emit structured address fields — the CSV column contract is fixed at
-//! `name,type,lat,lon,address,phone,website,operator,tags`, and the
+//! `name,type,id,lat,lon,address,phone,website,operator,tags`, and the
 //! joined `address` column is the only address representation there.
 
 pub mod dedup;
@@ -88,8 +89,8 @@ pub mod filter;
 pub mod output;
 pub mod pipeline;
 
-pub use dedup::deduplicate;
+pub use dedup::{deduplicate, normalize_name};
 pub use entity::Entity;
-pub use filter::TagFilter;
-pub use output::{write_csv, write_geojson, write_json};
-pub use pipeline::{ExtractConfig, ExtractResult, Extractor};
+pub use filter::{FilterParseError, TagFilter};
+pub use output::{OutputError, OutputOptions, write_csv, write_geojson, write_json};
+pub use pipeline::{ExtractConfig, ExtractResult, ExtractStats, Extractor};

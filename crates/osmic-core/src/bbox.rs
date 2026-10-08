@@ -90,6 +90,13 @@ impl BBox {
     }
 }
 
+impl Default for BBox {
+    /// The empty box (see [`BBox::empty`]), ready to be expanded.
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl fmt::Display for BBox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

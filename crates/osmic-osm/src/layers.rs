@@ -1,92 +1,157 @@
-/// Bitmask of enabled OSM feature layers for extraction.
-///
-/// Used by `classify()` to skip disabled layers at parse time.
-/// Default is all layers enabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use std::fmt;
+use std::str::FromStr;
+
+/// A feature layer. Each classified feature belongs to exactly one layer,
+/// which becomes its vector-tile layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Layer {
+    Highway,
+    Building,
+    Water,
+    Natural,
+    Landuse,
+    Railway,
+    Amenity,
+    Leisure,
+    Boundary,
+    Place,
+    Shop,
+    Tourism,
+    Office,
+    Healthcare,
+    Craft,
+    Historic,
+    Club,
+    Emergency,
+    Education,
+}
+
+impl Layer {
+    /// Every layer, in a stable order.
+    pub const ALL: [Layer; 19] = [
+        Self::Highway,
+        Self::Building,
+        Self::Water,
+        Self::Natural,
+        Self::Landuse,
+        Self::Railway,
+        Self::Amenity,
+        Self::Leisure,
+        Self::Boundary,
+        Self::Place,
+        Self::Shop,
+        Self::Tourism,
+        Self::Office,
+        Self::Healthcare,
+        Self::Craft,
+        Self::Historic,
+        Self::Club,
+        Self::Emergency,
+        Self::Education,
+    ];
+
+    /// The layer's name (also its vector-tile layer id).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Highway => "highway",
+            Self::Building => "building",
+            Self::Water => "water",
+            Self::Natural => "natural",
+            Self::Landuse => "landuse",
+            Self::Railway => "railway",
+            Self::Amenity => "amenity",
+            Self::Leisure => "leisure",
+            Self::Boundary => "boundary",
+            Self::Place => "place",
+            Self::Shop => "shop",
+            Self::Tourism => "tourism",
+            Self::Office => "office",
+            Self::Healthcare => "healthcare",
+            Self::Craft => "craft",
+            Self::Historic => "historic",
+            Self::Club => "club",
+            Self::Emergency => "emergency",
+            Self::Education => "education",
+        }
+    }
+
+    const fn bit(self) -> u32 {
+        1 << self as u8
+    }
+}
+
+impl fmt::Display for Layer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error for an unrecognised layer name.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown layer '{name}' (available: {available})")]
+pub struct UnknownLayer {
+    pub name: String,
+    available: String,
+}
+
+impl FromStr for Layer {
+    type Err = UnknownLayer;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.as_str() == s)
+            .ok_or_else(|| UnknownLayer {
+                name: s.to_string(),
+                available: LayerSet::all().to_string(),
+            })
+    }
+}
+
+/// A set of enabled layers (bitset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayerSet(u32);
 
 impl LayerSet {
-    pub const HIGHWAY: u32 = 1 << 0;
-    pub const BUILDING: u32 = 1 << 1;
-    pub const WATER: u32 = 1 << 2;
-    pub const NATURAL: u32 = 1 << 3;
-    pub const LANDUSE: u32 = 1 << 4;
-    pub const RAILWAY: u32 = 1 << 5;
-    pub const AMENITY: u32 = 1 << 6;
-    pub const LEISURE: u32 = 1 << 7;
-    pub const BOUNDARY: u32 = 1 << 8;
-    pub const PLACE: u32 = 1 << 9;
-    pub const SHOP: u32 = 1 << 10;
-    pub const TOURISM: u32 = 1 << 11;
-    pub const OFFICE: u32 = 1 << 12;
-    pub const HEALTHCARE: u32 = 1 << 13;
-    pub const CRAFT: u32 = 1 << 14;
-    pub const HISTORIC: u32 = 1 << 15;
-    pub const CLUB: u32 = 1 << 16;
-    pub const EMERGENCY: u32 = 1 << 17;
-    pub const EDUCATION: u32 = 1 << 18;
-
-    const NAME_MAP: &[(&'static str, u32)] = &[
-        ("highway", Self::HIGHWAY),
-        ("building", Self::BUILDING),
-        ("water", Self::WATER),
-        ("natural", Self::NATURAL),
-        ("landuse", Self::LANDUSE),
-        ("railway", Self::RAILWAY),
-        ("amenity", Self::AMENITY),
-        ("leisure", Self::LEISURE),
-        ("boundary", Self::BOUNDARY),
-        ("place", Self::PLACE),
-        ("shop", Self::SHOP),
-        ("tourism", Self::TOURISM),
-        ("office", Self::OFFICE),
-        ("healthcare", Self::HEALTHCARE),
-        ("craft", Self::CRAFT),
-        ("historic", Self::HISTORIC),
-        ("club", Self::CLUB),
-        ("emergency", Self::EMERGENCY),
-        ("education", Self::EDUCATION),
-    ];
-
-    /// All layers enabled.
-    pub fn all() -> Self {
-        Self(0x7FFFF) // 19 bits
+    /// Every layer.
+    pub const fn all() -> Self {
+        Self((1 << Layer::ALL.len()) - 1)
     }
 
-    /// No layers enabled.
-    pub fn none() -> Self {
+    /// No layers.
+    pub const fn none() -> Self {
         Self(0)
     }
 
-    /// Parse a comma-separated list of layer names.
-    ///
-    /// Returns `Err` with the first unrecognized name.
-    pub fn from_names(input: &str) -> Result<Self, String> {
-        let mut bits = 0u32;
-        for name in input.split(',') {
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
-            }
-            match Self::NAME_MAP.iter().find(|(n, _)| *n == name) {
-                Some((_, bit)) => bits |= bit,
-                None => return Err(format!("unknown layer: '{name}'")),
-            }
-        }
-        Ok(Self(bits))
+    pub const fn contains(self, layer: Layer) -> bool {
+        self.0 & layer.bit() != 0
     }
 
-    /// Check if a layer is enabled by its layer_name string.
-    pub fn is_enabled(&self, layer_name: &str) -> bool {
-        match Self::NAME_MAP.iter().find(|(n, _)| *n == layer_name) {
-            Some((_, bit)) => self.0 & bit != 0,
-            None => false,
-        }
+    pub fn insert(&mut self, layer: Layer) {
+        self.0 |= layer.bit();
     }
 
-    /// Returns all available layer names.
-    pub fn available_names() -> impl Iterator<Item = &'static str> {
-        Self::NAME_MAP.iter().map(|(name, _)| *name)
+    pub fn remove(&mut self, layer: Layer) {
+        self.0 &= !layer.bit();
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Enabled layers in [`Layer::ALL`] order.
+    pub fn iter(self) -> impl Iterator<Item = Layer> {
+        Layer::ALL.into_iter().filter(move |l| self.contains(*l))
+    }
+
+    /// Parse a comma-separated list of layer names (whitespace ignored).
+    pub fn from_names(input: &str) -> Result<Self, UnknownLayer> {
+        let mut set = Self::none();
+        for name in input.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            set.insert(name.parse()?);
+        }
+        Ok(set)
     }
 }
 
@@ -96,14 +161,27 @@ impl Default for LayerSet {
     }
 }
 
-impl std::fmt::Display for LayerSet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let names: Vec<&str> = Self::NAME_MAP
-            .iter()
-            .filter(|(_, bit)| self.0 & bit != 0)
-            .map(|(name, _)| *name)
-            .collect();
-        write!(f, "{}", names.join(","))
+impl FromIterator<Layer> for LayerSet {
+    fn from_iter<I: IntoIterator<Item = Layer>>(iter: I) -> Self {
+        let mut set = Self::none();
+        for l in iter {
+            set.insert(l);
+        }
+        set
+    }
+}
+
+impl fmt::Display for LayerSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for l in self.iter() {
+            if !first {
+                f.write_str(",")?;
+            }
+            f.write_str(l.as_str())?;
+            first = false;
+        }
+        Ok(())
     }
 }
 
@@ -112,47 +190,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_enables_everything() {
-        let set = LayerSet::all();
-        for (name, _) in LayerSet::NAME_MAP {
-            assert!(set.is_enabled(name), "{name} should be enabled in all()");
+    fn all_and_none() {
+        for l in Layer::ALL {
+            assert!(LayerSet::all().contains(l));
+            assert!(!LayerSet::none().contains(l));
         }
+        assert_eq!(LayerSet::all().iter().count(), Layer::ALL.len());
     }
 
     #[test]
-    fn none_disables_everything() {
-        let set = LayerSet::none();
-        for (name, _) in LayerSet::NAME_MAP {
-            assert!(!set.is_enabled(name), "{name} should be disabled in none()");
+    fn names_round_trip() {
+        for l in Layer::ALL {
+            assert_eq!(l.as_str().parse::<Layer>(), Ok(l));
         }
+        let set = LayerSet::from_names(" amenity, shop ,tourism,").expect("valid");
+        assert_eq!(set.to_string(), "amenity,shop,tourism");
+        assert_eq!(
+            LayerSet::from_names(&LayerSet::all().to_string()),
+            Ok(LayerSet::all())
+        );
     }
 
     #[test]
-    fn from_names_parses_subset() {
-        let set = LayerSet::from_names("amenity,shop,tourism").unwrap();
-        assert!(set.is_enabled("amenity"));
-        assert!(set.is_enabled("shop"));
-        assert!(set.is_enabled("tourism"));
-        assert!(!set.is_enabled("highway"));
-        assert!(!set.is_enabled("building"));
-    }
-
-    #[test]
-    fn from_names_rejects_unknown() {
+    fn unknown_name_lists_available_layers() {
         let err = LayerSet::from_names("amenity,bogus").unwrap_err();
-        assert!(err.contains("bogus"));
-    }
-
-    #[test]
-    fn display_format() {
-        let set = LayerSet::from_names("shop,amenity").unwrap();
-        let s = set.to_string();
-        assert!(s.contains("amenity"));
-        assert!(s.contains("shop"));
-    }
-
-    #[test]
-    fn default_is_all() {
-        assert_eq!(LayerSet::default(), LayerSet::all());
+        assert_eq!(err.name, "bogus");
+        assert!(err.to_string().contains("education"));
     }
 }

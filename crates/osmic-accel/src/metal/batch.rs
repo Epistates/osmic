@@ -232,7 +232,10 @@ impl InFlight {
                     {
                         return Err(AccelError::ExecutionFailed(format!(
                             "unit {index}: kernel reported {} vertices / {} parts beyond capacity {} / {}",
-                            result.out_count, result.part_count, unit.out_capacity, unit.part_capacity
+                            result.out_count,
+                            result.part_count,
+                            unit.out_capacity,
+                            unit.part_capacity
                         )));
                     }
                 }

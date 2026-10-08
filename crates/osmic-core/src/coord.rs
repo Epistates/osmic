@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// Fixed-point scale used by OSM: coordinates are stored in units of 1e-7 degrees.
+pub const COORDINATE_SCALE: f64 = 1e7;
+
 /// A geographic coordinate in longitude/latitude (WGS84).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LonLat {
@@ -33,57 +36,113 @@ impl From<geo_types::Coord<f64>> for LonLat {
     }
 }
 
-/// A packed coordinate using f32 for compact storage (8 bytes total).
+/// A coordinate in OSM's native fixed-point representation: integer units of
+/// 1e-7 degrees (about 1.1 cm at the equator).
 ///
-/// Precision: ~1.1 meters at the equator. Sufficient for rendering.
-/// Used in `DenseNodeLocationStore` for memory-efficient node storage.
-///
-/// Coordinates are stored with an offset so that all-zero bytes (as produced
-/// by sparse mmap pages that were never written) are distinguishable from
-/// valid coordinates. This preserves mmap sparsity: only pages containing
-/// actual node data consume disk/RAM.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct PackedCoord {
-    lon: f32,
-    lat: f32,
+/// This is exactly the precision OSM stores and PBF files carry (with the
+/// default granularity), so round-tripping through `FixedCoord` is lossless
+/// for OSM data. Every valid coordinate fits in an `i32`:
+/// ±180° = ±1_800_000_000.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FixedCoord {
+    /// Longitude in 1e-7 degrees.
+    pub lon: i32,
+    /// Latitude in 1e-7 degrees.
+    pub lat: i32,
 }
 
-/// Offsets ensure that valid stored values are never all-zero bits,
-/// allowing sparse mmap pages (zero-filled by the OS) to be detected as empty.
-const LON_OFFSET: f32 = 256.0;
-const LAT_OFFSET: f32 = 128.0;
+/// Flips the sign bit so that `i32::MIN` (never a valid coordinate) maps to 0.
+const SIGN_FLIP: u32 = 0x8000_0000;
 
-impl PackedCoord {
-    pub fn pack(lon: f64, lat: f64) -> Self {
-        Self {
-            lon: (lon as f32) + LON_OFFSET,
-            lat: (lat as f32) + LAT_OFFSET,
-        }
+impl FixedCoord {
+    /// Construct from raw 1e-7 degree units.
+    pub const fn new(lon: i32, lat: i32) -> Self {
+        Self { lon, lat }
     }
 
-    pub fn unpack(self) -> LonLat {
-        LonLat {
-            lon: (self.lon - LON_OFFSET) as f64,
-            lat: (self.lat - LAT_OFFSET) as f64,
-        }
-    }
-
-    /// Returns true if this slot was never written.
+    /// Convert from floating-point degrees, rounding to the nearest 1e-7.
     ///
-    /// Sparse mmap pages are zero-filled by the OS. Since valid packed
-    /// coordinates always have non-zero stored values (due to the offset),
-    /// a zero check reliably detects unoccupied slots.
-    pub fn is_empty(self) -> bool {
-        self.lon.to_bits() == 0 && self.lat.to_bits() == 0
+    /// Returns `None` for non-finite input or coordinates outside
+    /// [-180, 180] × [-90, 90].
+    pub fn from_degrees(lon: f64, lat: f64) -> Option<Self> {
+        let ll = LonLat::new(lon, lat);
+        if !lon.is_finite() || !lat.is_finite() || !ll.is_valid() {
+            return None;
+        }
+        // In range by the check above, so the casts cannot saturate.
+        Some(Self {
+            lon: (lon * COORDINATE_SCALE).round() as i32,
+            lat: (lat * COORDINATE_SCALE).round() as i32,
+        })
+    }
+
+    /// Longitude in degrees.
+    pub fn lon_degrees(self) -> f64 {
+        f64::from(self.lon) / COORDINATE_SCALE
+    }
+
+    /// Latitude in degrees.
+    pub fn lat_degrees(self) -> f64 {
+        f64::from(self.lat) / COORDINATE_SCALE
+    }
+
+    /// Convert to floating-point degrees.
+    pub fn to_lonlat(self) -> LonLat {
+        LonLat::new(self.lon_degrees(), self.lat_degrees())
+    }
+
+    /// Convert to a `geo_types` coordinate (x = lon, y = lat, in degrees).
+    pub fn to_coord(self) -> geo_types::Coord<f64> {
+        geo_types::Coord {
+            x: self.lon_degrees(),
+            y: self.lat_degrees(),
+        }
+    }
+
+    /// Returns true if the coordinate is within WGS84 bounds.
+    pub const fn is_valid(self) -> bool {
+        self.lon >= -1_800_000_000
+            && self.lon <= 1_800_000_000
+            && self.lat >= -900_000_000
+            && self.lat <= 900_000_000
+    }
+
+    /// Pack into a `u64` whose value is never 0 for a valid coordinate.
+    ///
+    /// Zero is reserved as the "empty slot" marker so zero-filled memory
+    /// (fresh mmap pages) reads as "no node here".
+    pub const fn pack(self) -> u64 {
+        let lon = (self.lon as u32) ^ SIGN_FLIP;
+        let lat = (self.lat as u32) ^ SIGN_FLIP;
+        ((lon as u64) << 32) | lat as u64
+    }
+
+    /// Inverse of [`FixedCoord::pack`]. Returns `None` for the empty marker 0.
+    pub const fn unpack(packed: u64) -> Option<Self> {
+        if packed == 0 {
+            return None;
+        }
+        let lon = ((packed >> 32) as u32 ^ SIGN_FLIP) as i32;
+        let lat = (packed as u32 ^ SIGN_FLIP) as i32;
+        Some(Self { lon, lat })
+    }
+}
+
+impl From<FixedCoord> for LonLat {
+    fn from(c: FixedCoord) -> Self {
+        c.to_lonlat()
+    }
+}
+
+impl From<FixedCoord> for geo_types::Coord<f64> {
+    fn from(c: FixedCoord) -> Self {
+        c.to_coord()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- LonLat::is_valid ---
 
     #[test]
     fn lonlat_valid_within_bounds() {
@@ -102,78 +161,53 @@ mod tests {
     }
 
     #[test]
-    fn lonlat_boundary_values_are_valid() {
-        // Exact boundary values must be accepted (inclusive range).
-        assert!(LonLat::new(180.0, 0.0).is_valid());
-        assert!(LonLat::new(-180.0, 0.0).is_valid());
-        assert!(LonLat::new(0.0, 90.0).is_valid());
-        assert!(LonLat::new(0.0, -90.0).is_valid());
-    }
-
-    // --- PackedCoord pack/unpack round-trip ---
-
-    #[test]
-    fn packed_coord_roundtrip_origin() {
-        let p = PackedCoord::pack(0.0, 0.0);
-        let ll = p.unpack();
-        // f32 precision: the offset encoding means (0.0 + 256.0) stored as f32
-        // then subtracted, so the round-trip should be exact for 0.0.
-        assert!((ll.lon - 0.0_f64).abs() < 1e-4);
-        assert!((ll.lat - 0.0_f64).abs() < 1e-4);
-    }
-
-    #[test]
-    fn packed_coord_roundtrip_san_francisco() {
-        let lon = -122.4194_f64;
-        let lat = 37.7749_f64;
-        let p = PackedCoord::pack(lon, lat);
-        let ll = p.unpack();
-        // f32 has ~7 significant decimal digits; within ~0.001 degree at these values.
-        assert!(
-            (ll.lon - lon).abs() < 0.001,
-            "lon diff: {}",
-            (ll.lon - lon).abs()
-        );
-        assert!(
-            (ll.lat - lat).abs() < 0.001,
-            "lat diff: {}",
-            (ll.lat - lat).abs()
-        );
+    fn fixed_round_trip_is_exact_at_osm_precision() {
+        // Values with exactly 7 decimals must survive degrees → fixed → degrees.
+        for &(lon, lat) in &[
+            (-122.419_415_5, 37.774_929_5),
+            (179.999_999_9, -89.999_999_9),
+            (0.000_000_1, -0.000_000_1),
+            (13.404_954, 52.520_007),
+        ] {
+            let f = FixedCoord::from_degrees(lon, lat).expect("valid");
+            assert_eq!(
+                FixedCoord::from_degrees(f.lon_degrees(), f.lat_degrees()),
+                Some(f)
+            );
+            assert!((f.lon_degrees() - lon).abs() < 0.5e-7, "lon {lon}");
+            assert!((f.lat_degrees() - lat).abs() < 0.5e-7, "lat {lat}");
+        }
     }
 
     #[test]
-    fn packed_coord_at_negative_extreme_roundtrips() {
-        let p = PackedCoord::pack(-180.0, -90.0);
-        let ll = p.unpack();
-        assert!((ll.lon - (-180.0)).abs() < 0.001);
-        assert!((ll.lat - (-90.0)).abs() < 0.001);
+    fn fixed_rejects_invalid_input() {
+        assert!(FixedCoord::from_degrees(f64::NAN, 0.0).is_none());
+        assert!(FixedCoord::from_degrees(0.0, f64::INFINITY).is_none());
+        assert!(FixedCoord::from_degrees(180.000_001, 0.0).is_none());
+        assert!(FixedCoord::from_degrees(0.0, -90.000_001).is_none());
     }
 
     #[test]
-    fn packed_coord_at_positive_extreme_roundtrips() {
-        let p = PackedCoord::pack(180.0, 90.0);
-        let ll = p.unpack();
-        assert!((ll.lon - 180.0).abs() < 0.001);
-        assert!((ll.lat - 90.0).abs() < 0.001);
-    }
-
-    // --- PackedCoord::is_empty semantics ---
-
-    #[test]
-    fn packed_coord_origin_is_not_empty() {
-        // (0.0, 0.0) packed adds the offsets, so the stored bits are non-zero.
-        let p = PackedCoord::pack(0.0, 0.0);
-        assert!(
-            !p.is_empty(),
-            "packed (0,0) must NOT be empty due to offset encoding"
-        );
+    fn pack_round_trip_and_zero_is_reserved() {
+        for &(lon, lat) in &[
+            (0, 0),
+            (-1_800_000_000, -900_000_000),
+            (1_800_000_000, 900_000_000),
+            (-1, 1),
+            (123_456_789, -98_765_432),
+        ] {
+            let c = FixedCoord::new(lon, lat);
+            let packed = c.pack();
+            assert_ne!(packed, 0, "valid coordinate packed to the empty marker");
+            assert_eq!(FixedCoord::unpack(packed), Some(c));
+        }
+        assert_eq!(FixedCoord::unpack(0), None);
     }
 
     #[test]
-    fn uninitialized_zero_bytes_is_empty() {
-        // Simulates an mmap slot that was never written (all zero bytes).
-        // SAFETY: PackedCoord is repr(C) with two f32 fields; zeroing it is valid.
-        let p: PackedCoord = unsafe { std::mem::zeroed() };
-        assert!(p.is_empty(), "all-zero bytes must be detected as empty");
+    fn packed_order_is_independent_of_validity_marker() {
+        // (0,0) — the Gulf of Guinea — is a real location, not "empty".
+        let origin = FixedCoord::new(0, 0);
+        assert_eq!(FixedCoord::unpack(origin.pack()), Some(origin));
     }
 }

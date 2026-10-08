@@ -8,7 +8,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use geo_types::{Coord, LineString, Polygon};
-use osmic_accel::{clip_batch_cpu, ClipOptions, GpuAccelerator, WorkItem};
+use osmic_accel::{ClipOptions, GpuAccelerator, WorkItem, clip_batch_cpu};
 use osmic_core::geometry::Geometry;
 
 /// xorshift64*: deterministic, dependency-free.

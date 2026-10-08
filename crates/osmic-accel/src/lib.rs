@@ -92,6 +92,6 @@ pub mod error;
 mod metal;
 mod prepare;
 
-pub use accelerator::{is_available, Backend, Clipper, GpuAccelerator, PendingBatch};
-pub use clip::{clip_batch_cpu, ClipOptions, ClippedGeometry, ClippedPolygon, WorkItem, MAX_ZOOM};
+pub use accelerator::{Backend, Clipper, GpuAccelerator, PendingBatch, is_available};
+pub use clip::{ClipOptions, ClippedGeometry, ClippedPolygon, MAX_ZOOM, WorkItem, clip_batch_cpu};
 pub use error::{AccelError, AccelResult};

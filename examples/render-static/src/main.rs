@@ -114,8 +114,8 @@ async fn load_from_pmtiles(
     let reader: AsyncPmTilesReader<MmapBackend> =
         AsyncPmTilesReader::try_from_source(backend).await?;
 
-    let (min_x, min_y, max_x, max_y) = bbox_to_tile_range(bbox, zoom);
-    let n = (1u64 << zoom) as f64;
+    let range = bbox_to_tile_range(bbox, zoom);
+    let (min_x, min_y, max_x, max_y) = (range.min_x, range.min_y, range.max_x, range.max_y);
     let total_tiles = ((max_x - min_x + 1) as u64) * ((max_y - min_y + 1) as u64);
     info!(
         zoom,
@@ -134,8 +134,11 @@ async fn load_from_pmtiles(
         for x in min_x..=max_x {
             let coord = pmtiles::TileCoord::new(zoom, x, y)?;
             if let Some(data) = reader.get_tile_decompressed(coord).await? {
-                let features = mvt_decode::decode_tile(&data, zoom, x, y, n);
-                all_features.extend(features);
+                let tile = osmic_core::TileCoord::new(x, y, osmic_core::Zoom(zoom));
+                match mvt_decode::decode_tile(&data, tile) {
+                    Ok(features) => all_features.extend(features),
+                    Err(e) => tracing::warn!(%tile, error = %e, "skipping undecodable tile"),
+                }
             }
         }
     }

@@ -1,236 +1,180 @@
-use geo_types::{Coord, Geometry as GeoGeometry, LineString, MultiPolygon, Point, Polygon};
+//! MapLibre Tile (MLT) encoder, via `mlt-core`.
+//!
+//! Each layer's columns are the union of its features' attribute keys
+//! (sorted, `class` first), so `--all-tags` output is preserved.
+
+use std::collections::BTreeSet;
+
+use geo_types::{
+    Coord, Geometry as GeoGeometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point,
+    Polygon,
+};
 use mlt_core::EncodedLayer;
-use mlt_core::v01::{PropValue, StagedLayer01, TileFeature as MltTileFeature, TileLayer01};
-use osmic_osm::tags::{TagStore, WellKnownKey};
-#[cfg(feature = "native")]
-use pmtiles::TileType;
+use mlt_core::v01::{PropValue, StagedLayer01, TileFeature as MltFeature, TileLayer01};
 
-use crate::coord::TileTransform;
-use crate::encode::{TileEncoder, TileFeature, TileFormat};
+use crate::encode::{TileEncoder, TileFormat};
+use crate::error::TileError;
+use crate::model::{GeomType, TileFeature, TileLayer, ring_area2};
 
-/// Property columns we encode into MLT tiles.
-const PROPERTY_NAMES: &[&str] = &[
-    "class",
-    "name",
-    "addr:street",
-    "addr:housenumber",
-    "addr:city",
-    "addr:postcode",
-    "phone",
-    "website",
-    "opening_hours",
-    "cuisine",
-    "brand",
-    "operator",
-];
-
-/// Well-known keys corresponding to PROPERTY_NAMES (skipping "class" and "name"
-/// which are handled separately).
-const EXTRA_WK_KEYS: &[WellKnownKey] = &[
-    WellKnownKey::AddrStreet,
-    WellKnownKey::AddrHousenumber,
-    WellKnownKey::AddrCity,
-    WellKnownKey::AddrPostcode,
-    WellKnownKey::Phone,
-    WellKnownKey::Website,
-    WellKnownKey::OpeningHours,
-    WellKnownKey::Cuisine,
-    WellKnownKey::Brand,
-    WellKnownKey::Operator,
-];
-
-/// MLT (MapLibre Tile) encoder.
+/// MapLibre Tile encoder.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MltEncoder;
 
-impl TileEncoder for MltEncoder {
-    fn encode_clipped(
-        &self,
-        extent: u32,
-        transform: &TileTransform,
-        layer_features: &[(&str, Vec<&dyn TileFeature>)],
-        tag_store: &TagStore,
-    ) -> Option<Vec<u8>> {
-        encode_mlt_tile(extent, Some(transform), layer_features, tag_store)
-    }
+fn ring(points: &[[i32; 2]]) -> LineString<i32> {
+    LineString(points.iter().map(|&[x, y]| Coord { x, y }).collect())
+}
 
+fn geometry(f: &TileFeature) -> Option<GeoGeometry<i32>> {
+    match f.geom_type {
+        GeomType::Point => {
+            let pts: Vec<Point<i32>> = f
+                .parts
+                .iter()
+                .flatten()
+                .map(|&[x, y]| Point::new(x, y))
+                .collect();
+            match pts.len() {
+                0 => None,
+                1 => Some(GeoGeometry::Point(pts[0])),
+                _ => Some(GeoGeometry::MultiPoint(MultiPoint(pts))),
+            }
+        }
+        GeomType::LineString => {
+            let lines: Vec<LineString<i32>> = f
+                .parts
+                .iter()
+                .filter(|p| p.len() >= 2)
+                .map(|p| ring(p))
+                .collect();
+            match lines.len() {
+                0 => None,
+                1 => lines.into_iter().next().map(GeoGeometry::LineString),
+                _ => Some(GeoGeometry::MultiLineString(MultiLineString(lines))),
+            }
+        }
+        GeomType::Polygon => {
+            let mut polys: Vec<Polygon<i32>> = Vec::new();
+            for part in f.parts.iter().filter(|p| p.len() >= 3) {
+                if ring_area2(part) > 0 || polys.is_empty() {
+                    polys.push(Polygon::new(ring(part), vec![]));
+                } else if let Some(last) = polys.last_mut() {
+                    last.interiors_push(ring(part));
+                }
+            }
+            match polys.len() {
+                0 => None,
+                1 => polys.into_iter().next().map(GeoGeometry::Polygon),
+                _ => Some(GeoGeometry::MultiPolygon(MultiPolygon(polys))),
+            }
+        }
+    }
+}
+
+impl TileEncoder for MltEncoder {
     fn format(&self) -> TileFormat {
         TileFormat::Mlt
     }
 
-    #[cfg(feature = "native")]
-    fn tile_type(&self) -> TileType {
-        // PMTiles uses Unknown(0x03) for MLT; check if pmtiles crate has Mlt variant
-        // For now use Mvt as the container format — the actual encoding is MLT
-        // TODO: Update when pmtiles crate adds TileType::Mlt
-        TileType::Mvt
-    }
-}
-
-fn encode_mlt_tile(
-    extent: u32,
-    transform: Option<&TileTransform>,
-    layer_features: &[(&str, Vec<&dyn TileFeature>)],
-    tag_store: &TagStore,
-) -> Option<Vec<u8>> {
-    let name_key = tag_store.well_known(WellKnownKey::Name);
-    let extra_keys: Vec<_> = EXTRA_WK_KEYS
-        .iter()
-        .map(|wk| tag_store.well_known(*wk))
-        .collect();
-
-    let mut output = Vec::new();
-    let mut any_layer = false;
-
-    for &(layer_name, ref features) in layer_features {
-        if features.is_empty() {
-            continue;
-        }
-
-        let property_names: Vec<String> = PROPERTY_NAMES.iter().map(|s| s.to_string()).collect();
-        let prop_count = property_names.len();
-
-        let mlt_features: Vec<MltTileFeature> = features
-            .iter()
-            .filter_map(|&feature| {
-                let geom = convert_geometry(feature.geometry(), extent, transform)?;
-
-                let mut props = Vec::with_capacity(prop_count);
-
-                // "class"
-                props.push(PropValue::Str(Some(
-                    feature.kind().class_name().to_string(),
-                )));
-
-                // "name"
-                let name_val = feature
-                    .tags()
-                    .get(name_key)
-                    .map(|v| tag_store.resolve(v).to_string());
-                props.push(PropValue::Str(name_val));
-
-                // Extra tag columns
-                for &key in &extra_keys {
-                    let val = feature
-                        .tags()
-                        .get(key)
-                        .map(|v| tag_store.resolve(v).to_string());
-                    props.push(PropValue::Str(val));
-                }
-
-                Some(MltTileFeature {
-                    id: Some(feature.id() as u64),
-                    geometry: geom,
-                    properties: props,
+    fn encode(&self, layers: &[TileLayer]) -> Result<Vec<u8>, TileError> {
+        let mut out = Vec::new();
+        for layer in layers.iter().filter(|l| !l.features.is_empty()) {
+            let mut keys: BTreeSet<&str> = layer
+                .features
+                .iter()
+                .flat_map(|f| f.attributes.iter().map(|(k, _)| k.as_str()))
+                .collect();
+            keys.remove("class");
+            let property_names: Vec<String> = std::iter::once("class")
+                .chain(keys)
+                .map(str::to_string)
+                .collect();
+            let features: Vec<MltFeature> = layer
+                .features
+                .iter()
+                .filter_map(|f| {
+                    let geometry = geometry(f)?;
+                    let properties = property_names
+                        .iter()
+                        .map(|name| {
+                            PropValue::Str(
+                                f.attributes
+                                    .iter()
+                                    .find(|(k, _)| k == name)
+                                    .map(|(_, v)| v.clone()),
+                            )
+                        })
+                        .collect();
+                    Some(MltFeature {
+                        id: f.id,
+                        geometry,
+                        properties,
+                    })
                 })
-            })
-            .collect();
-
-        if mlt_features.is_empty() {
-            continue;
-        }
-
-        let tile_layer = TileLayer01 {
-            name: layer_name.to_string(),
-            extent,
-            property_names,
-            features: mlt_features,
-        };
-
-        let staged = StagedLayer01::from(tile_layer);
-
-        let encoded = match staged.encode_auto() {
-            Ok((enc, _encoder)) => enc,
-            Err(e) => {
-                tracing::warn!(layer = layer_name, error = %e, "MLT encoding failed, skipping layer");
+                .collect();
+            if features.is_empty() {
                 continue;
             }
+            let staged = StagedLayer01::from(TileLayer01 {
+                name: layer.name.clone(),
+                extent: layer.extent,
+                property_names,
+                features,
+            });
+            let encode_err = |message: String| TileError::Encode {
+                tile: format!("layer {}", layer.name),
+                message,
+            };
+            let (encoded, _) = staged
+                .encode_auto()
+                .map_err(|e| encode_err(e.to_string()))?;
+            EncodedLayer::Tag01(encoded)
+                .write_to(&mut out)
+                .map_err(|e| encode_err(e.to_string()))?;
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encodes_every_geometry_type_with_dynamic_columns() {
+        let f = |geom_type, parts: Vec<Vec<[i32; 2]>>, attrs: &[(&str, &str)]| TileFeature {
+            id: Some(1),
+            geom_type,
+            parts,
+            attributes: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         };
-
-        let layer = EncodedLayer::Tag01(encoded);
-        if layer.write_to(&mut output).is_err() {
-            continue;
-        }
-        any_layer = true;
-    }
-
-    if any_layer { Some(output) } else { None }
-}
-
-/// Convert osmic Geometry (f64 lon/lat or projected) to geo_types::Geometry<i32>
-/// in tile-local coordinates suitable for MLT encoding.
-fn convert_geometry(
-    geom: &osmic_core::geometry::Geometry,
-    extent: u32,
-    transform: Option<&TileTransform>,
-) -> Option<GeoGeometry<i32>> {
-    match geom {
-        osmic_core::geometry::Geometry::Point(p) => {
-            let (x, y) = project(p.x(), p.y(), extent, transform);
-            Some(GeoGeometry::Point(Point::new(x, y)))
-        }
-        osmic_core::geometry::Geometry::Line(ls) => {
-            let coords: Vec<Coord<i32>> = ls
-                .coords()
-                .map(|c| {
-                    let (x, y) = project(c.x, c.y, extent, transform);
-                    Coord { x, y }
-                })
-                .collect();
-            if coords.len() < 2 {
-                return None;
-            }
-            Some(GeoGeometry::LineString(LineString::new(coords)))
-        }
-        osmic_core::geometry::Geometry::Polygon(poly) => {
-            let exterior = convert_ring(poly.exterior(), extent, transform);
-            let interiors: Vec<_> = poly
-                .interiors()
-                .iter()
-                .map(|ring| convert_ring(ring, extent, transform))
-                .collect();
-            Some(GeoGeometry::Polygon(Polygon::new(exterior, interiors)))
-        }
-        osmic_core::geometry::Geometry::MultiPolygon(mp) => {
-            let polys: Vec<_> = mp
-                .iter()
-                .map(|poly| {
-                    let exterior = convert_ring(poly.exterior(), extent, transform);
-                    let interiors: Vec<_> = poly
-                        .interiors()
-                        .iter()
-                        .map(|ring| convert_ring(ring, extent, transform))
-                        .collect();
-                    Polygon::new(exterior, interiors)
-                })
-                .collect();
-            Some(GeoGeometry::MultiPolygon(MultiPolygon::new(polys)))
-        }
-    }
-}
-
-fn convert_ring(
-    ring: &geo_types::LineString<f64>,
-    extent: u32,
-    transform: Option<&TileTransform>,
-) -> LineString<i32> {
-    let coords: Vec<Coord<i32>> = ring
-        .coords()
-        .map(|c| {
-            let (x, y) = project(c.x, c.y, extent, transform);
-            Coord { x, y }
-        })
-        .collect();
-    LineString::new(coords)
-}
-
-/// Project coordinates to tile-local i32 space.
-/// If transform is Some, coords are lon/lat and need projection.
-/// If None, coords are already in tile-local f64 space (GPU path).
-fn project(x: f64, y: f64, _extent: u32, transform: Option<&TileTransform>) -> (i32, i32) {
-    if let Some(t) = transform {
-        let (tx, ty) = t.lon_lat_to_tile(x, y);
-        (tx.round() as i32, ty.round() as i32)
-    } else {
-        (x.round() as i32, y.round() as i32)
+        let layer = TileLayer {
+            name: "test".into(),
+            extent: 4096,
+            features: vec![
+                f(
+                    GeomType::Point,
+                    vec![vec![[1, 2]]],
+                    &[("class", "a"), ("name", "x")],
+                ),
+                f(
+                    GeomType::LineString,
+                    vec![vec![[0, 0], [5, 5]]],
+                    &[("class", "b"), ("surface", "paved")],
+                ),
+                f(
+                    GeomType::Polygon,
+                    vec![
+                        vec![[0, 0], [10, 0], [10, 10], [0, 10]],
+                        vec![[2, 2], [2, 4], [4, 4], [4, 2]],
+                    ],
+                    &[("class", "c")],
+                ),
+            ],
+        };
+        let bytes = MltEncoder.encode(&[layer]).expect("encodes");
+        assert!(!bytes.is_empty());
     }
 }

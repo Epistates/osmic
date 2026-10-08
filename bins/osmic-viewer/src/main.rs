@@ -415,8 +415,8 @@ fn load_tiles_blocking(path: &std::path::Path, bbox: &BBox, zoom: u8) -> Vec<Dec
                 .await
                 .unwrap();
 
-        let (min_x, min_y, max_x, max_y) = bbox_to_tile_range(bbox, zoom);
-        let n = (1u64 << zoom) as f64;
+        let range = bbox_to_tile_range(bbox, zoom);
+        let (min_x, min_y, max_x, max_y) = (range.min_x, range.min_y, range.max_x, range.max_y);
         let mut features = Vec::new();
 
         for y in min_y..=max_y {
@@ -424,7 +424,15 @@ fn load_tiles_blocking(path: &std::path::Path, bbox: &BBox, zoom: u8) -> Vec<Dec
                 if let Ok(coord) = pmtiles::TileCoord::new(zoom, x, y)
                     && let Ok(Some(data)) = reader.get_tile_decompressed(coord).await
                 {
-                    features.extend(mvt_decode::decode_tile(&data, zoom, x, y, n));
+                    match mvt_decode::decode_tile(
+                        &data,
+                        osmic_core::TileCoord::new(x, y, osmic_core::Zoom(zoom)),
+                    ) {
+                        Ok(decoded) => features.extend(decoded),
+                        Err(e) => {
+                            tracing::warn!(zoom, x, y, error = %e, "skipping undecodable tile")
+                        }
+                    }
                 }
             }
         }

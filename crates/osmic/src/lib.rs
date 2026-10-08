@@ -20,22 +20,25 @@ pub use osmic_tiles as tiles;
 pub mod prelude {
     // Core types
     pub use osmic_core::{
-        BBox, Color, Geometry, LonLat, OsmicError, OsmicResult, PackedCoord, TileCoord, Zoom,
+        BBox, Color, FixedCoord, Geometry, LonLat, OsmId, OsmType, OsmicError, OsmicResult,
+        TileCoord, Zoom,
     };
 
     // OSM data model
     pub use osmic_osm::geojson::load_geojson;
-    pub use osmic_osm::{Feature, FeatureKind, PbfProcessor, TagStore, Tags};
+    pub use osmic_osm::{
+        Feature, FeatureIndex, FeatureKind, FeatureSink, LayerSet, PbfProcessor, PipelineConfig,
+        TagFilter, TagStore, Tags,
+    };
 
-    // Spatial index
-    pub use osmic_index::{DenseNodeLocationStore, FeatureIndex};
+    // Node locations
+    pub use osmic_index::{DenseNodeStore, SparseNodeIndex};
 
     // App framework
     pub use osmic_app::{App, Plugin, PluginGroup};
 
     // Tile generation
-    pub use osmic_tiles::pipeline::{TileGenerator, TileGeneratorConfig};
-    pub use osmic_tiles::pmtiles::PmTilesArchive;
+    pub use osmic_tiles::{MvtEncoder, PmTilesArchive, TileGenerator, TileGeneratorConfig};
 
     // Rendering
     pub use osmic_render::backend::{RenderBackend, RenderConfig};

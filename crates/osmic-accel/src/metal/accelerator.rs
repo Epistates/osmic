@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::clip::{
-    assemble, clip_item_cpu, with_item_index, ClipOptions, ClippedGeometry, UnitResults, UnitView,
-    WorkItem,
+    ClipOptions, ClippedGeometry, UnitResults, UnitView, WorkItem, assemble, clip_item_cpu,
+    with_item_index,
 };
 use crate::error::AccelResult;
 use crate::prepare::{Plan, Prepared};

@@ -1,7 +1,7 @@
 //! Public entry points: [`GpuAccelerator`], [`PendingBatch`] and the
 //! backend-agnostic [`Clipper`].
 
-use crate::clip::{clip_batch_cpu, ClipOptions, ClippedGeometry, WorkItem};
+use crate::clip::{ClipOptions, ClippedGeometry, WorkItem, clip_batch_cpu};
 use crate::error::{AccelError, AccelResult};
 
 #[cfg(osmic_metallib)]
