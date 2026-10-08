@@ -192,8 +192,10 @@ impl App {
 
     /// Build and finish every plugin (see [`Plugin`]). Idempotent.
     ///
-    /// On failure the plugins built so far are cleaned up and the app can no
-    /// longer be used.
+    /// If building fails, the plugins built so far are cleaned up and the
+    /// app can no longer be used. Once the app is built, a later call only
+    /// reports a plugin added since then
+    /// ([`AppError::AddedAfterBuild`]); the built app stays usable.
     ///
     /// # Errors
     ///
