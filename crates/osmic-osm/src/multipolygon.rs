@@ -108,7 +108,9 @@ pub struct AssemblyReport {
     pub inner_rings: usize,
     /// Segments whose member role disagreed with the ring they ended up in.
     pub role_mismatches: usize,
-    /// Segments removed because they appeared twice.
+    /// Segments removed because they cancelled out: a segment appearing an
+    /// even number of times is dropped, and every copy counts (one
+    /// duplicated segment adds 2).
     pub duplicate_segments: usize,
 }
 

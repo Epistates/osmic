@@ -56,7 +56,7 @@ pub enum TagFilter {
 
 /// A filter string that could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid tag filter at character {position}: {message}")]
+#[error("invalid tag filter at byte {position}: {message}")]
 pub struct FilterParseError {
     /// Byte offset into the input where parsing failed (the input length
     /// if it ended early).
