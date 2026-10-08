@@ -8,12 +8,16 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum GeomType {
+    /// One or more points.
     Point = 1,
+    /// One or more lines.
     LineString = 2,
+    /// One or more polygons, possibly with holes.
     Polygon = 3,
 }
 
 impl GeomType {
+    /// The type with MVT code `v`, if any.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             1 => Some(Self::Point),
@@ -37,17 +41,24 @@ impl GeomType {
 ///   2.1 convention.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileFeature {
+    /// Feature id, if any.
     pub id: Option<u64>,
+    /// Geometry type of `parts`.
     pub geom_type: GeomType,
+    /// Geometry, laid out by type as described above.
     pub parts: Vec<Vec<[i32; 2]>>,
+    /// Attribute keys and values, in order.
     pub attributes: Vec<(String, String)>,
 }
 
 /// One layer of a tile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileLayer {
+    /// Layer name (its id in styles).
     pub name: String,
+    /// Coordinate units per tile side.
     pub extent: u32,
+    /// The layer's features, in drawing order.
     pub features: Vec<TileFeature>,
 }
 

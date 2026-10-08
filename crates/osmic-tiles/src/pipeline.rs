@@ -361,6 +361,7 @@ impl TileGenerator {
         })
     }
 
+    /// The settings this generator was created with.
     pub fn config(&self) -> &TileGeneratorConfig {
         &self.config
     }

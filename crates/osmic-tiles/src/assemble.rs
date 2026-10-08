@@ -64,9 +64,11 @@ fn priority(secondary: u64) -> u64 {
 /// Outcome of assembling one tile.
 #[derive(Debug, Clone)]
 pub struct AssembledTile {
+    /// The tile.
     pub coord: TileCoord,
     /// Encoded and compressed bytes (empty if nothing survived).
     pub data: Vec<u8>,
+    /// Features kept in the tile.
     pub features: usize,
     /// Features dropped to meet the byte budget.
     pub dropped: usize,

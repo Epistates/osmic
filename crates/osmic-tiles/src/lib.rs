@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Vector tile generation for osmic.
 //!
 //! - [`render`]: features → per-zoom, per-tile geometry (projection,
@@ -17,13 +18,18 @@ mod error;
 pub mod mlt;
 pub mod model;
 pub mod mvt;
+// TODO(docs): `DecodedFeature` and `LayerTables` fields are owned by the
+// attribute-typing change; drop this allow once they are documented.
+#[allow(missing_docs)]
 pub mod mvt_decode;
 #[cfg(feature = "native")]
 pub mod pipeline;
 #[cfg(feature = "native")]
 pub mod pmtiles;
 mod proto;
+// TODO(docs): drop this allow once the reader's public items are documented.
 #[cfg(feature = "reader")]
+#[allow(missing_docs)]
 pub mod reader;
 #[cfg(feature = "native")]
 mod record;

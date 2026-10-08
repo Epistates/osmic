@@ -323,6 +323,7 @@ pub struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
+    /// A renderer for features whose tags were interned in `tag_store`.
     pub fn new(config: &'a RenderConfig, tag_store: &'a TagStore) -> Self {
         Self { config, tag_store }
     }

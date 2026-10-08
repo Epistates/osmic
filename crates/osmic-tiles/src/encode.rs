@@ -33,6 +33,7 @@ impl TileFormat {
 
 /// Encodes one tile's layers into bytes (uncompressed).
 pub trait TileEncoder: Send + Sync {
+    /// The format this encoder produces.
     fn format(&self) -> TileFormat;
 
     /// Encode `layers`. Returns an empty vector if there is nothing to

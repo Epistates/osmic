@@ -22,8 +22,11 @@ use crate::error::TileError;
 /// What one layer contains, collected while rendering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LayerStats {
+    /// Lowest zoom with a piece of the layer.
     pub min_zoom: u8,
+    /// Highest zoom with a piece of the layer.
     pub max_zoom: u8,
+    /// Feature pieces (one per feature per tile).
     pub features: u64,
     /// Attribute keys seen on the layer's features.
     pub fields: std::collections::BTreeSet<String>,
@@ -52,6 +55,7 @@ impl LayerStats {
         }
     }
 
+    /// Add `other`'s statistics to these.
     pub fn merge(&mut self, other: &LayerStats) {
         if other.features == 0 {
             return;
@@ -70,8 +74,11 @@ impl LayerStats {
 /// Descriptive metadata for an archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveInfo {
+    /// Tileset name.
     pub name: String,
+    /// Tileset description.
     pub description: String,
+    /// Attribution HTML shown by map clients.
     pub attribution: String,
 }
 

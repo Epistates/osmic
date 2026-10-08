@@ -10,14 +10,28 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum DecodeError {
+    /// The data ended inside a value that starts at this byte offset.
     #[error("unexpected end of data at byte {0}")]
     Truncated(usize),
+    /// A varint at this byte offset did not end within 10 bytes.
     #[error("varint longer than 10 bytes at byte {0}")]
     VarintTooLong(usize),
+    /// A field used a wire type vector tiles never contain.
     #[error("unsupported wire type {wire} at byte {at}")]
-    WireType { wire: u8, at: usize },
+    WireType {
+        /// The wire type.
+        wire: u8,
+        /// Byte offset of the field.
+        at: usize,
+    },
+    /// Well-formed protobuf whose content is invalid.
     #[error("invalid {what}: {detail}")]
-    Invalid { what: &'static str, detail: String },
+    Invalid {
+        /// What was being decoded.
+        what: &'static str,
+        /// What is wrong with it.
+        detail: String,
+    },
 }
 
 /// Bounds-checked cursor over a protobuf message.
