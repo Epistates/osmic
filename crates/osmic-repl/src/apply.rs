@@ -117,15 +117,15 @@ pub fn apply_to_pbf(
         )));
     }
     let temp = osmic_core::fs::temp_file_for(output)?;
-    let options = PbfWriterOptions {
-        bbox: header.bbox,
-        sorted: true,
-        writing_program: Some(concat!("osmic ", env!("CARGO_PKG_VERSION")).into()),
-        replication_timestamp: state.unix_timestamp(),
-        replication_sequence: i64::try_from(state.sequence).ok(),
-        replication_base_url: Some(state.base_url.clone()),
-        ..Default::default()
-    };
+    let options = PbfWriterOptions::new()
+        .bbox(header.bbox)
+        .sorted(true)
+        .writing_program(concat!("osmic ", env!("CARGO_PKG_VERSION")))
+        .replication(
+            state.unix_timestamp(),
+            i64::try_from(state.sequence).ok(),
+            Some(state.base_url.clone()),
+        );
     let mut writer = PbfWriter::new(BufWriter::with_capacity(1 << 20, temp.as_file()), &options)?;
     let mut stats = ApplyStats::default();
     let mut pending = changes.iter().peekable();

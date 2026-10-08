@@ -17,10 +17,7 @@ fn osmic() -> Command {
 /// A small San Francisco dataset: a café, a road, a park with a hole.
 fn fixture(dir: &Path) -> PathBuf {
     let path = dir.join("sf.osm.pbf");
-    let opts = PbfWriterOptions {
-        sorted: true,
-        ..Default::default()
-    };
+    let opts = PbfWriterOptions::new().sorted(true);
     let mut w =
         PbfWriter::new(std::fs::File::create(&path).expect("create"), &opts).expect("header");
     let f = |lon: f64, lat: f64| FixedCoord::from_degrees(lon, lat).expect("valid");

@@ -8,7 +8,7 @@
 
 mod writer;
 
-pub use writer::{PbfWriter, PbfWriterOptions};
+pub use writer::{ElementMeta, MAX_BLOCK_BYTES, PbfWriter, PbfWriterOptions};
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -16,7 +16,7 @@ use std::path::Path;
 use osmpbf::{BlobDecode, BlobReader, PrimitiveBlock};
 use rayon::prelude::*;
 
-use osmic_core::BBox;
+use osmic_core::{BBox, FixedCoord};
 
 use crate::error::OsmError;
 
@@ -52,6 +52,19 @@ impl PbfHeader {
             .chain(&self.required_features)
             .any(|f| f == "LocationsOnWays")
     }
+}
+
+/// A location from osmpbf's nanodegree values, or `None` if it does not
+/// fit OSM's 1e-7° grid or lies outside the valid range.
+///
+/// osmpbf's own `decimicro_*` accessors truncate with `as i32`, which wraps
+/// far out-of-range values back into valid-looking ones; osmium marks a
+/// missing way-node location as `i32::MAX`, which is out of range too.
+pub fn location(nano_lon: i64, nano_lat: i64) -> Option<FixedCoord> {
+    let lon = i32::try_from(nano_lon / 100).ok()?;
+    let lat = i32::try_from(nano_lat / 100).ok()?;
+    let c = FixedCoord::new(lon, lat);
+    c.is_valid().then_some(c)
 }
 
 /// A block's string table, decoded once.

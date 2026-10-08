@@ -58,13 +58,11 @@ fn gz(text: &str) -> Vec<u8> {
 }
 
 fn write_base(path: &Path, base_url: &str) {
-    let opts = PbfWriterOptions {
-        sorted: true,
-        replication_sequence: Some(100),
-        replication_timestamp: Some(1_791_460_800),
-        replication_base_url: Some(base_url.to_string()),
-        ..Default::default()
-    };
+    let opts = PbfWriterOptions::new().sorted(true).replication(
+        Some(1_791_460_800),
+        Some(100),
+        Some(base_url.to_string()),
+    );
     let mut w =
         PbfWriter::new(std::fs::File::create(path).expect("create"), &opts).expect("header");
     for (id, lon) in [(1, 10), (2, 20), (3, 30)] {

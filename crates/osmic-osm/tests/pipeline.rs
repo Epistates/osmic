@@ -29,10 +29,7 @@ fn fc(lon: i32, lat: i32) -> FixedCoord {
 /// - relation 101: multipolygon whose outer way 22 is missing (incomplete)
 /// - relation 102: route relation (ignored)
 fn write_fixture(path: &Path, sorted: bool, shuffle_nodes: bool) {
-    let opts = PbfWriterOptions {
-        sorted,
-        ..Default::default()
-    };
+    let opts = PbfWriterOptions::new().sorted(sorted);
     let mut w =
         PbfWriter::new(std::fs::File::create(path).expect("create"), &opts).expect("header");
 
@@ -301,10 +298,7 @@ fn layer_filter_and_tag_retention() {
 fn history_files_are_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("history.osh.pbf");
-    let opts = PbfWriterOptions {
-        extra_required_features: vec!["HistoricalInformation".to_string()],
-        ..Default::default()
-    };
+    let opts = PbfWriterOptions::new().required_feature("HistoricalInformation");
     PbfWriter::new(std::fs::File::create(&path).expect("create"), &opts)
         .expect("header")
         .finish()
@@ -351,5 +345,51 @@ fn element_filter_applies_to_raw_tags_before_classification() {
             .iter()
             .any(|f| f.id == OsmId::relation(100)),
         "relations are filtered too, and member ways are still cached"
+    );
+}
+
+#[test]
+fn locations_on_ways_with_missing_nodes_follow_the_incomplete_policy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("low.osm.pbf");
+    let opts = PbfWriterOptions::new().sorted(true).locations_on_ways(true);
+    let mut w =
+        PbfWriter::new(std::fs::File::create(&path).expect("create"), &opts).expect("header");
+    let (a, b, c) = (
+        fc(-1_000_000_000, 400_000_000),
+        fc(-999_990_000, 400_010_000),
+        fc(-999_980_000, 400_000_000),
+    );
+    w.write_way_with_locations(
+        1,
+        &[1, 2, 3],
+        &[Some(a), Some(b), Some(c)],
+        &[("highway", "residential")],
+        None,
+    )
+    .expect("way");
+    // osmium add-locations-to-ways --ignore-missing-nodes: node 9 unknown.
+    w.write_way_with_locations(
+        2,
+        &[1, 2, 9],
+        &[Some(a), Some(b), None],
+        &[("highway", "service")],
+        None,
+    )
+    .expect("way");
+    w.finish().expect("finish");
+
+    let data = PbfProcessor::default().process(&path).expect("process");
+    assert_eq!(data.stats.incomplete_ways, 1);
+    let ids: Vec<OsmId> = data.features.iter().map(|f| f.id).collect();
+    assert_eq!(
+        ids,
+        [OsmId::way(1)],
+        "the way with a missing node is skipped"
+    );
+    assert!(
+        data.bbox.max_lon <= -99.0 && data.bbox.max_lat <= 41.0,
+        "no out-of-range coordinates: {:?}",
+        data.bbox
     );
 }

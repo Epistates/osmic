@@ -25,7 +25,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use memmap2::{MmapMut, MmapOptions};
+use memmap2::{MmapOptions, MmapRaw};
 use tracing::info;
 
 use osmic_core::{FixedCoord, NodeLocationStore};
@@ -40,7 +40,9 @@ const SLOT: usize = std::mem::size_of::<u64>();
 
 /// Dense, id-indexed node location store (anonymous memory or file).
 pub struct DenseNodeStore {
-    map: MmapMut,
+    /// Raw mapping: slots are only accessed through atomics derived from
+    /// [`MmapRaw::as_mut_ptr`], which carries write permission.
+    map: MmapRaw,
     /// Byte offset of slot 0 within `map`.
     offset: usize,
     /// Number of slots: valid ids are `0..capacity`.
@@ -73,7 +75,7 @@ impl DenseNodeStore {
             .no_reserve_swap()
             .map_anon()?;
         Ok(Self {
-            map,
+            map: MmapRaw::from(map),
             offset: 0,
             capacity,
         })
@@ -107,7 +109,7 @@ impl DenseNodeStore {
         map[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         map[16..24].copy_from_slice(&(capacity as u64).to_le_bytes());
         Ok(Self {
-            map,
+            map: MmapRaw::from(map),
             offset: HEADER_LEN,
             capacity,
         })
@@ -156,7 +158,7 @@ impl DenseNodeStore {
             )));
         }
         Ok(Self {
-            map,
+            map: MmapRaw::from(map),
             offset: HEADER_LEN,
             capacity,
         })
@@ -168,9 +170,11 @@ impl DenseNodeStore {
     }
 
     fn slots(&self) -> &[AtomicU64] {
-        let base = self.map.as_ptr().wrapping_add(self.offset);
-        // SAFETY: `base` is inside the live mapping (offset 0 or one page)
-        // and page-aligned, hence 8-byte aligned. The mapping holds exactly
+        let base = self.map.as_mut_ptr().wrapping_add(self.offset);
+        // SAFETY: `base` comes from `MmapRaw::as_mut_ptr`, so it may be
+        // written through (no shared-reference provenance), and lies inside
+        // the live mapping (offset 0 or one page), page-aligned and hence
+        // 8-byte aligned. The mapping holds exactly
         // `capacity` 8-byte slots after `offset` (checked at construction)
         // and lives as long as `self`. All access to the slot bytes goes
         // through these atomics — the raw bytes are never exposed — so

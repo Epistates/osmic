@@ -38,7 +38,7 @@ use crate::feature::Feature;
 use crate::filter::TagFilter;
 use crate::layers::LayerSet;
 use crate::multipolygon::{MemberWay, Role, assemble_area};
-use crate::pbf::{PbfHeader, StringTable, par_blocks, read_header};
+use crate::pbf::{PbfHeader, StringTable, location, par_blocks, read_header};
 use crate::tags::{TagRetention, TagStore};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -450,41 +450,37 @@ fn scan_block(
         invalid_nodes: 0,
     };
     let mut run = NodeRun::default();
-    let mut store = |id: i64, c: FixedCoord, out: &mut Pass1Block| -> Result<(), OsmError> {
-        out.nodes += 1;
-        if !c.is_valid() {
-            out.invalid_nodes += 1;
-            return Ok(());
-        }
-        if let Some(d) = dense {
-            d.set(id, c)?;
-        } else if collect_sparse {
-            run.push(id, c);
-        }
-        Ok(())
-    };
+    let mut store =
+        |id: i64, c: Option<FixedCoord>, out: &mut Pass1Block| -> Result<(), OsmError> {
+            out.nodes += 1;
+            let Some(c) = c else {
+                out.invalid_nodes += 1;
+                return Ok(());
+            };
+            if let Some(d) = dense {
+                d.set(id, c)?;
+            } else if collect_sparse {
+                run.push(id, c);
+            }
+            Ok(())
+        };
     let mut tags: Vec<(&str, &str)> = Vec::new();
+    // Decoded only for blocks that contain relations.
+    let strings: std::cell::OnceCell<StringTable<'_>> = std::cell::OnceCell::new();
     for element in block.elements() {
         match element {
             Element::DenseNode(n) => {
-                store(
-                    n.id(),
-                    FixedCoord::new(n.decimicro_lon(), n.decimicro_lat()),
-                    &mut out,
-                )?;
+                store(n.id(), location(n.nano_lon(), n.nano_lat()), &mut out)?;
             }
             Element::Node(n) => {
-                store(
-                    n.id(),
-                    FixedCoord::new(n.decimicro_lon(), n.decimicro_lat()),
-                    &mut out,
-                )?;
+                store(n.id(), location(n.nano_lon(), n.nano_lat()), &mut out)?;
             }
             Element::Way(_) => out.ways += 1,
             Element::Relation(rel) => {
                 out.relation_count += 1;
+                let strings = strings.get_or_init(|| StringTable::new(block));
                 tags.clear();
-                tags.extend(rel.tags());
+                tags.extend(strings.tags(rel.raw_tags()));
                 if !select(&tags) {
                     continue;
                 }
@@ -503,7 +499,11 @@ fn scan_block(
                                 RelMemberType::Relation => OsmType::Relation,
                             },
                             id: m.member_id,
-                            role: m.role().unwrap_or_default().to_owned(),
+                            role: usize::try_from(m.role_sid)
+                                .ok()
+                                .and_then(|i| strings.get(i))
+                                .unwrap_or_default()
+                                .to_owned(),
                         })
                         .collect(),
                 });
@@ -623,9 +623,11 @@ impl Pass2Context<'_> {
                     if kv.is_empty() {
                         continue;
                     }
-                    let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
+                    let Some(c) = location(n.nano_lon(), n.nano_lat()) else {
+                        continue;
+                    };
                     let classes = classify(&kv, layers);
-                    if classes.is_empty() || !c.is_valid() || !passes!(tags.clone()) {
+                    if classes.is_empty() || !passes!(tags.clone()) {
                         continue;
                     }
                     let point = Geometry::Point(Point(c.to_coord()));
@@ -644,9 +646,11 @@ impl Pass2Context<'_> {
                     if kv.is_empty() {
                         continue;
                     }
-                    let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
+                    let Some(c) = location(n.nano_lon(), n.nano_lat()) else {
+                        continue;
+                    };
                     let classes = classify(&kv, layers);
-                    if classes.is_empty() || !c.is_valid() || !passes!(tags.clone()) {
+                    if classes.is_empty() || !passes!(tags.clone()) {
                         continue;
                     }
                     let point = Geometry::Point(Point(c.to_coord()));
@@ -691,10 +695,20 @@ impl Pass2Context<'_> {
                                 }
                             }
                         }
-                        None => coords.extend(
-                            way.node_locations()
-                                .map(|l| FixedCoord::new(l.decimicro_lon(), l.decimicro_lat())),
-                        ),
+                        None => {
+                            // Locations stored on the way (osmium
+                            // add-locations-to-ways); a missing node is an
+                            // out-of-range location.
+                            let mut stored = 0;
+                            for l in way.node_locations() {
+                                stored += 1;
+                                match location(l.nano_lon(), l.nano_lat()) {
+                                    Some(c) => coords.push(c),
+                                    None => missing = true,
+                                }
+                            }
+                            missing |= stored != refs.len();
+                        }
                     }
                     let closed = refs.len() >= 4 && refs.first() == refs.last();
 

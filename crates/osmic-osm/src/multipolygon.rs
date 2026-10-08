@@ -10,7 +10,9 @@
 //! 2. **Validation.** Every vertex must have even degree. An odd-degree
 //!    vertex means a ring cannot close — usually a member way missing from
 //!    an extract — and the relation is rejected rather than emitted as a
-//!    partial polygon.
+//!    partial polygon. Segments must not cross, overlap or touch another
+//!    segment's interior; such relations are rejected as well, since their
+//!    rings have no well-defined inside.
 //! 3. **Rings.** Segments are walked into closed circuits *ignoring member
 //!    roles* (roles are frequently wrong in real data). Each circuit is split
 //!    at repeated vertices, so rings that touch at a point become separate
@@ -31,24 +33,28 @@ use osmic_core::{FixedCoord, Geometry};
 
 /// Member role of a way in an area relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Role {
     Outer,
     Inner,
-    /// Empty role — treated as outer by convention, never counted as a
-    /// mismatch.
+    /// Empty role — never counted as a mismatch.
     Empty,
+    /// Any other role (often a typo). The way still takes part in the
+    /// assembly, as in libosmium; it is never counted as a mismatch.
+    Other,
 }
 
 impl Role {
-    /// Parse a relation member role; `None` for roles that do not take part
-    /// in area assembly (`label`, `admin_centre`, `subarea`, …).
+    /// Parse a relation member role. Every way member takes part in area
+    /// assembly whatever its role (rings are built from geometry), so this
+    /// always returns `Some`.
     pub fn parse(role: &str) -> Option<Self> {
-        match role {
-            "outer" => Some(Self::Outer),
-            "inner" => Some(Self::Inner),
-            "" => Some(Self::Empty),
-            _ => None,
-        }
+        Some(match role {
+            "outer" => Self::Outer,
+            "inner" => Self::Inner,
+            "" => Self::Empty,
+            _ => Self::Other,
+        })
     }
 }
 
@@ -70,6 +76,8 @@ pub enum AssemblyError {
     OpenRing { lon: i32, lat: i32 },
     #[error("no ring encloses a positive area")]
     NoArea,
+    #[error("rings cross or overlap near {lon},{lat}")]
+    SelfIntersection { lon: i32, lat: i32 },
 }
 
 /// Diagnostics from a successful assembly.
@@ -124,6 +132,12 @@ pub fn assemble_area(
     }
     if segments.is_empty() {
         return Err(AssemblyError::NoArea);
+    }
+    if let Some(at) = first_intersection(&segments) {
+        return Err(AssemblyError::SelfIntersection {
+            lon: at.lon,
+            lat: at.lat,
+        });
     }
 
     // ── 2. Endpoint index and degree check ────────────────────────────────
@@ -214,7 +228,7 @@ pub fn assemble_area(
             .filter(|r| match r {
                 Role::Outer => !is_outer,
                 Role::Inner => is_outer,
-                Role::Empty => false,
+                Role::Empty | Role::Other => false,
             })
             .count();
     }
@@ -260,6 +274,55 @@ struct Ring {
     min: FixedCoord,
     max: FixedCoord,
     roles: Vec<Role>,
+    /// Edge index for containment tests, built on first use by large rings.
+    index: std::cell::OnceCell<EdgeIndex>,
+}
+
+/// Rings with at least this many vertices get an [`EdgeIndex`].
+const INDEX_MIN_VERTICES: usize = 256;
+
+/// Edges bucketed by latitude, so a point-in-ring test only scans edges
+/// whose latitude span contains the point — every edge that can cross the
+/// point's horizontal ray or contain the point is in its bucket.
+#[derive(Debug)]
+struct EdgeIndex {
+    min_lat: i64,
+    bucket_height: i64,
+    /// `buckets[b]` lists the start index of every edge overlapping bucket `b`.
+    buckets: Vec<Vec<u32>>,
+}
+
+impl EdgeIndex {
+    fn new(coords: &[FixedCoord], min_lat: i32, max_lat: i32) -> Self {
+        let edges = coords.len().saturating_sub(1).max(1);
+        let count = (edges as f64).sqrt().ceil() as i64;
+        let span = i64::from(max_lat) - i64::from(min_lat) + 1;
+        let bucket_height = (span + count - 1) / count;
+        let mut buckets = vec![Vec::new(); count as usize];
+        let bucket = |lat: i32| ((i64::from(lat) - i64::from(min_lat)) / bucket_height) as usize;
+        for (i, w) in coords.windows(2).enumerate() {
+            let (lo, hi) = (w[0].lat.min(w[1].lat), w[0].lat.max(w[1].lat));
+            for b in &mut buckets[bucket(lo)..=bucket(hi)] {
+                b.push(i as u32);
+            }
+        }
+        Self {
+            min_lat: i64::from(min_lat),
+            bucket_height,
+            buckets,
+        }
+    }
+
+    /// Edges that may contain or cross the horizontal line through `lat`.
+    fn edges(&self, lat: i32) -> &[u32] {
+        let offset = i64::from(lat) - self.min_lat;
+        if offset < 0 {
+            return &[];
+        }
+        self.buckets
+            .get((offset / self.bucket_height) as usize)
+            .map_or(&[], Vec::as_slice)
+    }
 }
 
 impl Ring {
@@ -281,6 +344,7 @@ impl Ring {
             min,
             max,
             roles,
+            index: std::cell::OnceCell::new(),
         }
     }
 
@@ -297,8 +361,22 @@ impl Ring {
         if !self.bbox_contains(other) {
             return false;
         }
+        let index = (self.coords.len() >= INDEX_MIN_VERTICES).then(|| {
+            self.index
+                .get_or_init(|| EdgeIndex::new(&self.coords, self.min.lat, self.max.lat))
+        });
         for &p in &other.coords {
-            match point_in_ring(p, &self.coords) {
+            let location = match index {
+                Some(index) => point_in_edges(
+                    p,
+                    index
+                        .edges(p.lat)
+                        .iter()
+                        .map(|&i| (self.coords[i as usize], self.coords[i as usize + 1])),
+                ),
+                None => point_in_edges(p, self.coords.windows(2).map(|w| (w[0], w[1]))),
+            };
+            match location {
                 Location::Inside => return true,
                 Location::Outside => return false,
                 Location::Boundary => {}
@@ -323,13 +401,17 @@ enum Location {
 }
 
 /// Exact point-in-ring test (even–odd crossing count) on fixed-point
-/// coordinates; `ring` is closed.
-fn point_in_ring(p: FixedCoord, ring: &[FixedCoord]) -> Location {
+/// coordinates over a ring's edges — all of them, or at least every edge
+/// whose latitude span contains `p`.
+fn point_in_edges(
+    p: FixedCoord,
+    edges: impl Iterator<Item = (FixedCoord, FixedCoord)>,
+) -> Location {
     let (px, py) = (i128::from(p.lon), i128::from(p.lat));
     let mut inside = false;
-    for w in ring.windows(2) {
-        let (ax, ay) = (i128::from(w[0].lon), i128::from(w[0].lat));
-        let (bx, by) = (i128::from(w[1].lon), i128::from(w[1].lat));
+    for (a, b) in edges {
+        let (ax, ay) = (i128::from(a.lon), i128::from(a.lat));
+        let (bx, by) = (i128::from(b.lon), i128::from(b.lat));
         let cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax);
         if cross == 0
             && px >= ax.min(bx)
@@ -354,6 +436,71 @@ fn point_in_ring(p: FixedCoord, ring: &[FixedCoord]) -> Location {
     } else {
         Location::Outside
     }
+}
+
+/// Orientation of `c` relative to the line `a`→`b`: positive left, negative
+/// right, zero collinear. Exact.
+fn orient(a: FixedCoord, b: FixedCoord, c: FixedCoord) -> i128 {
+    let (ax, ay) = (i128::from(a.lon), i128::from(a.lat));
+    (i128::from(b.lon) - ax) * (i128::from(c.lat) - ay)
+        - (i128::from(b.lat) - ay) * (i128::from(c.lon) - ax)
+}
+
+/// Whether `p` (collinear with `a`–`b`) lies within the segment's box.
+fn on_segment(a: FixedCoord, b: FixedCoord, p: FixedCoord) -> bool {
+    p.lon >= a.lon.min(b.lon)
+        && p.lon <= a.lon.max(b.lon)
+        && p.lat >= a.lat.min(b.lat)
+        && p.lat <= a.lat.max(b.lat)
+}
+
+/// Whether two segments meet anywhere other than a shared endpoint:
+/// a proper crossing, an endpoint touching the other's interior, or a
+/// collinear overlap.
+fn segments_conflict(s: &Segment, t: &Segment) -> bool {
+    let (d1, d2) = (orient(s.a, s.b, t.a), orient(s.a, s.b, t.b));
+    let (d3, d4) = (orient(t.a, t.b, s.a), orient(t.a, t.b, s.b));
+    if d1.signum() * d2.signum() < 0 && d3.signum() * d4.signum() < 0 {
+        return true;
+    }
+    let shared = |p: FixedCoord, q: &Segment| p == q.a || p == q.b;
+    // An endpoint of one segment on the other, other than a shared vertex.
+    (d1 == 0 && on_segment(s.a, s.b, t.a) && !shared(t.a, s))
+        || (d2 == 0 && on_segment(s.a, s.b, t.b) && !shared(t.b, s))
+        || (d3 == 0 && on_segment(t.a, t.b, s.a) && !shared(s.a, t))
+        || (d4 == 0 && on_segment(t.a, t.b, s.b) && !shared(s.b, t))
+}
+
+/// A vertex near the first pair of conflicting segments, if any. Sweeps
+/// segments by longitude so only segments overlapping in longitude are
+/// compared.
+fn first_intersection(segments: &[Segment]) -> Option<FixedCoord> {
+    let mut order: Vec<usize> = (0..segments.len()).collect();
+    order.sort_unstable_by_key(|&i| {
+        let s = &segments[i];
+        (s.a.lon.min(s.b.lon), i)
+    });
+    for (k, &i) in order.iter().enumerate() {
+        let s = &segments[i];
+        let (s_max_lon, s_min_lat, s_max_lat) = (
+            s.a.lon.max(s.b.lon),
+            s.a.lat.min(s.b.lat),
+            s.a.lat.max(s.b.lat),
+        );
+        for &j in &order[k + 1..] {
+            let t = &segments[j];
+            if t.a.lon.min(t.b.lon) > s_max_lon {
+                break;
+            }
+            if t.a.lat.max(t.b.lat) < s_min_lat || t.a.lat.min(t.b.lat) > s_max_lat {
+                continue;
+            }
+            if segments_conflict(s, t) {
+                return Some(s.a.min(t.a));
+            }
+        }
+    }
+    None
 }
 
 /// Split a closed walk into simple rings at repeated vertices. `walk[i]` is
@@ -574,5 +721,85 @@ mod tests {
             (r.outer_rings, r.inner_rings, r.role_mismatches),
             (400, 400, 0)
         );
+    }
+
+    #[test]
+    fn crossing_and_touching_rings_are_rejected() {
+        // Bow tie: one way whose edges cross.
+        let bowtie = [f(0, 0), f(10, 10), f(10, 0), f(0, 10), f(0, 0)];
+        assert!(matches!(
+            assemble_area(&[way(1, Role::Outer, &bowtie)]),
+            Err(AssemblyError::SelfIntersection { .. })
+        ));
+        // Two overlapping squares.
+        let (a, b) = (square(0, 0, 10), square(5, 5, 10));
+        assert!(matches!(
+            assemble_area(&[way(1, Role::Outer, &a), way(2, Role::Outer, &b)]),
+            Err(AssemblyError::SelfIntersection { .. })
+        ));
+        // A hole touching the outer ring's edge in its interior (T-junction).
+        let outer = square(0, 0, 10);
+        let hole = [f(0, 5), f(4, 4), f(4, 6), f(0, 5)];
+        assert!(matches!(
+            assemble_area(&[way(1, Role::Outer, &outer), way(2, Role::Inner, &hole)]),
+            Err(AssemblyError::SelfIntersection { .. })
+        ));
+        // Rings touching at a shared vertex are fine (split, not rejected).
+        let left = square(0, 0, 10);
+        let right = square(10, 10, 10);
+        assert!(assemble_area(&[way(1, Role::Outer, &left), way(2, Role::Outer, &right)]).is_ok());
+    }
+
+    #[test]
+    fn members_with_unknown_roles_still_form_rings() {
+        let s = square(0, 0, 10);
+        let (half_a, half_b) = (&s[..3], &s[2..]);
+        let (g, r) = assemble_area(&[
+            way(1, Role::Outer, half_a),
+            way(2, Role::parse("outre").expect("parsed"), half_b),
+        ])
+        .expect("assembles");
+        assert_eq!(polygons(&g).len(), 1);
+        assert_eq!(r.role_mismatches, 0);
+    }
+
+    #[test]
+    fn many_holes_in_a_large_ring_nest_quickly_and_correctly() {
+        // A 20 000-vertex outer ring (a fine staircase square) with 2 500
+        // square holes on a grid inside it.
+        let n = 5_000;
+        let mut outer = Vec::new();
+        for i in 0..n {
+            outer.push(f(i * 2, 0));
+        }
+        for i in 0..n {
+            outer.push(f(n * 2, i * 2));
+        }
+        for i in 0..n {
+            outer.push(f(n * 2 - i * 2, n * 2));
+        }
+        for i in 0..n {
+            outer.push(f(0, n * 2 - i * 2));
+        }
+        outer.push(f(0, 0));
+        let holes: Vec<Vec<FixedCoord>> = (0..50)
+            .flat_map(|gx| (0..50).map(move |gy| square(100 + gx * 190, 100 + gy * 190, 50)))
+            .collect();
+        let mut members = vec![way(1, Role::Outer, &outer)];
+        members.extend(
+            holes
+                .iter()
+                .enumerate()
+                .map(|(i, h)| way(2 + i as i64, Role::Inner, h)),
+        );
+        let start = std::time::Instant::now();
+        let (g, r) = assemble_area(&members).expect("assembles");
+        let elapsed = start.elapsed();
+        assert_eq!(
+            (r.outer_rings, r.inner_rings, r.role_mismatches),
+            (1, 2_500, 0)
+        );
+        assert_eq!(polygons(&g)[0].interiors().len(), 2_500);
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
     }
 }
