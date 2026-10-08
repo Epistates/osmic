@@ -10,10 +10,11 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(text) = std::str::from_utf8(data) {
         if let Ok(state) = ReplicationState::parse_state_txt(text, "https://example.org") {
             let again = ReplicationState::parse_state_txt(&state.to_state_txt(), "https://example.org");
-            assert_eq!(again.ok().map(|s| s.sequence), Some(state.sequence));
+            assert_eq!(again.ok().as_ref(), Some(&state));
         }
         if let Some(unix) = parse_iso8601(text) {
-            assert_eq!(parse_iso8601(&format_iso8601(unix)), Some(unix));
+            let formatted = format_iso8601(unix).expect("a parsed instant is in range");
+            assert_eq!(parse_iso8601(&formatted), Some(unix));
         }
     }
 });

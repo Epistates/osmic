@@ -58,8 +58,9 @@ impl ReplicationState {
 
     /// Parse a server `state.txt`, recording `base_url` as its source.
     ///
-    /// Unknown keys are ignored, and a timestamp that is not a valid
-    /// `YYYY-MM-DDTHH:MM:SSZ` instant is dropped.
+    /// Unknown keys are ignored. The timestamp is kept in the canonical
+    /// `YYYY-MM-DDTHH:MM:SSZ` form; one that is not a valid instant is
+    /// dropped.
     ///
     /// # Errors
     ///
@@ -85,8 +86,8 @@ impl ReplicationState {
                 // Properties files escape ':' as '\:'. A timestamp that is
                 // not a valid instant is dropped rather than trusted.
                 "timestamp" => {
-                    let t = v.trim().replace("\\:", ":");
-                    timestamp = parse_iso8601(&t).is_some().then_some(t);
+                    timestamp =
+                        parse_iso8601(&v.trim().replace("\\:", ":")).and_then(format_iso8601);
                 }
                 _ => {}
             }
@@ -114,55 +115,19 @@ impl ReplicationState {
     }
 }
 
-/// Parse `YYYY-MM-DDTHH:MM:SSZ` (the only form OSM replication uses).
+/// Seconds since the Unix epoch for an RFC 3339 instant such as
+/// `2026-10-08T12:00:00Z` (the form OSM replication uses), or `None` if `s`
+/// is not one. Fractional seconds are truncated.
 pub fn parse_iso8601(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[19] != b'Z' {
-        return None;
-    }
-    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
-    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let days_in_month = match m {
-        2 if leap => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        1..=12 => 31,
-        _ => return None,
-    };
-    if !(1..=days_in_month).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
-        return None;
-    }
-    // Days from civil (Howard Hinnant's algorithm).
-    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(days * 86_400 + hh * 3_600 + mm * 60 + ss)
+    s.parse::<jiff::Timestamp>().ok().map(|t| t.as_second())
 }
 
-/// Inverse of [`parse_iso8601`].
-pub fn format_iso8601(unix: i64) -> String {
-    let days = unix.div_euclid(86_400);
-    let secs = unix.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        secs / 3_600,
-        (secs / 60) % 60,
-        secs % 60
-    )
+/// `unix` as `YYYY-MM-DDTHH:MM:SSZ`, the inverse of [`parse_iso8601`], or
+/// `None` outside the years -9999..=9999.
+pub fn format_iso8601(unix: i64) -> Option<String> {
+    jiff::Timestamp::from_second(unix)
+        .ok()
+        .map(|t| t.to_string())
 }
 
 #[cfg(test)]
@@ -212,8 +177,22 @@ mod tests {
             "2026-10-08T12:00:00Z",
         ] {
             let unix = parse_iso8601(t).expect(t);
-            assert_eq!(format_iso8601(unix), t);
+            assert_eq!(format_iso8601(unix).as_deref(), Some(t));
         }
+        // Any explicit offset is an instant; state files keep the Z form.
+        assert_eq!(
+            parse_iso8601("2026-10-08T14:00:00+02:00"),
+            Some(1_791_460_800)
+        );
+        let s = ReplicationState::parse_state_txt(
+            "sequenceNumber=5\ntimestamp=2026-10-08T14\\:00\\:00+02\\:00\n",
+            "u",
+        )
+        .expect("valid");
+        assert_eq!(s.timestamp.as_deref(), Some("2026-10-08T12:00:00Z"));
+        // Header timestamps beyond the representable range are unknown,
+        // not formatted into a string that cannot be parsed back.
+        assert_eq!(format_iso8601(i64::MAX), None);
         assert_eq!(parse_iso8601("2026-10-08T12:00:00Z"), Some(1_791_460_800));
         assert_eq!(parse_iso8601("2026-13-08T12:00:00Z"), None);
         assert_eq!(parse_iso8601("2026-02-31T12:00:00Z"), None);

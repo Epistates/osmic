@@ -15,6 +15,8 @@ description = "OSM replication: hardened change-file parsing and keeping PBF fil
 osmic-core = { workspace = true }
 osmic-osm = { workspace = true, features = ["native"] }
 flate2 = { workspace = true }
+# Timestamps only: no time zone database.
+jiff = { version = "0.2.38", default-features = false, features = ["std"] }
 rayon = { workspace = true }
 osmpbf = { workspace = true }
 quick-xml = "0.42"

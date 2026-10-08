@@ -198,7 +198,7 @@ pub fn update_pbf(
         })?;
     let from = ReplicationState {
         sequence,
-        timestamp: header.replication_timestamp.map(state::format_iso8601),
+        timestamp: header.replication_timestamp.and_then(state::format_iso8601),
         base_url: base_url.clone(),
     };
 
