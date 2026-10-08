@@ -270,8 +270,12 @@ fn shape_of(geometry: &Geometry, as_lines: bool) -> Shape {
 
 /// Keys never written as plain attributes: classification keys are folded
 /// into `class`.
+///
+/// Runs for every tag of every feature, so it compares against the layer
+/// names directly rather than through `Layer::from_str`, which allocates an
+/// error on every miss.
 fn is_class_key(k: &str) -> bool {
-    k == "waterway" || k.parse::<Layer>().is_ok()
+    k == "waterway" || Layer::ALL.iter().any(|l| l.as_str() == k)
 }
 
 /// Keys emitted in [`AttributeMode::Curated`].
@@ -819,6 +823,18 @@ mod tests {
             .collect();
         assert_eq!(xs.len(), 2, "own tile and the neighbour's buffer: {xs:?}");
         assert!(xs.contains(&99) && xs.contains(&100));
+    }
+
+    #[test]
+    fn class_keys_are_exactly_the_layer_names_and_waterway() {
+        for layer in Layer::ALL {
+            assert!(is_class_key(layer.as_str()), "{layer}");
+        }
+        assert!(is_class_key("waterway"));
+        for key in ["name", "ref", "class", "Highway", "highway ", "", "water_way"] {
+            assert_eq!(is_class_key(key), key.parse::<Layer>().is_ok(), "{key:?}");
+            assert!(!is_class_key(key), "{key:?}");
+        }
     }
 
     #[test]
