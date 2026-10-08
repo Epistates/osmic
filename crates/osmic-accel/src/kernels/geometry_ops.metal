@@ -2,232 +2,292 @@
 using namespace metal;
 
 // ============================================================================
-// GPU types — must match Rust #[repr(C)] structs exactly
+// Shared layout. These structs MUST match the #[repr(C)] structs in
+// src/metal/types.rs field for field; the Rust side asserts size, alignment and
+// every field offset at compile time.
 // ============================================================================
 
-struct GpuGeomDescriptor {
-    uint coord_offset;
-    uint coord_count;
-    uint ring_offset;
-    uint ring_count;
-    uint geom_type;
-    uint output_offset;
-    uint output_capacity;
-    uint _pad;
+struct GpuUnit {            // 48 bytes
+    uint  coord_offset;     // 0   first input vertex (index into coords)
+    uint  coord_count;      // 4
+    uint  kind;             // 8   KIND_LINE / KIND_RING
+    uint  out_offset;       // 12  first output vertex (index into out_points)
+    uint  out_capacity;     // 16  output vertex capacity
+    uint  scratch_offset;   // 20  first scratch vertex (rings only)
+    uint  part_offset;      // 24  first entry in part_lens (lines only)
+    uint  part_capacity;    // 28
+    float min_x;            // 32  clip rectangle
+    float min_y;            // 36
+    float max_x;            // 40
+    float max_y;            // 44
 };
 
-struct GpuTileInfo {
-    float clip_min_x;
-    float clip_min_y;
-    float clip_max_x;
-    float clip_max_y;
-    float n;
-    float tx;
-    float ty;
-    float extent;
+struct GpuUnitResult {      // 16 bytes
+    uint out_count;         // 0   vertices written
+    uint part_count;        // 4   parts written (lines)
+    uint status;            // 8   STATUS_*
+    uint _pad;              // 12
 };
 
-struct GpuOutputHeader {
-    atomic_uint output_count;
-    uint output_ring_count;
-    uint status;     // 0=ok, 1=overflow, 2=degenerate
-    uint _pad;
+struct GpuClipParams {      // 16 bytes
+    uint unit_count;        // 0
+    uint _pad0;             // 4
+    uint _pad1;             // 8
+    uint _pad2;             // 12
 };
 
-struct GpuClipParams {
-    uint geometry_count;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
-};
+constant uint KIND_LINE = 1;
+constant uint KIND_RING = 2;
 
-constant uint GEOM_LINE = 1;
-constant uint GEOM_POLYGON = 2;
+constant uint STATUS_OK       = 0;
+constant uint STATUS_OVERFLOW = 1;  // capacity exceeded; host recomputes on CPU
+constant uint STATUS_INVALID  = 2;  // malformed descriptor; host reports an error
+// 0xFFFFFFFF (host-initialised) means "never processed".
 
 // ============================================================================
-// Sutherland-Hodgman: clip polygon against one edge
+// Rings: Sutherland-Hodgman
+//
+// Mirrors src/cpu.rs::clip_ring. Per-ring output and scratch regions live in
+// device memory with host-computed capacities; every write is bounds-checked
+// and an exceeded capacity is reported, never truncated.
 // ============================================================================
 
-uint clip_edge(
-    threadgroup float2* input,   uint in_count,
-    threadgroup float2* output,
-    float2 edge_start, float2 edge_normal
+// One stage. A vertex p is inside when (p[axis] - value) * sign >= 0.
+// Returns false if more than `cap` vertices would be written.
+static bool clip_stage(
+    device const float2* src, uint n,
+    device float2*       dst, uint cap,
+    uint axis, float sign, float value,
+    thread uint& out_n
 ) {
-    uint out_count = 0;
-    if (in_count == 0) return 0;
+    uint count = 0;
+    if (n == 0) { out_n = 0; return true; }
 
-    for (uint i = 0; i < in_count; i++) {
-        float2 curr = input[i];
-        float2 prev = input[(i + in_count - 1) % in_count];
-
-        float curr_dot = dot(curr - edge_start, edge_normal);
-        float prev_dot = dot(prev - edge_start, edge_normal);
-
-        bool curr_inside = curr_dot >= 0.0f;
-        bool prev_inside = prev_dot >= 0.0f;
-
-        if (prev_inside && curr_inside) {
-            output[out_count++] = curr;
-        } else if (prev_inside && !curr_inside) {
-            float t = prev_dot / (prev_dot - curr_dot);
-            output[out_count++] = prev + t * (curr - prev);
-        } else if (!prev_inside && curr_inside) {
-            float t = prev_dot / (prev_dot - curr_dot);
-            output[out_count++] = prev + t * (curr - prev);
-            output[out_count++] = curr;
+    float2 prev = src[n - 1];
+    float prev_d = (prev[axis] - value) * sign;
+    for (uint i = 0; i < n; i++) {
+        float2 curr = src[i];
+        float curr_d = (curr[axis] - value) * sign;
+        bool curr_in = curr_d >= 0.0f;
+        bool prev_in = prev_d >= 0.0f;
+        if (curr_in != prev_in) {
+            if (count >= cap) return false;
+            float t = prev_d / (prev_d - curr_d);
+            float2 p = prev + t * (curr - prev);
+            p[axis] = value;
+            dst[count++] = p;
         }
+        if (curr_in) {
+            if (count >= cap) return false;
+            dst[count++] = curr;
+        }
+        prev = curr;
+        prev_d = curr_d;
     }
-    return out_count;
+    out_n = count;
+    return true;
+}
+
+static uint clip_ring(
+    GpuUnit u,
+    device const float2* coords,
+    device float2*       out_points,
+    device float2*       scratch,
+    thread uint&         status
+) {
+    device const float2* input = coords + u.coord_offset;
+    uint n = u.coord_count;
+    uint cap = u.out_capacity;
+    device float2* out = out_points + u.out_offset;
+    device float2* tmp = scratch + u.scratch_offset;
+
+    float2 lo = input[0];
+    float2 hi = lo;
+    for (uint i = 1; i < n; i++) {
+        lo = min(lo, input[i]);
+        hi = max(hi, input[i]);
+    }
+
+    // Entirely outside one edge: every stage would drop everything.
+    if (hi.x < u.min_x || lo.x > u.max_x || hi.y < u.min_y || lo.y > u.max_y) {
+        return 0;
+    }
+
+    bool needed[4] = { lo.x < u.min_x, hi.x > u.max_x, lo.y < u.min_y, hi.y > u.max_y };
+    uint axes[4]   = { 0, 0, 1, 1 };
+    float signs[4] = { 1.0f, -1.0f, 1.0f, -1.0f };
+    float values[4] = { u.min_x, u.max_x, u.min_y, u.max_y };
+
+    uint stages = 0;
+    for (uint s = 0; s < 4; s++) stages += needed[s] ? 1u : 0u;
+
+    if (stages == 0) {
+        if (n > cap) { status = STATUS_OVERFLOW; return 0; }
+        for (uint i = 0; i < n; i++) out[i] = input[i];
+        return n;
+    }
+
+    // Ping-pong between `tmp` and `out` so the last stage lands in `out`.
+    device const float2* src = input;
+    uint src_n = n;
+    uint remaining = stages;
+    for (uint s = 0; s < 4; s++) {
+        if (!needed[s]) continue;
+        remaining--;
+        device float2* dst;
+        if (src == input) {
+            dst = (remaining % 2 == 0) ? out : tmp;
+        } else {
+            dst = (src == out) ? tmp : out;
+        }
+        uint m = 0;
+        if (!clip_stage(src, src_n, dst, cap, axes[s], signs[s], values[s], m)) {
+            status = STATUS_OVERFLOW;
+            return 0;
+        }
+        if (m == 0) return 0;
+        src = dst;
+        src_n = m;
+    }
+    return src_n < 3 ? 0 : src_n;
 }
 
 // ============================================================================
-// Clip kernel: operates on PRE-PROJECTED tile-local coordinates.
-// One threadgroup per geometry. No projection — CPU did that already.
+// Lines: Liang-Barsky per segment, one output part per contiguous inside run.
+//
+// Mirrors src/cpu.rs::clip_polyline. Capacities are exact upper bounds
+// (2 * (n - 1) points, n - 1 parts) but every write is still checked.
 // ============================================================================
 
-kernel void batch_clip(
-    device const float*             coords      [[buffer(0)]],  // pre-projected tile-local
-    device float*                   out_coords  [[buffer(1)]],
-    device const GpuGeomDescriptor* descs       [[buffer(2)]],
-    device const GpuTileInfo*       tiles       [[buffer(3)]],
-    device GpuOutputHeader*         headers     [[buffer(4)]],
-    constant GpuClipParams&         params      [[buffer(5)]],
-    uint                            gid         [[threadgroup_position_in_grid]]
-) {
-    if (gid >= params.geometry_count) return;
-
-    GpuGeomDescriptor desc = descs[gid];
-    GpuTileInfo tile = tiles[gid];
-
-    float min_x = tile.clip_min_x;
-    float min_y = tile.clip_min_y;
-    float max_x = tile.clip_max_x;
-    float max_y = tile.clip_max_y;
-
-    // Points: simple containment test
-    if (desc.geom_type != GEOM_LINE && desc.geom_type != GEOM_POLYGON) {
-        if (desc.coord_count == 1) {
-            uint ci = desc.coord_offset * 2;
-            float x = coords[ci], y = coords[ci + 1];
-            if (x >= min_x && x <= max_x && y >= min_y && y <= max_y) {
-                uint out_base = desc.output_offset * 2;
-                out_coords[out_base] = x;
-                out_coords[out_base + 1] = y;
-                atomic_store_explicit(&headers[gid].output_count, 1, memory_order_relaxed);
-                headers[gid].status = 0;
+static bool clip_segment(float2 p0, float2 p1, GpuUnit u, thread float& t0_out, thread float& t1_out) {
+    float dx = p1.x - p0.x;
+    float dy = p1.y - p0.y;
+    float t0 = 0.0f;
+    float t1 = 1.0f;
+    float ps[4] = { -dx, dx, -dy, dy };
+    float qs[4] = { p0.x - u.min_x, u.max_x - p0.x, p0.y - u.min_y, u.max_y - p0.y };
+    for (uint k = 0; k < 4; k++) {
+        float p = ps[k];
+        float q = qs[k];
+        if (p == 0.0f) {
+            if (q < 0.0f) return false;
+        } else {
+            float r = q / p;
+            if (p < 0.0f) {
+                if (r > t1) return false;
+                if (r > t0) t0 = r;
             } else {
-                atomic_store_explicit(&headers[gid].output_count, 0, memory_order_relaxed);
-                headers[gid].status = 2;
+                if (r < t0) return false;
+                if (r < t1) t1 = r;
             }
         }
-        return;
     }
+    if (!(t0 < t1)) return false;  // grazing a corner is not a segment
+    t0_out = t0;
+    t1_out = t1;
+    return true;
+}
 
-    uint n = desc.coord_count;
-    if (n < 2) {
-        atomic_store_explicit(&headers[gid].output_count, 0, memory_order_relaxed);
-        headers[gid].status = 2;
-        return;
+static float2 point_at(float2 p0, float2 p1, float t, GpuUnit u) {
+    float2 p = p0 + t * (p1 - p0);
+    return float2(clamp(p.x, u.min_x, u.max_x), clamp(p.y, u.min_y, u.max_y));
+}
+
+// Close the open part (if any). Returns false if the part table is full.
+static bool close_part(thread uint& current, thread uint& parts, device uint* part_lens, GpuUnit u) {
+    if (current > 0) {
+        if (parts >= u.part_capacity) return false;
+        part_lens[u.part_offset + parts] = current;
+        parts++;
+        current = 0;
     }
+    return true;
+}
 
-    // Lines: Cohen-Sutherland per segment
-    if (desc.geom_type == GEOM_LINE) {
-        uint out_idx = 0;
-        uint out_base = desc.output_offset * 2;
+// Returns false on capacity overflow.
+static bool clip_polyline(
+    GpuUnit u,
+    device const float2* coords,
+    device float2*       out_points,
+    device uint*         part_lens,
+    thread uint&         out_count,
+    thread uint&         part_count
+) {
+    device const float2* input = coords + u.coord_offset;
+    device float2* out = out_points + u.out_offset;
+    uint count = 0;
+    uint parts = 0;
+    uint current = 0;
 
-        for (uint i = 0; i + 1 < n; i++) {
-            uint ci = (desc.coord_offset + i) * 2;
-            float x0 = coords[ci], y0 = coords[ci + 1];
-            float x1 = coords[ci + 2], y1 = coords[ci + 3];
-
-            uint code0 = ((x0 < min_x) ? 1u : 0u) | ((x0 > max_x) ? 2u : 0u) |
-                         ((y0 < min_y) ? 4u : 0u) | ((y0 > max_y) ? 8u : 0u);
-            uint code1 = ((x1 < min_x) ? 1u : 0u) | ((x1 > max_x) ? 2u : 0u) |
-                         ((y1 < min_y) ? 4u : 0u) | ((y1 > max_y) ? 8u : 0u);
-
-            bool accept = false;
-            for (int iter = 0; iter < 8; iter++) {
-                if ((code0 | code1) == 0u) { accept = true; break; }
-                if ((code0 & code1) != 0u) { break; }
-
-                uint code_out = (code0 != 0u) ? code0 : code1;
-                float x, y;
-                if (code_out & 8u) {
-                    x = x0 + (x1 - x0) * (max_y - y0) / (y1 - y0); y = max_y;
-                } else if (code_out & 4u) {
-                    x = x0 + (x1 - x0) * (min_y - y0) / (y1 - y0); y = min_y;
-                } else if (code_out & 2u) {
-                    y = y0 + (y1 - y0) * (max_x - x0) / (x1 - x0); x = max_x;
-                } else {
-                    y = y0 + (y1 - y0) * (min_x - x0) / (x1 - x0); x = min_x;
-                }
-
-                if (code_out == code0) {
-                    x0 = x; y0 = y;
-                    code0 = ((x0<min_x)?1u:0u)|((x0>max_x)?2u:0u)|((y0<min_y)?4u:0u)|((y0>max_y)?8u:0u);
-                } else {
-                    x1 = x; y1 = y;
-                    code1 = ((x1<min_x)?1u:0u)|((x1>max_x)?2u:0u)|((y1<min_y)?4u:0u)|((y1>max_y)?8u:0u);
-                }
-            }
-
-            if (accept && out_idx + 2 <= desc.output_capacity) {
-                out_coords[out_base + out_idx * 2] = x0;
-                out_coords[out_base + out_idx * 2 + 1] = y0;
-                out_idx++;
-                out_coords[out_base + out_idx * 2] = x1;
-                out_coords[out_base + out_idx * 2 + 1] = y1;
-                out_idx++;
-            }
+    for (uint i = 0; i + 1 < u.coord_count; i++) {
+        float2 p0 = input[i];
+        float2 p1 = input[i + 1];
+        float t0, t1;
+        if (!clip_segment(p0, p1, u, t0, t1)) {
+            if (!close_part(current, parts, part_lens, u)) return false;
+            continue;
         }
+        bool start_clipped = t0 > 0.0f;
+        bool end_clipped = t1 < 1.0f;
+        if (current > 0 && start_clipped) {
+            if (!close_part(current, parts, part_lens, u)) return false;
+        }
+        if (current == 0) {
+            if (count >= u.out_capacity) return false;
+            out[count++] = start_clipped ? point_at(p0, p1, t0, u) : p0;
+            current = 1;
+        }
+        if (count >= u.out_capacity) return false;
+        out[count++] = end_clipped ? point_at(p0, p1, t1, u) : p1;
+        current++;
+        if (end_clipped) {
+            if (!close_part(current, parts, part_lens, u)) return false;
+        }
+    }
+    if (!close_part(current, parts, part_lens, u)) return false;
 
-        atomic_store_explicit(&headers[gid].output_count, out_idx, memory_order_relaxed);
-        headers[gid].status = (out_idx > 0) ? 0 : 2;
-        return;
+    out_count = count;
+    part_count = parts;
+    return true;
+}
+
+// ============================================================================
+// Kernel: one thread per unit (ring or polyline).
+// ============================================================================
+
+kernel void clip_units(
+    device const float2*     coords      [[buffer(0)]],
+    device float2*           out_points  [[buffer(1)]],
+    device float2*           scratch     [[buffer(2)]],
+    device uint*             part_lens   [[buffer(3)]],
+    device const GpuUnit*    units       [[buffer(4)]],
+    device GpuUnitResult*    results     [[buffer(5)]],
+    constant GpuClipParams&  params      [[buffer(6)]],
+    uint                     gid         [[thread_position_in_grid]]
+) {
+    if (gid >= params.unit_count) return;
+
+    GpuUnit u = units[gid];
+    uint out_count = 0;
+    uint part_count = 0;
+    uint status = STATUS_OK;
+
+    if (u.kind == KIND_RING && u.coord_count >= 3) {
+        out_count = clip_ring(u, coords, out_points, scratch, status);
+    } else if (u.kind == KIND_LINE && u.coord_count >= 2) {
+        if (!clip_polyline(u, coords, out_points, part_lens, out_count, part_count)) {
+            status = STATUS_OVERFLOW;
+            out_count = 0;
+            part_count = 0;
+        }
+    } else {
+        status = STATUS_INVALID;
     }
 
-    // Polygons: Sutherland-Hodgman against 4 edges
-    const uint MAX_VERTS = 2048;
-    threadgroup float2 buf_a[MAX_VERTS];
-    threadgroup float2 buf_b[MAX_VERTS];
-
-    uint vn = min(n, MAX_VERTS);
-
-    // Load pre-projected coordinates
-    for (uint i = 0; i < vn; i++) {
-        uint ci = (desc.coord_offset + i) * 2;
-        buf_a[i] = float2(coords[ci], coords[ci + 1]);
-    }
-
-    // Clip left (normal = +x)
-    uint count = clip_edge(buf_a, vn, buf_b, float2(min_x, 0), float2(1, 0));
-    // Clip right (normal = -x)
-    count = clip_edge(buf_b, count, buf_a, float2(max_x, 0), float2(-1, 0));
-    // Clip bottom (normal = +y)
-    count = clip_edge(buf_a, count, buf_b, float2(0, min_y), float2(0, 1));
-    // Clip top (normal = -y)
-    count = clip_edge(buf_b, count, buf_a, float2(0, max_y), float2(0, -1));
-
-    // Result is in buf_a
-    if (count < 3) {
-        atomic_store_explicit(&headers[gid].output_count, 0, memory_order_relaxed);
-        headers[gid].status = 2;
-        return;
-    }
-
-    if (count > desc.output_capacity) {
-        atomic_store_explicit(&headers[gid].output_count, 0, memory_order_relaxed);
-        headers[gid].status = 1;
-        return;
-    }
-
-    uint out_base = desc.output_offset * 2;
-    for (uint i = 0; i < count; i++) {
-        out_coords[out_base + i * 2] = buf_a[i].x;
-        out_coords[out_base + i * 2 + 1] = buf_a[i].y;
-    }
-
-    atomic_store_explicit(&headers[gid].output_count, count, memory_order_relaxed);
-    headers[gid].output_ring_count = 1;
-    headers[gid].status = 0;
+    GpuUnitResult r;
+    r.out_count = (status == STATUS_OK) ? out_count : 0;
+    r.part_count = (status == STATUS_OK) ? part_count : 0;
+    r.status = status;
+    r._pad = 0;
+    results[gid] = r;
 }

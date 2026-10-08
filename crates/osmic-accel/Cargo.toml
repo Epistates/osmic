@@ -10,8 +10,14 @@ authors.workspace = true
 categories = ["science::geo", "hardware-support"]
 keywords = ["metal", "gpu", "geometry", "macos", "accelerator"]
 readme.workspace = true
-description = "GPU-accelerated geometry processing for tile generation (Apple Silicon Metal)"
+description = "GPU-accelerated geometry clipping for tile generation (Apple Silicon Metal) with a CPU reference"
 build = "build.rs"
+
+[package.metadata.docs.rs]
+# The Metal backend only exists on Apple platforms. docs.rs does not ship the
+# Metal toolchain, so the shaders are not compiled there (build.rs honours
+# `DOCS_RS`); the public API is identical either way.
+targets = ["aarch64-apple-darwin"]
 
 [dependencies]
 osmic-core = { workspace = true }
@@ -20,6 +26,6 @@ thiserror = { workspace = true }
 geo-types = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+bytemuck = { workspace = true }
 metal = "0.33"
-parking_lot = "0.12"
-
+objc = "0.2"

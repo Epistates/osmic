@@ -2597,10 +2597,11 @@ dependencies = [
 name = "osmic-accel"
 version = "0.1.1"
 dependencies = [
+ "bytemuck",
  "geo-types",
  "metal",
+ "objc",
  "osmic-core",
- "parking_lot",
  "thiserror 2.0.21",
  "tracing",
 ]

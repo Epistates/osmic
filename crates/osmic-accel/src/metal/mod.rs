@@ -1,7 +1,8 @@
-pub mod accelerator;
-pub mod batch;
-pub mod buffer;
-pub mod context;
-pub mod flatten;
-pub mod pipeline_cache;
-pub mod types;
+//! Metal backend. Only compiled on macOS when `build.rs` produced a metallib
+//! (`cfg(osmic_metallib)`); see the crate docs.
+
+pub(crate) mod accelerator;
+pub(crate) mod batch;
+pub(crate) mod buffer;
+pub(crate) mod context;
+pub(crate) mod types;

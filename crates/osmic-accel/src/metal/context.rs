@@ -1,62 +1,103 @@
 use std::sync::{Arc, OnceLock};
 
-use metal::Device;
-use parking_lot::Mutex;
+use metal::{CommandQueue, ComputePipelineState, Device};
+use objc::rc::autoreleasepool;
 use tracing::info;
 
 use crate::error::{AccelError, AccelResult};
 
-use super::pipeline_cache::PipelineCache;
+/// Compiled shader library embedded by `build.rs` (this module only exists
+/// when the `osmic_metallib` cfg is set, i.e. the metallib was produced).
+static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/osmic_geometry.metallib"));
 
-static CONTEXT: OnceLock<Result<Arc<MetalContext>, String>> = OnceLock::new();
+const CLIP_KERNEL: &str = "clip_units";
 
-pub struct MetalContext {
+/// Threadgroup width as a multiple of the pipeline's SIMD width.
+const SIMD_GROUPS_PER_THREADGROUP: u64 = 4;
+
+/// Process-wide Metal state: device, queue and the compiled clip pipeline.
+///
+/// All fields are `Send + Sync` Metal objects (the `metal` crate marks them
+/// so), hence the struct is `Send + Sync` without any `unsafe impl`.
+pub(crate) struct MetalContext {
     device: Device,
-    command_queue: metal::CommandQueue,
-    pipeline_cache: Mutex<PipelineCache>,
+    command_queue: CommandQueue,
+    clip_pipeline: ComputePipelineState,
+    threads_per_group: u64,
 }
 
-unsafe impl Send for MetalContext {}
-unsafe impl Sync for MetalContext {}
+/// Initialisation result is cached for the process lifetime; the error is
+/// kept as text because `AccelError` is not `Clone`.
+static CONTEXT: OnceLock<Result<Arc<MetalContext>, String>> = OnceLock::new();
 
 impl MetalContext {
-    pub fn get() -> AccelResult<Arc<MetalContext>> {
-        let result = CONTEXT.get_or_init(|| Self::init().map_err(|e| e.to_string()));
-        match result {
+    /// Shared context, initialised on first use.
+    pub(crate) fn get() -> AccelResult<Arc<MetalContext>> {
+        match CONTEXT.get_or_init(|| Self::init().map(Arc::new).map_err(|e| e.to_string())) {
             Ok(ctx) => Ok(Arc::clone(ctx)),
-            Err(e) => Err(AccelError::MetalInit(e.clone())),
+            Err(msg) => Err(AccelError::MetalInit(msg.clone())),
         }
     }
 
-    fn init() -> AccelResult<Arc<MetalContext>> {
-        let device = Device::system_default()
-            .ok_or_else(|| AccelError::MetalInit("No Metal device found".into()))?;
+    fn init() -> AccelResult<MetalContext> {
+        autoreleasepool(|| {
+            let device = Device::system_default()
+                .ok_or_else(|| AccelError::MetalInit("no Metal device found".into()))?;
+            let library = device
+                .new_library_with_data(METALLIB)
+                .map_err(AccelError::ShaderCompilation)?;
+            let function = library
+                .get_function(CLIP_KERNEL, None)
+                .map_err(|e| AccelError::ShaderCompilation(format!("{CLIP_KERNEL}: {e}")))?;
+            let clip_pipeline = device
+                .new_compute_pipeline_state_with_function(&function)
+                .map_err(AccelError::ShaderCompilation)?;
 
-        info!(device = %device.name(), "Metal GPU initialized");
+            let width = clip_pipeline.thread_execution_width();
+            let max = clip_pipeline.max_total_threads_per_threadgroup();
+            let threads_per_group = (width * SIMD_GROUPS_PER_THREADGROUP).min(max).max(1);
+            info!(
+                device = %device.name(),
+                simd_width = width,
+                max_threads = max,
+                threads_per_group,
+                "Metal GPU initialized"
+            );
 
-        let command_queue = device.new_command_queue();
-
-        let library_bytes: &[u8] =
-            include_bytes!(concat!(env!("OUT_DIR"), "/osmic_geometry.metallib"));
-
-        let pipeline_cache = PipelineCache::new(&device, library_bytes)?;
-
-        Ok(Arc::new(MetalContext {
-            device,
-            command_queue,
-            pipeline_cache: Mutex::new(pipeline_cache),
-        }))
+            let command_queue = device.new_command_queue();
+            Ok(MetalContext {
+                device,
+                command_queue,
+                clip_pipeline,
+                threads_per_group,
+            })
+        })
     }
 
-    pub fn device(&self) -> &Device {
+    pub(crate) fn device(&self) -> &Device {
         &self.device
     }
 
-    pub fn command_queue(&self) -> &metal::CommandQueue {
+    pub(crate) fn command_queue(&self) -> &CommandQueue {
         &self.command_queue
     }
 
-    pub fn pipeline_cache(&self) -> parking_lot::MutexGuard<'_, PipelineCache> {
-        self.pipeline_cache.lock()
+    pub(crate) fn clip_pipeline(&self) -> &ComputePipelineState {
+        &self.clip_pipeline
+    }
+
+    pub(crate) fn threads_per_group(&self) -> u64 {
+        self.threads_per_group
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<MetalContext>();
     }
 }
