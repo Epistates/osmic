@@ -46,15 +46,14 @@ pub enum Role {
 
 impl Role {
     /// Parse a relation member role. Every way member takes part in area
-    /// assembly whatever its role (rings are built from geometry), so this
-    /// always returns `Some`.
-    pub fn parse(role: &str) -> Option<Self> {
-        Some(match role {
+    /// assembly whatever its role (rings are built from geometry).
+    pub fn parse(role: &str) -> Self {
+        match role {
             "outer" => Self::Outer,
             "inner" => Self::Inner,
             "" => Self::Empty,
             _ => Self::Other,
-        })
+        }
     }
 }
 
@@ -756,7 +755,7 @@ mod tests {
         let (half_a, half_b) = (&s[..3], &s[2..]);
         let (g, r) = assemble_area(&[
             way(1, Role::Outer, half_a),
-            way(2, Role::parse("outre").expect("parsed"), half_b),
+            way(2, Role::parse("outre"), half_b),
         ])
         .expect("assembles");
         assert_eq!(polygons(&g).len(), 1);

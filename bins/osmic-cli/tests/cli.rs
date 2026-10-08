@@ -456,13 +456,11 @@ fn update_applies_diffs_in_place() {
     let data = dir.path().join("data");
     std::fs::create_dir(&data).expect("mkdir");
     let pbf = data.join("sf.osm.pbf");
-    let opts = PbfWriterOptions {
-        sorted: true,
-        replication_sequence: Some(100),
-        replication_timestamp: Some(1_791_460_800),
-        replication_base_url: Some(base),
-        ..Default::default()
-    };
+    let opts = PbfWriterOptions::new().sorted(true).replication(
+        Some(1_791_460_800),
+        Some(100),
+        Some(base),
+    );
     let mut w =
         PbfWriter::new(std::fs::File::create(&pbf).expect("create"), &opts).expect("header");
     let f = |lon: f64, lat: f64| FixedCoord::from_degrees(lon, lat).expect("valid");

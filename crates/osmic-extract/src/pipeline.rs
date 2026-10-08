@@ -27,7 +27,7 @@ use tracing::info;
 use osmic_core::{BBox, FixedCoord, Geometry, NodeLocationStore, OsmType};
 use osmic_index::NodeIndex;
 use osmic_osm::multipolygon::{MemberWay, Role, assemble_area};
-use osmic_osm::pbf::{StringTable, par_blocks};
+use osmic_osm::pbf::{StringTable, location, par_blocks};
 use osmic_osm::{NodeStorage, OsmError, RelationRecord, TagFilter, scan_nodes};
 
 use crate::entity::Entity;
@@ -116,6 +116,12 @@ fn push_locations(
         }
     }
     complete
+}
+
+/// osmpbf's nanodegrees as a coordinate; values that do not fit the 1e-7°
+/// grid (osmpbf's `decimicro_*` would wrap them) become out of range.
+fn checked(nano_lon: i64, nano_lat: i64) -> FixedCoord {
+    location(nano_lon, nano_lat).unwrap_or(FixedCoord::new(i32::MAX, i32::MAX))
 }
 
 /// A node's location, unless its coordinate is out of range.
@@ -212,7 +218,7 @@ impl Extractor {
                         tags.clear();
                         tags.extend(strings.tags(n.raw_tags()));
                         if !tags.is_empty() && self.wanted(&tags) {
-                            let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
+                            let c = checked(n.nano_lon(), n.nano_lat());
                             out.entities.extend(self.entity(
                                 OsmType::Node,
                                 n.id(),
@@ -225,7 +231,7 @@ impl Extractor {
                         tags.clear();
                         tags.extend(strings.tags(n.raw_tags()));
                         if !tags.is_empty() && self.wanted(&tags) {
-                            let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
+                            let c = checked(n.nano_lon(), n.nano_lat());
                             out.entities.extend(self.entity(
                                 OsmType::Node,
                                 n.id(),
@@ -255,11 +261,12 @@ impl Extractor {
                             }
                         }
                         if index.is_none() {
+                            let before = coords.len();
                             complete = push_locations(
                                 &mut coords,
                                 w.node_locations()
-                                    .map(|l| FixedCoord::new(l.decimicro_lon(), l.decimicro_lat())),
-                            );
+                                    .map(|l| checked(l.nano_lon(), l.nano_lat())),
+                            ) && coords.len() - before == w.refs().len();
                         }
                         if needed && complete {
                             out.cached.push((w.id(), coords.clone()));
@@ -332,7 +339,7 @@ fn relation_location(
             .filter_map(|m| {
                 Some(MemberWay {
                     id: m.id,
-                    role: Role::parse(&m.role)?,
+                    role: Role::parse(&m.role),
                     coords: ways.get(&m.id)?,
                 })
             })

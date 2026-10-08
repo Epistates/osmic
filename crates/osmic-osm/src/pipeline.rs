@@ -527,7 +527,7 @@ impl AreaRelation {
             .members
             .iter()
             .filter(|m| m.osm_type == OsmType::Way)
-            .filter_map(|m| Some((m.id, Role::parse(&m.role)?)))
+            .map(|m| (m.id, Role::parse(&m.role)))
             .filter(|(id, _)| seen.insert(*id))
             .collect();
         if members.is_empty() {
