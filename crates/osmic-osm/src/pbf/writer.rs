@@ -335,9 +335,11 @@ impl<W: Write> PbfWriter<W> {
     ///
     /// # Errors
     ///
-    /// [`io::ErrorKind::InvalidInput`] if the encoded way would exceed the
-    /// 24 MiB element limit; any error from writing completed blocks to the
-    /// output, which happens in batches.
+    /// [`io::ErrorKind::InvalidInput`] with
+    /// [`PbfWriterOptions::locations_on_ways`] (the header promises every way
+    /// carries locations; use [`Self::write_way_with_locations`]) or if the
+    /// encoded way would exceed the 24 MiB element limit; any error from
+    /// writing completed blocks to the output, which happens in batches.
     pub fn write_way_with_meta(
         &mut self,
         id: i64,
@@ -345,6 +347,12 @@ impl<W: Write> PbfWriter<W> {
         tags: &[(&str, &str)],
         meta: Option<&ElementMeta>,
     ) -> io::Result<()> {
+        if self.locations_on_ways {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a LocationsOnWays file needs write_way_with_locations",
+            ));
+        }
         self.way(id, refs, None, tags, meta)
     }
 
@@ -958,6 +966,9 @@ mod tests {
         w.write_way_with_locations(1, &[1, 2], &[Some(a), None], &[], None)
             .expect("way");
         assert!(w.write_way_with_locations(2, &[1], &[], &[], None).is_err());
+        // A way without locations would break the header's promise.
+        let err = w.write_way(3, &[1, 2], &[]).expect_err("needs locations");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         w.finish().expect("finish");
         assert!(
             crate::pbf::read_header(&path)
