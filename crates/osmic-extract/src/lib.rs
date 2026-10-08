@@ -90,7 +90,7 @@ pub mod output;
 pub mod pipeline;
 
 pub use dedup::{deduplicate, normalize_name};
-pub use entity::Entity;
+pub use entity::{Entity, Richness};
 pub use filter::{FilterParseError, TagFilter};
 pub use output::{OutputError, OutputOptions, write_csv, write_geojson, write_json};
 pub use pipeline::{ExtractConfig, ExtractResult, ExtractStats, Extractor};

@@ -262,6 +262,36 @@ mod tests {
     }
 
     #[test]
+    fn contact_data_beats_a_long_tag_value() {
+        let at = Some(geo_types::Coord { x: -80.2, y: 25.7 });
+        let hours = "Mo-Fr 07:30-18:00, Sa 08:00-12:00; PH off; ".repeat(20);
+        let out = deduplicate(
+            vec![
+                Entity::new(
+                    OsmType::Node,
+                    1,
+                    at,
+                    &[("name", "Acme"), ("opening_hours", &hours)],
+                ),
+                Entity::new(
+                    OsmType::Node,
+                    2,
+                    at,
+                    &[
+                        ("name", "Acme"),
+                        ("addr:city", "Miami"),
+                        ("phone", "555"),
+                        ("website", "https://acme.example"),
+                    ],
+                ),
+            ],
+            100.0,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].osm_id, 2, "{out:?}");
+    }
+
+    #[test]
     fn same_name_far_apart_are_kept() {
         let out = deduplicate(
             vec![

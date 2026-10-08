@@ -158,24 +158,53 @@ impl Entity {
             .join("; ")
     }
 
-    /// How much contact metadata the entity carries (used to choose the
-    /// best of several duplicates).
-    pub fn richness(&self) -> usize {
-        let mut score = 0;
-        if !self.address.is_empty() {
-            score += 3;
+    /// How much useful metadata the entity carries, used to choose the best
+    /// of several duplicates (greater is richer).
+    pub fn richness(&self) -> Richness {
+        let filled = |s: &str| usize::from(!s.is_empty());
+        let has_category = self.tag_pairs().any(|(k, _)| CATEGORY_KEYS.contains(&k));
+        Richness {
+            contact_fields: filled(&self.address) + filled(&self.phone) + filled(&self.website),
+            completeness: filled(&self.name)
+                + usize::from(has_category)
+                + filled(&self.operator)
+                + self.address_parts.len(),
+            tag_count: self.tag_pairs().count(),
         }
-        if !self.phone.is_empty() {
-            score += 2;
-        }
-        if !self.website.is_empty() {
-            score += 2;
-        }
-        if !self.operator.is_empty() {
-            score += 1;
-        }
-        score + self.tags.len()
     }
+
+    /// The `key=value` pairs of [`tags`](Self::tags).
+    fn tag_pairs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.tags
+            .split("; ")
+            .filter_map(|pair| pair.split_once('='))
+    }
+}
+
+/// Keys that say what kind of place an entity is.
+const CATEGORY_KEYS: &[&str] = &[
+    "amenity",
+    "craft",
+    "healthcare",
+    "leisure",
+    "office",
+    "shop",
+    "tourism",
+];
+
+/// How much useful metadata an [`Entity`] carries, compared field by field
+/// in declaration order: contact data outweighs everything else, however
+/// many other tags an entity has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub struct Richness {
+    /// Filled contact fields: address, phone and website.
+    pub contact_fields: usize,
+    /// Name, a category tag (`amenity`, `shop`, …), operator, and each
+    /// structured `addr:*` component.
+    pub completeness: usize,
+    /// Number of remaining tags; only breaks ties.
+    pub tag_count: usize,
 }
 
 #[cfg(test)]
@@ -231,6 +260,38 @@ mod tests {
         ];
         assert_eq!(Entity::extract_phone(&tags), "555");
         assert_eq!(Entity::extract_website(&tags), "https://x");
+    }
+
+    #[test]
+    fn contact_data_outranks_long_tags() {
+        let entity = |tags: &[(&str, &str)]| Entity::new(OsmType::Node, 1, None, tags);
+        let contact = entity(&[
+            ("name", "Midas"),
+            ("addr:street", "Main St"),
+            ("phone", "+1 555"),
+            ("website", "https://midas.example"),
+        ]);
+        let hours = "Mo-Fr 07:30-18:00; Sa 08:00-17:00; Su 09:00-15:00; PH off; ".repeat(10);
+        let verbose = entity(&[
+            ("name", "Midas"),
+            ("shop", "car_repair"),
+            ("opening_hours", &hours),
+            ("brand", "Midas"),
+            ("brand:wikidata", "Q3312613"),
+        ]);
+        assert!(contact.richness() > verbose.richness());
+        assert_eq!(contact.richness().contact_fields, 3);
+
+        // With equal contact data, a category and address detail count
+        // before the number of tags.
+        let categorised = entity(&[("name", "Midas"), ("phone", "1"), ("shop", "car_repair")]);
+        let tagged = entity(&[("name", "Midas"), ("phone", "1"), ("a", "1"), ("b", "2")]);
+        assert!(categorised.richness() > tagged.richness());
+        let tie = entity(&[("name", "Midas"), ("phone", "1"), ("shop", "x"), ("c", "3")]);
+        assert!(
+            tie.richness() > categorised.richness(),
+            "tag count breaks ties"
+        );
     }
 
     #[test]
