@@ -45,6 +45,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Where node locations are kept while processing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NodeStorage {
     /// Sparse in-memory index: ~8 bytes per node present in the input.
     #[default]
@@ -69,6 +70,7 @@ pub enum NodeStorage {
 
 /// What to do with a way some of whose nodes are missing from the input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IncompleteWays {
     /// Skip the way (and any relation using it). Never emits wrong
     /// geometry.
@@ -82,6 +84,7 @@ pub enum IncompleteWays {
 
 /// Pipeline configuration.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PipelineConfig {
     /// Layers to classify into; elements matching no enabled layer are
     /// skipped.
@@ -180,6 +183,7 @@ impl FeatureSink for CollectSink {
 
 /// Statistics from one pipeline run.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PipelineStats {
     /// Nodes in the input, including invalid ones.
     pub node_count: u64,

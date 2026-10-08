@@ -442,6 +442,7 @@ pub const CURATED_KEYS: &[&str] = &[
 /// Keeping only what the output needs bounds per-feature memory and the
 /// number of distinct keys interned.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum TagRetention {
     /// Keep every tag.
     #[default]
