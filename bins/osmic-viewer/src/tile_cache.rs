@@ -1,6 +1,6 @@
 //! A bounded least-recently-used cache of loaded tiles.
 
-use std::num::NonZeroUsize;
+use std::collections::HashSet;
 
 use lru::LruCache;
 use osmic_core::TileCoord;
@@ -16,20 +16,36 @@ pub trait Weigh {
 /// Reading with [`TileCache::get`] marks an entry most recently used, so a
 /// frame that touches every visible tile keeps them all resident while
 /// tiles that scrolled out of view age out first.
+///
+/// Tiles on screen can be pinned ([`TileCache::set_pinned`]): eviction
+/// skips them, so a view needing more than the budget holds goes over
+/// budget by what it shows instead of evicting and reloading its own tiles
+/// over and over.
 pub struct TileCache<V: Weigh> {
     entries: LruCache<TileCoord, V>,
+    max_entries: usize,
     max_weight: usize,
     weight: usize,
+    pinned: HashSet<TileCoord>,
 }
 
 impl<V: Weigh> TileCache<V> {
-    /// A cache holding at most `max_entries` tiles and `max_weight` bytes.
+    /// A cache holding at most `max_entries` tiles and `max_weight` bytes
+    /// (plus whatever is pinned).
     pub fn new(max_entries: usize, max_weight: usize) -> Self {
         Self {
-            entries: LruCache::new(NonZeroUsize::new(max_entries).unwrap_or(NonZeroUsize::MIN)),
+            entries: LruCache::unbounded(),
+            max_entries: max_entries.max(1),
             max_weight,
             weight: 0,
+            pinned: HashSet::new(),
         }
+    }
+
+    /// Replace the set of tiles eviction must keep.
+    pub fn set_pinned(&mut self, pinned: impl IntoIterator<Item = TileCoord>) {
+        self.pinned.clear();
+        self.pinned.extend(pinned);
     }
 
     pub fn len(&self) -> usize {
@@ -58,25 +74,31 @@ impl<V: Weigh> TileCache<V> {
     }
 
     /// Insert (replacing any previous value) and evict least recently used
-    /// entries until both budgets hold again. The newly inserted entry is
-    /// never evicted. Returns the evicted entries, oldest first.
+    /// entries until both budgets hold again. The newly inserted entry and
+    /// pinned entries are never evicted. Returns the evicted entries,
+    /// oldest first.
     pub fn insert(&mut self, coord: TileCoord, value: V) -> Vec<(TileCoord, V)> {
         let mut evicted = Vec::new();
         self.weight += value.weight();
-        // `push` returns the replaced value or the entry evicted by the
-        // count limit.
-        if let Some((old_coord, old)) = self.entries.push(coord, value) {
+        // The cache is unbounded underneath, so `push` only returns a
+        // replaced value.
+        if let Some((_, old)) = self.entries.push(coord, value) {
             self.weight -= old.weight();
-            if old_coord != coord {
-                evicted.push((old_coord, old));
-            }
         }
-        while self.weight > self.max_weight && self.entries.len() > 1 {
-            let Some((old_coord, old)) = self.entries.pop_lru() else {
-                break;
+        while self.entries.len() > self.max_entries || self.weight > self.max_weight {
+            // Oldest first; pinned tiles are on screen, so normally among
+            // the most recent and rarely walked past.
+            let victim = self
+                .entries
+                .iter()
+                .rev()
+                .map(|(k, _)| *k)
+                .find(|k| *k != coord && !self.pinned.contains(k));
+            let Some(old) = victim.and_then(|k| self.entries.pop(&k).map(|v| (k, v))) else {
+                break; // only pinned entries (and the new one) are left
             };
-            self.weight -= old.weight();
-            evicted.push((old_coord, old));
+            self.weight -= old.1.weight();
+            evicted.push(old);
         }
         evicted
     }
@@ -169,6 +191,29 @@ mod tests {
         let evicted = cache.insert(t(2), Item(50));
         assert_eq!(keys(&evicted), vec![1]);
         assert!(cache.contains(&t(2)), "the entry just inserted survives");
+    }
+
+    #[test]
+    fn pinned_tiles_survive_both_budgets() {
+        let mut cache = TileCache::new(3, 10);
+        cache.insert(t(1), Item(4));
+        cache.insert(t(2), Item(4));
+        // 1 and 2 are on screen; 1 is the least recently used.
+        cache.set_pinned([t(1), t(2)]);
+        assert_eq!(keys(&cache.insert(t(3), Item(1))), Vec::<u32>::new());
+        // Over the byte budget: only unpinned 3 may go.
+        assert_eq!(keys(&cache.insert(t(4), Item(4))), vec![3]);
+        assert_eq!(cache.weight(), 12, "over budget by what is pinned");
+        // Over the entry budget too, with everything else pinned: nothing
+        // can be evicted.
+        cache.set_pinned([t(1), t(2), t(4)]);
+        assert!(cache.insert(t(5), Item(1)).is_empty());
+        assert_eq!(cache.len(), 4);
+        // Once unpinned, the next insert trims back within both budgets,
+        // oldest first.
+        cache.set_pinned([]);
+        assert_eq!(keys(&cache.insert(t(6), Item(1))), vec![1, 2]);
+        assert_eq!((cache.len(), cache.weight()), (3, 6));
     }
 
     #[test]

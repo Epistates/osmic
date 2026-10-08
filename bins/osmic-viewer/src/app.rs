@@ -66,6 +66,8 @@ pub struct App {
     max_zoom: u8,
     loader: TileLoader,
     cache: TileCache<CachedTile>,
+    /// Tiles the last frame drew (sources of its plan).
+    drawn: Vec<TileCoord>,
     controller: ViewController,
     gpu: Option<Gpu>,
     text: TextEngine,
@@ -84,6 +86,7 @@ impl App {
             max_zoom: config.max_zoom,
             loader: config.loader,
             cache: TileCache::new(CACHE_ENTRIES, CACHE_BYTES),
+            drawn: Vec::new(),
             controller: ViewController::new(config.camera, 1.0),
             gpu: None,
             text: TextEngine::system(),
@@ -181,13 +184,23 @@ impl App {
         if self.gpu.is_none() {
             return;
         }
-        if self.drain_loader() {
-            self.epoch += 1;
-        }
-
         let camera = *self.controller.camera();
         let scale = self.controller.scale_factor();
         let tile_zoom = camera.tile_zoom(self.max_zoom);
+        let visible = camera.visible_tiles(tile_zoom, 0.0);
+
+        // Arrivals must not evict what is on screen (or standing in for
+        // it): a view needing more than the budget would reload its own
+        // tiles over and over.
+        self.cache.set_pinned(
+            visible
+                .iter()
+                .map(|v| v.coord)
+                .chain(self.drawn.iter().copied()),
+        );
+        if self.drain_loader() {
+            self.epoch += 1;
+        }
 
         // Ask for what is missing, nearest first, including a margin.
         let wanted: Vec<TileCoord> = camera
@@ -198,11 +211,12 @@ impl App {
             .collect();
         self.loader.request(&wanted);
 
-        let visible = camera.visible_tiles(tile_zoom, 0.0);
         let plan = plan_draws(&camera, &visible, |c| self.cache.contains(c));
         // Mark everything in use as recently used.
+        self.drawn.clear();
         for item in &plan {
             self.cache.get(&item.source);
+            self.drawn.push(item.source);
         }
 
         let Some(gpu) = self.gpu.as_mut() else { return };
