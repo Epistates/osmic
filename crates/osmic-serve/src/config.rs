@@ -46,6 +46,21 @@ pub struct TileServerConfig {
     /// Maximum number of requests processed concurrently; further requests
     /// are shed with `503`.
     pub max_concurrency: usize,
+    /// Maximum number of open client connections; further connections wait
+    /// to be accepted.
+    pub max_connections: usize,
+    /// Time a client has to send a request's headers, also while an idle
+    /// keep-alive connection waits for its next request.
+    pub header_read_timeout: Duration,
+    /// After a shutdown signal, keep serving this long with `/readyz`
+    /// failing so load balancers stop routing here before connections close
+    /// (5–10 s behind Kubernetes Services; 0 to stop accepting at once).
+    pub drain_delay: Duration,
+    /// Longest wait for in-flight requests after accepting stops; remaining
+    /// connections are then closed.
+    pub drain_timeout: Duration,
+    /// Decoded leaf directories of the archive kept in memory.
+    pub directory_cache: u64,
 }
 
 impl Default for TileServerConfig {
@@ -58,6 +73,11 @@ impl Default for TileServerConfig {
             cors_allowed_origins: Vec::new(),
             request_timeout: Duration::from_secs(30),
             max_concurrency: 1024,
+            max_connections: 4096,
+            header_read_timeout: Duration::from_secs(10),
+            drain_delay: Duration::ZERO,
+            drain_timeout: Duration::from_secs(30),
+            directory_cache: osmic_tiles::reader::DEFAULT_DIRECTORY_CACHE,
         }
     }
 }
@@ -126,6 +146,42 @@ impl TileServerConfig {
         self
     }
 
+    /// Set the maximum number of open client connections.
+    #[must_use]
+    pub fn max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
+        self
+    }
+
+    /// Set how long a client may take to send request headers.
+    #[must_use]
+    pub fn header_read_timeout(mut self, timeout: Duration) -> Self {
+        self.header_read_timeout = timeout;
+        self
+    }
+
+    /// Set how long to keep serving, with `/readyz` failing, after a
+    /// shutdown signal.
+    #[must_use]
+    pub fn drain_delay(mut self, delay: Duration) -> Self {
+        self.drain_delay = delay;
+        self
+    }
+
+    /// Set the longest wait for in-flight requests during shutdown.
+    #[must_use]
+    pub fn drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
+    /// Set how many decoded leaf directories to cache.
+    #[must_use]
+    pub fn directory_cache(mut self, directories: u64) -> Self {
+        self.directory_cache = directories;
+        self
+    }
+
     /// Validate the configuration, returning the normalized public URL
     /// (no trailing slash) and parsed CORS origins.
     pub(crate) fn validate(&self) -> Result<ValidatedConfig, ServeError> {
@@ -134,6 +190,18 @@ impl TileServerConfig {
         }
         if self.request_timeout.is_zero() {
             return Err(invalid("request_timeout", "must be greater than zero"));
+        }
+        if self.max_connections == 0 {
+            return Err(invalid("max_connections", "must be at least 1"));
+        }
+        if self.header_read_timeout.is_zero() {
+            return Err(invalid("header_read_timeout", "must be greater than zero"));
+        }
+        if self.drain_timeout.is_zero() {
+            return Err(invalid("drain_timeout", "must be greater than zero"));
+        }
+        if self.directory_cache == 0 {
+            return Err(invalid("directory_cache", "must be at least 1"));
         }
         let public_url = self
             .public_url
@@ -145,8 +213,10 @@ impl TileServerConfig {
             .iter()
             .map(|o| parse_origin(o))
             .collect::<Result<Vec<_>, _>>()?;
+        let public_origin = public_url.as_deref().map(origin_of);
         Ok(ValidatedConfig {
             public_url,
+            public_origin,
             cors_origins,
         })
     }
@@ -154,7 +224,18 @@ impl TileServerConfig {
 
 pub(crate) struct ValidatedConfig {
     pub public_url: Option<String>,
+    /// `scheme://authority` of `public_url`.
+    pub public_origin: Option<String>,
     pub cors_origins: Vec<HeaderValue>,
+}
+
+/// `scheme://authority` of a normalized public URL.
+fn origin_of(url: &str) -> String {
+    let after_scheme = url.find("://").map_or(0, |i| i + 3);
+    match url[after_scheme..].find('/') {
+        Some(i) => url[..after_scheme + i].to_string(),
+        None => url.to_string(),
+    }
 }
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> ServeError {
@@ -237,6 +318,46 @@ mod tests {
         ] {
             let c = TileServerConfig::new("x").public_url(bad);
             assert!(c.validate().is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn public_origin_drops_the_path() {
+        let v = TileServerConfig::new("x")
+            .public_url("https://a.example.com:8443/base/")
+            .validate()
+            .unwrap();
+        assert_eq!(
+            v.public_origin.as_deref(),
+            Some("https://a.example.com:8443")
+        );
+        assert_eq!(origin_of("http://h"), "http://h");
+    }
+
+    #[test]
+    fn connection_limits_are_validated() {
+        for (c, field) in [
+            (
+                TileServerConfig::new("x").max_connections(0),
+                "max_connections",
+            ),
+            (
+                TileServerConfig::new("x").header_read_timeout(Duration::ZERO),
+                "header_read_timeout",
+            ),
+            (
+                TileServerConfig::new("x").drain_timeout(Duration::ZERO),
+                "drain_timeout",
+            ),
+            (
+                TileServerConfig::new("x").directory_cache(0),
+                "directory_cache",
+            ),
+        ] {
+            assert!(
+                matches!(c.validate(), Err(ServeError::InvalidConfig { field: f, .. }) if f == field),
+                "{field}"
+            );
         }
     }
 

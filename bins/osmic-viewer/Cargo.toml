@@ -16,7 +16,7 @@ osmic-core = { workspace = true }
 osmic-render = { workspace = true }
 osmic-style = { workspace = true }
 osmic-text = { workspace = true }
-osmic-tiles = { workspace = true }
+osmic-tiles = { workspace = true, features = ["native"] }
 wgpu = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }

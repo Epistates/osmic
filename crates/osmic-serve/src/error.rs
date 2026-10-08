@@ -23,14 +23,15 @@ pub enum ServeError {
     #[error("PMTiles archive not found: {}", .0.display())]
     ArchiveNotFound(PathBuf),
 
-    /// The PMTiles archive exists but could not be opened or read.
-    #[error("failed to read PMTiles archive {}", path.display())]
+    /// The PMTiles archive exists but could not be read, is not a valid
+    /// PMTiles v3 archive, or declares an unknown tile compression.
+    #[error("failed to open PMTiles archive {}", path.display())]
     Archive {
         /// Path of the archive.
         path: PathBuf,
-        /// Underlying PMTiles error.
+        /// What was wrong with it.
         #[source]
-        source: pmtiles::PmtError,
+        source: osmic_tiles::reader::OpenArchiveError,
     },
 
     /// The listening socket could not be bound.

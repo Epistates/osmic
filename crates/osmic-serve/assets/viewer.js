@@ -6,7 +6,7 @@
   var cfg = JSON.parse(el.dataset.config);
   var map = new maplibregl.Map({
     container: 'map',
-    style: '/style.json',
+    style: 'style.json',
     center: cfg.center,
     zoom: cfg.zoom,
     minZoom: cfg.minZoom,

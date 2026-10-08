@@ -40,7 +40,7 @@ osmic-osm = { version = "0.1.1", path = "crates/osmic-osm", default-features = f
 osmic-geo = { version = "0.1.1", path = "crates/osmic-geo" }
 osmic-index = { version = "0.1.1", path = "crates/osmic-index" }
 osmic-style = { version = "0.1.1", path = "crates/osmic-style" }
-osmic-tiles = { version = "0.1.1", path = "crates/osmic-tiles" }
+osmic-tiles = { version = "0.1.1", path = "crates/osmic-tiles", default-features = false }
 osmic-render = { version = "0.1.1", path = "crates/osmic-render" }
 osmic-text = { version = "0.1.1", path = "crates/osmic-text" }
 osmic-app = { version = "0.1.1", path = "crates/osmic-app" }
@@ -79,6 +79,7 @@ lru = "0.18"
 # Server
 axum = "0.8"
 tower = "0.5"
+hyper-util = { version = "0.1.21", features = ["server-auto", "server-graceful", "service", "tokio"] }
 tower-http = { version = "0.7", features = ["compression-gzip", "cors", "set-header"] }
 bytes = "1"
 tokio = { version = "1", features = ["full"] }

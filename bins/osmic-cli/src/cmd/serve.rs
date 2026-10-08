@@ -38,6 +38,29 @@ pub struct ServeArgs {
     /// Requests handled concurrently before shedding load with 503
     #[arg(long, default_value_t = 1024)]
     pub max_concurrency: usize,
+
+    /// Open client connections accepted at once
+    #[arg(long, default_value_t = 4096)]
+    pub max_connections: usize,
+
+    /// Seconds a client has to send request headers (also the idle
+    /// keep-alive limit)
+    #[arg(long, default_value_t = 10)]
+    pub header_timeout: u64,
+
+    /// After SIGINT/SIGTERM, keep serving this many seconds with /readyz
+    /// failing so load balancers stop routing here (use 5-10 behind
+    /// Kubernetes)
+    #[arg(long, default_value_t = 0)]
+    pub drain_delay: u64,
+
+    /// Longest wait in seconds for in-flight requests during shutdown
+    #[arg(long, default_value_t = 30)]
+    pub drain_timeout: u64,
+
+    /// Decoded PMTiles leaf directories kept in memory
+    #[arg(long, default_value_t = osmic_tiles::reader::DEFAULT_DIRECTORY_CACHE)]
+    pub directory_cache: u64,
 }
 
 pub fn run(args: ServeArgs) -> anyhow::Result<()> {
@@ -49,7 +72,12 @@ pub fn run(args: ServeArgs) -> anyhow::Result<()> {
         .cache_max_age(args.cache_max_age)
         .cors_allowed_origins(args.cors_origins.clone())
         .request_timeout(Duration::from_secs(args.request_timeout))
-        .max_concurrency(args.max_concurrency);
+        .max_concurrency(args.max_concurrency)
+        .max_connections(args.max_connections)
+        .header_read_timeout(Duration::from_secs(args.header_timeout))
+        .drain_delay(Duration::from_secs(args.drain_delay))
+        .drain_timeout(Duration::from_secs(args.drain_timeout))
+        .directory_cache(args.directory_cache);
     if let Some(url) = &args.public_url {
         config = config.public_url(url);
     }

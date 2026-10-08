@@ -29,7 +29,7 @@ osmic-geo = { workspace = true }
 osmic-index = { workspace = true }
 osmic-app = { workspace = true }
 osmic-style = { workspace = true }
-osmic-tiles = { workspace = true }
+osmic-tiles = { workspace = true, features = ["native"] }
 osmic-render = { workspace = true }
 osmic-text = { workspace = true }
 osmic-serve = { workspace = true }

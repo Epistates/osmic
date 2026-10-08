@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::error_handling::HandleErrorLayer;
@@ -10,7 +11,13 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tower::ServiceBuilder;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::load_shed::LoadShedLayer;
@@ -22,7 +29,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
-use crate::archive::Archive;
+use crate::archive::{Archive, viewer_csp};
 use crate::config::{TileServerConfig, ValidatedConfig};
 use crate::error::ServeError;
 use crate::handlers::{self, AppState};
@@ -62,16 +69,22 @@ impl TileServer {
     /// archive is missing or unreadable.
     pub async fn open(config: TileServerConfig) -> Result<Self, ServeError> {
         let validated = config.validate()?;
-        let archive = Archive::open(&config.pmtiles_path).await?;
+        let archive = Archive::open(&config.pmtiles_path, config.directory_cache).await?;
         let cache = format!("public, max-age={}", config.cache_max_age);
         let tile_cache_control =
             HeaderValue::from_str(&cache).map_err(|e| ServeError::InvalidConfig {
                 field: "cache_max_age",
                 reason: e.to_string(),
             })?;
+        let viewer_csp = HeaderValue::from_str(&viewer_csp(validated.public_origin.as_deref()))
+            .map_err(|e| ServeError::InvalidConfig {
+                field: "public_url",
+                reason: e.to_string(),
+            })?;
         let state = Arc::new(AppState {
             archive,
             tile_cache_control,
+            viewer_csp,
             public_url: validated.public_url.clone(),
             draining: AtomicBool::new(false),
         });
@@ -130,15 +143,22 @@ impl TileServer {
         self.serve_with_shutdown(listener, shutdown_signal()).await
     }
 
-    /// Serve on an existing listener until `shutdown` completes, then stop
-    /// accepting connections and wait for in-flight requests to finish.
+    /// Serve on an existing listener until `shutdown` completes.
     ///
-    /// `/readyz` starts failing as soon as `shutdown` completes so load
-    /// balancers can drain the instance.
+    /// Connections are HTTP/1.1 or HTTP/2 (prior knowledge), at most
+    /// [`max_connections`](TileServerConfig::max_connections) at a time, and
+    /// a client must send each request's headers within
+    /// [`header_read_timeout`](TileServerConfig::header_read_timeout).
+    ///
+    /// When `shutdown` completes, `/readyz` starts failing at once; the
+    /// server keeps accepting for [`drain_delay`](TileServerConfig::drain_delay)
+    /// so load balancers can stop routing here, then stops accepting and
+    /// waits up to [`drain_timeout`](TileServerConfig::drain_timeout) for
+    /// in-flight requests before closing the remaining connections.
     ///
     /// # Errors
     ///
-    /// [`ServeError::Serve`] if the HTTP server fails.
+    /// None at present: accept failures are logged and retried.
     pub async fn serve_with_shutdown<F>(
         self,
         listener: TcpListener,
@@ -151,16 +171,79 @@ impl TileServer {
             Ok(addr) => tracing::info!(%addr, "tile server listening"),
             Err(e) => tracing::warn!(error = %e, "tile server listening (address unknown)"),
         }
-        let state = self.state;
-        axum::serve(listener, self.router)
-            .with_graceful_shutdown(async move {
-                shutdown.await;
-                state.draining.store(true, Ordering::Release);
-                tracing::info!("shutdown requested; draining in-flight requests");
-            })
-            .await
-            .map_err(ServeError::Serve)?;
-        tracing::info!("tile server stopped");
+        let config = &self.config;
+        let state = Arc::clone(&self.state);
+        let drain_delay = config.drain_delay;
+        // Completes once the drain delay after the shutdown signal is over.
+        let stop_accepting = async move {
+            shutdown.await;
+            state.draining.store(true, Ordering::Release);
+            tracing::info!(
+                delay_ms = drain_delay.as_millis() as u64,
+                "shutdown requested; /readyz now fails"
+            );
+            tokio::time::sleep(drain_delay).await;
+        };
+        tokio::pin!(stop_accepting);
+
+        let mut builder = ConnBuilder::new(TokioExecutor::new());
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(config.header_read_timeout)
+            .keep_alive(true);
+        builder.http2().timer(TokioTimer::new());
+        let connections = Arc::new(Semaphore::new(config.max_connections));
+        let graceful = GracefulShutdown::new();
+        let service = TowerToHyperService::new(self.router.clone());
+        let mut tasks = JoinSet::new();
+
+        loop {
+            // Reap finished connection tasks so the set stays small.
+            while tasks.try_join_next().is_some() {}
+            let permit = tokio::select! {
+                () = &mut stop_accepting => break,
+                permit = Arc::clone(&connections).acquire_owned() => match permit {
+                    Ok(p) => p,
+                    Err(_) => break, // semaphore closed: never happens
+                },
+            };
+            let stream = tokio::select! {
+                () = &mut stop_accepting => break,
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => stream,
+                    Err(e) => {
+                        // Out of file descriptors and similar: back off.
+                        tracing::warn!(error = %e, "accept failed");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                },
+            };
+            let conn = builder
+                .serve_connection_with_upgrades(TokioIo::new(stream), service.clone())
+                .into_owned();
+            let conn = graceful.watch(conn);
+            tasks.spawn(async move {
+                if let Err(e) = conn.await {
+                    tracing::debug!(error = %e, "connection ended with an error");
+                }
+                drop(permit);
+            });
+        }
+        drop(listener);
+        tracing::info!("stopped accepting; draining in-flight requests");
+        tokio::select! {
+            () = graceful.shutdown() => tracing::info!("tile server stopped"),
+            () = tokio::time::sleep(config.drain_timeout) => {
+                tracing::warn!(
+                    timeout_ms = config.drain_timeout.as_millis() as u64,
+                    connections = tasks.len(),
+                    "drain timeout reached; closing remaining connections"
+                );
+            }
+        }
+        tasks.shutdown().await;
         Ok(())
     }
 }

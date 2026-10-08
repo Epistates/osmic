@@ -26,7 +26,7 @@ osmic-osm = { workspace = true, features = ["native"] }
 osmic-repl = { workspace = true }
 osmic-serve = { workspace = true }
 osmic-style = { workspace = true }
-osmic-tiles = { workspace = true }
+osmic-tiles = { workspace = true, features = ["native", "reader"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 ctrlc = { workspace = true }

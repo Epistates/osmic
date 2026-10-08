@@ -45,10 +45,23 @@
 //!
 //! # Resource controls
 //!
-//! A per-request timeout (`408`), a concurrency limit with load shedding
-//! (`503` + `Retry-After`), graceful shutdown on SIGINT/SIGTERM and
-//! restrictive CORS (GET/HEAD/OPTIONS, any origin unless configured, no
-//! credentials) are built in. Per-request logs are emitted at `debug` level.
+//! Built in:
+//!
+//! * per connection: a cap on open connections, a header read timeout
+//!   (which also bounds idle keep-alive connections) and HTTP/1.1 or
+//!   HTTP/2;
+//! * per request: a timeout (`408`) and a concurrency limit with load
+//!   shedding (`503` + `Retry-After`);
+//! * shutdown on SIGINT/SIGTERM: `/readyz` fails at once, the server keeps
+//!   serving for a configurable drain delay, then waits a bounded time for
+//!   in-flight requests;
+//! * restrictive CORS (GET/HEAD/OPTIONS, any origin unless configured, no
+//!   credentials).
+//!
+//! Archives are validated when opened and decoded leaf directories are
+//! cached (bounded). Tiles stored with brotli or zstd are sent only to
+//! clients that accept that encoding; others get `406`. Per-request logs
+//! are emitted at `debug` level.
 //!
 //! # Memory-mapped archive
 //!

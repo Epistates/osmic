@@ -11,14 +11,14 @@
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use pmtiles::{Compression, TileCoord};
 use twox_hash::XxHash3_64;
 
-use crate::archive::{Archive, VIEWER_CSP};
+use crate::archive::{Archive, accepted_extensions};
 use crate::http::{
     NO_STORE, SHORT_CACHE, accepts_encoding, if_none_match_hits, is_valid_authority,
 };
@@ -31,6 +31,8 @@ const BLOCKING_DECOMPRESS_THRESHOLD: usize = 64 * 1024;
 pub(crate) struct AppState {
     pub archive: Archive,
     pub tile_cache_control: HeaderValue,
+    /// Content-Security-Policy of the viewer page.
+    pub viewer_csp: HeaderValue,
     pub public_url: Option<String>,
     /// Set once shutdown begins so `/readyz` fails and load balancers drain us.
     pub draining: AtomicBool,
@@ -41,6 +43,8 @@ pub(crate) struct AppState {
 pub(crate) enum ApiError {
     BadRequest(&'static str),
     NotFound(&'static str),
+    /// The tile exists only in an encoding the client does not accept.
+    NotAcceptable(&'static str),
     Internal,
 }
 
@@ -49,6 +53,7 @@ impl IntoResponse for ApiError {
         let (status, msg) = match self {
             Self::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             Self::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            Self::NotAcceptable(m) => (StatusCode::NOT_ACCEPTABLE, m),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
         (
@@ -70,27 +75,39 @@ fn header_value(s: &str) -> Result<HeaderValue, ApiError> {
     })
 }
 
-/// Parse `{y}` with an optional `.mvt` / `.pbf` / `.mlt` suffix.
-fn parse_coord(z: &str, x: &str, y: &str) -> Result<TileCoord, ApiError> {
+/// Parse `{z}`, `{x}` and `{y}`, where `{y}` may carry one of the
+/// archive's tile extensions (see [`accepted_extensions`]). Numbers must be
+/// plain ASCII digits, so each tile has a single URL (no `+1` or `007`).
+fn parse_coord(z: &str, x: &str, y: &str, extensions: &[&str]) -> Result<TileCoord, ApiError> {
     const BAD: ApiError = ApiError::BadRequest("invalid tile coordinates");
-    let y = [".mvt", ".pbf", ".mlt"]
-        .iter()
-        .find_map(|ext| y.strip_suffix(ext))
-        .unwrap_or(y);
-    let z: u8 = z.parse().map_err(|_| BAD)?;
-    let x: u32 = x.parse().map_err(|_| BAD)?;
-    let y: u32 = y.parse().map_err(|_| BAD)?;
-    TileCoord::new(z, x, y).map_err(|_| BAD)
+    let y = match y.split_once('.') {
+        Some((n, ext)) if extensions.contains(&ext) => n,
+        Some(_) => return Err(BAD),
+        None => y,
+    };
+    let num = |s: &str| -> Result<u32, ApiError> {
+        let canonical = !s.is_empty()
+            && s.bytes().all(|b| b.is_ascii_digit())
+            && (s == "0" || !s.starts_with('0'));
+        if canonical {
+            s.parse().map_err(|_| BAD)
+        } else {
+            Err(BAD)
+        }
+    };
+    let z = u8::try_from(num(z)?).map_err(|_| BAD)?;
+    TileCoord::new(z, num(x)?, num(y)?).map_err(|_| BAD)
 }
 
-/// `GET /tiles/{z}/{x}/{y}[.mvt|.pbf|.mlt]`
+/// `GET /tiles/{z}/{x}/{y}[.{ext}]`
 pub(crate) async fn get_tile(
     State(state): State<std::sync::Arc<AppState>>,
     Path((z, x, y)): Path<(String, String, String)>,
-    headers: HeaderMap,
+    request: Request,
 ) -> Result<Response, ApiError> {
-    let coord = parse_coord(&z, &x, &y)?;
+    let headers = request.headers();
     let archive = &state.archive;
+    let coord = parse_coord(&z, &x, &y, accepted_extensions(archive.tile_type))?;
     if coord.z() > archive.max_zoom {
         return Err(ApiError::NotFound("zoom level not available"));
     }
@@ -110,7 +127,7 @@ pub(crate) async fn get_tile(
             .into_response());
     };
 
-    let representation = choose_representation(archive.tile_compression, &headers)?;
+    let representation = choose_representation(archive.tile_compression, headers)?;
     // Strong validator over the stored bytes; the identity representation of a
     // compressed tile gets a distinct suffix because its bytes differ.
     let hash = XxHash3_64::oneshot(&raw);
@@ -126,7 +143,7 @@ pub(crate) async fn get_tile(
     out.insert(header::ETAG, etag.clone());
 
     if let Ok(etag_str) = etag.to_str()
-        && if_none_match_hits(&headers, etag_str)
+        && if_none_match_hits(headers, etag_str)
     {
         return Ok((StatusCode::NOT_MODIFIED, out).into_response());
     }
@@ -168,17 +185,13 @@ fn choose_representation(
             } else if stored == Compression::Gzip {
                 Ok(Representation::Decompress)
             } else {
-                tracing::error!(
-                    encoding = enc,
-                    "client does not accept the archive's tile encoding and it cannot be decompressed here"
-                );
-                Err(ApiError::Internal)
+                Err(ApiError::NotAcceptable(
+                    "tiles are only available in an encoding this client does not accept",
+                ))
             }
         }
-        Compression::Unknown => {
-            tracing::error!("archive declares unknown tile compression");
-            Err(ApiError::Internal)
-        }
+        // Rejected when the archive is opened.
+        Compression::Unknown => Err(ApiError::Internal),
     }
 }
 
@@ -259,10 +272,9 @@ fn with_vary_host(state: &AppState, mut res: Response) -> Response {
 /// `GET /tiles.json` -- TileJSON 3.0.0.
 pub(crate) async fn get_tilejson(
     State(state): State<std::sync::Arc<AppState>>,
-    headers: HeaderMap,
-    uri: Uri,
+    request: Request,
 ) -> Result<Response, ApiError> {
-    let base = base_url(&state, &headers, &uri)?;
+    let base = base_url(&state, request.headers(), request.uri())?;
     let res = document("application/json", state.archive.tilejson(&base));
     Ok(with_vary_host(&state, res))
 }
@@ -270,10 +282,9 @@ pub(crate) async fn get_tilejson(
 /// `GET /style.json` -- MapLibre style referencing `/tiles.json`.
 pub(crate) async fn get_style(
     State(state): State<std::sync::Arc<AppState>>,
-    headers: HeaderMap,
-    uri: Uri,
+    request: Request,
 ) -> Result<Response, ApiError> {
-    let base = base_url(&state, &headers, &uri)?;
+    let base = base_url(&state, request.headers(), request.uri())?;
     let res = document("application/json", state.archive.style(&base));
     Ok(with_vary_host(&state, res))
 }
@@ -284,10 +295,8 @@ pub(crate) async fn get_viewer(State(state): State<std::sync::Arc<AppState>>) ->
         "text/html; charset=utf-8",
         state.archive.viewer_html.clone(),
     );
-    res.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(VIEWER_CSP),
-    );
+    res.headers_mut()
+        .insert(header::CONTENT_SECURITY_POLICY, state.viewer_csp.clone());
     res
 }
 
