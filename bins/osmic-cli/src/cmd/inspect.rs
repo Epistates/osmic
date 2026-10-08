@@ -48,11 +48,11 @@ pub fn run(args: InspectArgs) -> anyhow::Result<()> {
         bail!("input file {} does not exist", args.input.display());
     }
     let size = std::fs::metadata(&args.input)?.len();
-    let processor = PbfProcessor::new(PipelineConfig {
-        node_storage: args.node_store,
-        tag_retention: TagRetention::Keys(Vec::<String>::new().into()),
-        ..Default::default()
-    });
+    let processor = PbfProcessor::new(
+        PipelineConfig::new()
+            .node_storage(args.node_store)
+            .tag_retention(TagRetention::Keys(Vec::<String>::new().into())),
+    );
     let counter = Counter::default();
     let out = processor
         .run(&args.input, &counter)

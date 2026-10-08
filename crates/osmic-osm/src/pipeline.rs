@@ -99,6 +99,49 @@ pub struct PipelineConfig {
     pub filter: Option<TagFilter>,
 }
 
+impl PipelineConfig {
+    /// Default configuration: every layer, sparse node storage, all tags
+    /// kept, incomplete ways skipped, no filter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Classify into `layers` only.
+    #[must_use]
+    pub fn layers(mut self, layers: LayerSet) -> Self {
+        self.layers = layers;
+        self
+    }
+
+    /// Keep node locations in `storage`.
+    #[must_use]
+    pub fn node_storage(mut self, storage: NodeStorage) -> Self {
+        self.node_storage = storage;
+        self
+    }
+
+    /// Keep the tags `retention` selects on emitted features.
+    #[must_use]
+    pub fn tag_retention(mut self, retention: TagRetention) -> Self {
+        self.tag_retention = retention;
+        self
+    }
+
+    /// Handle ways with missing nodes according to `policy`.
+    #[must_use]
+    pub fn incomplete_ways(mut self, policy: IncompleteWays) -> Self {
+        self.incomplete_ways = policy;
+        self
+    }
+
+    /// Only turn elements whose raw tags match `filter` into features.
+    #[must_use]
+    pub fn filter(mut self, filter: Option<TagFilter>) -> Self {
+        self.filter = filter;
+        self
+    }
+}
+
 /// Receives features as the pipeline produces them, in batches, from many
 /// threads.
 pub trait FeatureSink: Sync {

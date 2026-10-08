@@ -114,10 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(MvtEncoder),
         Arc::clone(&tags),
     )?;
-    let config = PipelineConfig {
-        tag_retention: TagRetention::Curated,
-        ..PipelineConfig::default()
-    };
+    let config = PipelineConfig::new().tag_retention(TagRetention::Curated);
     // Features go straight from the PBF reader into the tile renderer.
     PbfProcessor::with_tag_store(config, tags).run(Path::new("region.osm.pbf"), &tiles)?;
     let summary = tiles.write_pmtiles(Path::new("region.pmtiles"), &ArchiveInfo::default(), false)?;

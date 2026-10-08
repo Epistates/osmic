@@ -51,10 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None => return Err(format!("unknown storage {s:?}").into()),
         },
     };
-    let processor = PbfProcessor::new(PipelineConfig {
-        node_storage,
-        ..Default::default()
-    });
+    let processor = PbfProcessor::new(PipelineConfig::new().node_storage(node_storage));
     let sink = CountingSink::default();
     let out = processor.run(path.as_ref(), &sink)?;
     let s = &out.stats;

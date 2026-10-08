@@ -114,12 +114,9 @@ fn fixture(name: &str, sorted: bool, shuffle: bool) -> (tempfile::TempDir, PathB
 }
 
 fn run(path: &Path, storage: NodeStorage) -> ProcessedData {
-    PbfProcessor::new(PipelineConfig {
-        node_storage: storage,
-        ..Default::default()
-    })
-    .process(path)
-    .expect("process")
+    PbfProcessor::new(PipelineConfig::new().node_storage(storage))
+        .process(path)
+        .expect("process")
 }
 
 fn find(data: &ProcessedData, id: OsmId, layer: &str) -> Feature {
@@ -228,10 +225,9 @@ fn every_node_storage_gives_identical_output() {
 #[test]
 fn dense_store_too_small_is_an_error_not_silent_loss() {
     let (_dir, path) = fixture("c.osm.pbf", true, false);
-    let err = PbfProcessor::new(PipelineConfig {
-        node_storage: NodeStorage::DenseMemory { max_node_id: 10 },
-        ..Default::default()
-    })
+    let err = PbfProcessor::new(
+        PipelineConfig::new().node_storage(NodeStorage::DenseMemory { max_node_id: 10 }),
+    )
     .process(&path)
     .err()
     .expect("node ids above 10 must fail");
@@ -256,12 +252,10 @@ fn unsorted_input_produces_the_same_features() {
 #[test]
 fn keep_available_policy_builds_partial_ways() {
     let (_dir, path) = fixture("d.osm.pbf", true, false);
-    let data = PbfProcessor::new(PipelineConfig {
-        incomplete_ways: IncompleteWays::KeepAvailable,
-        ..Default::default()
-    })
-    .process(&path)
-    .expect("process");
+    let data =
+        PbfProcessor::new(PipelineConfig::new().incomplete_ways(IncompleteWays::KeepAvailable))
+            .process(&path)
+            .expect("process");
     let service = find(&data, OsmId::way(13), "highway");
     let Geometry::Line(l) = service.geometry else {
         panic!("line")
@@ -272,11 +266,11 @@ fn keep_available_policy_builds_partial_ways() {
 #[test]
 fn layer_filter_and_tag_retention() {
     let (_dir, path) = fixture("e.osm.pbf", true, false);
-    let data = PbfProcessor::new(PipelineConfig {
-        layers: LayerSet::from_names("amenity").expect("valid"),
-        tag_retention: TagRetention::Keys(vec!["name".to_string()].into()),
-        ..Default::default()
-    })
+    let data = PbfProcessor::new(
+        PipelineConfig::new()
+            .layers(LayerSet::from_names("amenity").expect("valid"))
+            .tag_retention(TagRetention::Keys(vec!["name".to_string()].into())),
+    )
     .process(&path)
     .expect("process");
     assert!(
@@ -322,21 +316,20 @@ fn missing_file_is_an_error() {
 #[test]
 fn element_filter_applies_to_raw_tags_before_classification() {
     let (_dir, path) = fixture("f.osm.pbf", true, false);
-    let data = PbfProcessor::new(PipelineConfig {
-        filter: Some(osmic_osm::TagFilter::parse("name=*").expect("valid")),
-        tag_retention: TagRetention::Keys(vec!["amenity".to_string()].into()),
-        ..Default::default()
-    })
+    let data = PbfProcessor::new(
+        PipelineConfig::new()
+            .filter(Some(osmic_osm::TagFilter::parse("name=*").expect("valid")))
+            .tag_retention(TagRetention::Keys(vec!["amenity".to_string()].into())),
+    )
     .process(&path)
     .expect("process");
     let ids: Vec<OsmId> = data.features.iter().map(|f| f.id).collect();
     // Only the café and the named road carry `name`, even though `name`
     // itself is not retained.
     assert_eq!(ids, [OsmId::node(1), OsmId::way(10)]);
-    let unnamed = PbfProcessor::new(PipelineConfig {
-        filter: Some(osmic_osm::TagFilter::parse("!name").expect("valid")),
-        ..Default::default()
-    })
+    let unnamed = PbfProcessor::new(
+        PipelineConfig::new().filter(Some(osmic_osm::TagFilter::parse("!name").expect("valid"))),
+    )
     .process(&path)
     .expect("process");
     assert!(

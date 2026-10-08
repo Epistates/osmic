@@ -182,21 +182,20 @@ pub fn run(args: TilesArgs) -> anyhow::Result<()> {
         let generator =
             TileGenerator::new(config, make_encoder(args.format)?, Arc::clone(&tag_store))?;
         let processor = PbfProcessor::with_tag_store(
-            PipelineConfig {
-                layers,
-                node_storage: args.node_store.clone(),
-                tag_retention: if args.all_tags {
+            PipelineConfig::new()
+                .layers(layers)
+                .node_storage(args.node_store.clone())
+                .tag_retention(if args.all_tags {
                     TagRetention::All
                 } else {
                     TagRetention::Curated
-                },
-                incomplete_ways: if args.keep_incomplete_ways {
+                })
+                .incomplete_ways(if args.keep_incomplete_ways {
                     IncompleteWays::KeepAvailable
                 } else {
                     IncompleteWays::Skip
-                },
-                filter,
-            },
+                })
+                .filter(filter),
             tag_store,
         );
         let out = processor
