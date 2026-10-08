@@ -40,7 +40,8 @@ pub struct LabelStyle {
     pub font_size: f32,
     pub color: Color,
     pub halo_color: Color,
-    /// Halo radius in pixels; `0` disables the halo.
+    /// Halo radius in pixels; `0` disables the halo. Drawn at most
+    /// [`crate::max_halo_width`] of `font_size` wide, like MapLibre.
     pub halo_width: f32,
     /// The point of the text box (`[0,0]` top-left … `[1,1]` bottom-right)
     /// that sits on the anchor. Point labels only.

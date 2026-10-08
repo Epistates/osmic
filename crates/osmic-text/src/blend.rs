@@ -51,56 +51,118 @@ impl Mask {
         self.data.iter().all(|&c| c == 0)
     }
 
-    /// Morphological dilation by a disc of `radius` pixels: each output
-    /// pixel is the maximum coverage within `radius` of it. This produces
-    /// the halo around text in one pass instead of drawing offset copies.
+    /// The shape grown by a disc of `radius` pixels: the halo around text,
+    /// produced in one pass instead of drawing offset copies.
+    ///
+    /// Each output pixel is the larger of its own coverage and the halo's,
+    /// which is 1 within `radius` of the glyph edge and falls off linearly
+    /// over one pixel (anti-aliasing). Distances come from an exact
+    /// Euclidean distance transform, so the cost is linear in the number
+    /// of pixels whatever the radius.
     ///
     /// The mask keeps its size, so callers should allocate at least
     /// `radius.ceil()` pixels of padding around the glyphs.
     pub fn dilate(&self, radius: f32) -> Mask {
-        if radius <= 0.0 || self.width == 0 || self.height == 0 {
+        if radius.is_nan() || radius <= 0.0 || self.width == 0 || self.height == 0 {
             return self.clone();
         }
-        let r = radius.ceil() as i32;
-        // Half-width of the disc on each row, with half a pixel of slack so
-        // small radii still grow the shape.
-        let reach = |dy: i32| -> i32 {
-            let rr = (radius + 0.5) * (radius + 0.5) - (dy * dy) as f32;
-            if rr < 0.0 {
-                -1
-            } else {
-                rr.sqrt().floor() as i32
-            }
-        };
-        let spans: Vec<(i32, i32)> = (-r..=r)
-            .map(|dy| (dy, reach(dy)))
-            .filter(|(_, h)| *h >= 0)
-            .collect();
-        let (w, h) = (self.width as i32, self.height as i32);
-        let mut out = Mask::new(self.width, self.height);
-        for y in 0..h {
-            for x in 0..w {
-                let mut best = 0u8;
-                'rows: for &(dy, half) in &spans {
-                    let yy = y + dy;
-                    if yy < 0 || yy >= h {
-                        continue;
-                    }
-                    let row = &self.data[yy as usize * w as usize..(yy as usize + 1) * w as usize];
-                    let (x0, x1) = ((x - half).max(0), (x + half).min(w - 1));
-                    for &c in &row[x0 as usize..=x1 as usize] {
-                        if c > best {
-                            best = c;
-                            if best == 255 {
-                                break 'rows;
-                            }
-                        }
-                    }
-                }
-                out.data[y as usize * w as usize + x as usize] = best;
-            }
+        let dist2 = self.squared_distances();
+        let radius = f64::from(radius);
+        let mut out = self.clone();
+        for (o, d2) in out.data.iter_mut().zip(&dist2) {
+            // The distance between pixel centres, minus the half pixel to
+            // the source pixel's edge, plus half a pixel of coverage ramp.
+            let halo = (radius + 1.0 - d2.sqrt()).clamp(0.0, 1.0);
+            *o = (*o).max((halo * 255.0).round() as u8);
         }
         out
+    }
+
+    /// Squared distance from every pixel centre to the glyph shape.
+    ///
+    /// Pixels at least half covered are inside (distance 0); fainter
+    /// anti-aliased pixels are a fraction of a pixel away, so thin strokes
+    /// still get a halo; empty pixels are outside. Computed with the
+    /// separable Felzenszwalb–Huttenlocher transform: columns, then rows.
+    fn squared_distances(&self) -> Vec<f64> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let mut grid: Vec<f64> = self
+            .data
+            .iter()
+            .map(|&c| match c {
+                0 => f64::INFINITY,
+                128.. => 0.0,
+                c => (f64::from(128 - c) / 255.0).powi(2),
+            })
+            .collect();
+        let mut scratch = Edt1d::default();
+        let (mut line, mut out) = (vec![0.0; h], vec![0.0; h]);
+        for x in 0..w {
+            for (y, v) in line.iter_mut().enumerate() {
+                *v = grid[y * w + x];
+            }
+            scratch.run(&line, &mut out);
+            for (y, v) in out.iter().enumerate() {
+                grid[y * w + x] = *v;
+            }
+        }
+        let mut row_out = vec![0.0; w];
+        for row in grid.chunks_exact_mut(w) {
+            scratch.run(row, &mut row_out);
+            row.copy_from_slice(&row_out);
+        }
+        grid
+    }
+}
+
+/// Scratch space for the one-dimensional squared distance transform.
+#[derive(Default)]
+struct Edt1d {
+    /// Sample positions of the parabolas in the lower envelope.
+    sites: Vec<usize>,
+    /// Where each envelope parabola starts to be the lowest.
+    starts: Vec<f64>,
+}
+
+impl Edt1d {
+    /// `out[x] = min over q of (x - q)^2 + f[q]`, skipping infinite `f[q]`
+    /// (everything is infinite if all of `f` is).
+    fn run(&mut self, f: &[f64], out: &mut [f64]) {
+        self.sites.clear();
+        self.starts.clear();
+        for (q, &fq) in f.iter().enumerate() {
+            if !fq.is_finite() {
+                continue;
+            }
+            let qf = q as f64;
+            let mut start = f64::NEG_INFINITY;
+            while let Some(&p) = self.sites.last() {
+                let pf = p as f64;
+                let s = ((fq + qf * qf) - (f[p] + pf * pf)) / (2.0 * (qf - pf));
+                if s <= *self.starts.last().expect("parallel to sites") {
+                    self.sites.pop();
+                    self.starts.pop();
+                } else {
+                    start = s;
+                    break;
+                }
+            }
+            self.sites.push(q);
+            self.starts.push(start);
+        }
+        if self.sites.is_empty() {
+            out.fill(f64::INFINITY);
+            return;
+        }
+        let mut k = 0;
+        for (x, o) in out.iter_mut().enumerate() {
+            let xf = x as f64;
+            while k + 1 < self.sites.len() && self.starts[k + 1] <= xf {
+                k += 1;
+            }
+            let p = self.sites[k];
+            *o = (xf - p as f64).powi(2) + f[p];
+        }
     }
 }
 
@@ -280,8 +342,61 @@ mod tests {
         assert_eq!(d.get(6, 4), 255);
         assert_eq!(d.get(4, 2), 255);
         assert_eq!(d.get(7, 4), 0);
-        assert_eq!(d.get(6, 6), 0, "corner outside the disc");
+        let corner = d.get(6, 6);
+        assert!(corner > 0 && corner < 128, "corner only clipped: {corner}");
+        assert_eq!(d.get(5, 5), 255);
         assert_eq!(m.dilate(0.0), m);
+        assert_eq!(m.dilate(f32::NAN), m);
+    }
+
+    #[test]
+    fn distance_transform_matches_brute_force() {
+        let (w, h) = (23u32, 17u32);
+        let mut m = Mask::new(w, h);
+        let mut s = 0x9E37_79B9u32;
+        for c in &mut m.data {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            *c = if s.is_multiple_of(11) {
+                (s >> 8) as u8
+            } else {
+                0
+            };
+        }
+        let fast = m.squared_distances();
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let mut best = f64::INFINITY;
+                for (i, &c) in m.data.iter().enumerate() {
+                    let f = match c {
+                        0 => continue,
+                        128.. => 0.0,
+                        c => (f64::from(128 - c) / 255.0).powi(2),
+                    };
+                    let (qx, qy) = ((i % w as usize) as f64, (i / w as usize) as f64);
+                    best = best.min((x as f64 - qx).powi(2) + (y as f64 - qy).powi(2) + f);
+                }
+                let got = fast[y * w as usize + x];
+                assert!((got - best).abs() < 1e-9, "({x},{y}): {got} != {best}");
+            }
+        }
+    }
+
+    #[test]
+    fn huge_halo_radii_are_linear_time() {
+        let mut m = Mask::new(1024, 1024);
+        m.data[512 * 1024 + 512] = 255;
+        let start = std::time::Instant::now();
+        let d = m.dilate(1.0e6);
+        assert!(d.data.iter().all(|&c| c == 255));
+        // A disc dilation would be ~10^12 operations; this is 2 * 10^6.
+        assert!(start.elapsed().as_secs() < 10);
+        assert_eq!(
+            Mask::new(8, 8).dilate(3.0),
+            Mask::new(8, 8),
+            "no shape, no halo"
+        );
     }
 
     #[test]

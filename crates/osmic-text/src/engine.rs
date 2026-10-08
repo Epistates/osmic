@@ -49,11 +49,30 @@ pub struct ShapedGlyph {
 /// Text shaped at one size on a single line.
 #[derive(Debug, Clone)]
 pub struct ShapedText {
+    /// The glyphs, in visual order.
     pub glyphs: Vec<ShapedGlyph>,
     /// Width of the line in pixels.
     pub width: f32,
     /// Height of the line box in pixels.
     pub height: f32,
+    /// The font size it was shaped at, in pixels (0 if empty).
+    pub font_size: f32,
+}
+
+/// The widest halo drawn around text of `font_size` pixels: a quarter of
+/// the size, MapLibre's effective limit (its glyph SDFs carry no more).
+/// Wider `text-halo-width`s are clamped to it.
+pub fn max_halo_width(font_size: f32) -> f32 {
+    font_size / 4.0
+}
+
+/// `halo_width` limited to `[0, max_halo_width(font_size)]`; NaN is 0.
+fn effective_halo(halo_width: f32, font_size: f32) -> f32 {
+    if halo_width > 0.0 {
+        halo_width.min(max_halo_width(font_size))
+    } else {
+        0.0
+    }
 }
 
 impl ShapedText {
@@ -62,6 +81,7 @@ impl ShapedText {
             glyphs: Vec::new(),
             width: 0.0,
             height: 0.0,
+            font_size: 0.0,
         }
     }
 
@@ -189,6 +209,7 @@ impl TextEngine {
         buffer.shape_until_scroll(fs, false);
 
         let mut shaped = ShapedText::empty();
+        shaped.font_size = font_size;
         for run in buffer.layout_runs() {
             shaped.width = shaped.width.max(run.line_w);
             shaped.height = shaped.height.max(run.line_height);
@@ -234,13 +255,15 @@ impl TextEngine {
     /// Rasterise a placed label into coverage masks.
     ///
     /// `glyphs` carry the on-canvas position and rotation of each glyph;
-    /// `halo_width` (pixels) controls how far the halo mask is dilated.
+    /// `halo_width` (pixels) controls how far the halo mask is dilated. It
+    /// is clamped to [`max_halo_width`] of the shaped size.
     pub fn rasterize(
         &mut self,
         shaped: &ShapedText,
         glyphs: &[PlacedGlyph],
         halo_width: f32,
     ) -> Option<LabelBitmap> {
+        let halo_width = effective_halo(halo_width, shaped.font_size);
         struct Item {
             bitmap: GlyphBitmap,
             center_local: [f32; 2],
@@ -487,6 +510,40 @@ mod tests {
                 assert!(halo.get(x, y) >= haloed.text.get(x, y));
             }
         }
+    }
+
+    #[test]
+    fn huge_halos_are_clamped_to_a_quarter_of_the_font_size() {
+        let mut engine = test_engine();
+        let shaped = engine.shape("Halo", 16.0);
+        let glyphs: Vec<PlacedGlyph> = (0..shaped.glyphs.len())
+            .map(|index| {
+                let c = shaped.glyph_center(index);
+                PlacedGlyph {
+                    index,
+                    center: [50.0 + c[0], 50.0 + c[1]],
+                    angle: 0.0,
+                }
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let huge = engine.rasterize(&shaped, &glyphs, 1.0e9).unwrap();
+        assert!(start.elapsed().as_secs() < 5, "must not hang");
+        let capped = engine.rasterize(&shaped, &glyphs, 4.0).unwrap();
+        assert_eq!(max_halo_width(16.0), 4.0);
+        assert_eq!(
+            (huge.text.width, huge.text.height),
+            (capped.text.width, capped.text.height),
+            "padded for the clamped halo only"
+        );
+        assert_eq!(huge.halo, capped.halo);
+        assert!(
+            engine
+                .rasterize(&shaped, &glyphs, f32::NAN)
+                .unwrap()
+                .halo
+                .is_none()
+        );
     }
 
     #[test]
