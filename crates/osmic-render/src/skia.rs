@@ -12,6 +12,7 @@ use osmic_text::{Canvas, LabelCandidate, LabelPlacer, Rect, TextEngine, unpremul
 use crate::backend::{RenderBackend, RenderConfig};
 use crate::error::{RenderError, RenderResult};
 use crate::scene::{LineCap, LineJoin, RenderFeature, RenderLayer, SceneGraph};
+use crate::tessellate::{dash_is_drawable, polyline_length};
 
 /// Software rendering backend: tiny-skia for geometry, [`osmic_text`] for
 /// labels.
@@ -289,7 +290,8 @@ impl SkiaBackend {
             },
             // The dash is applied in path space, before `transform`, so its
             // lengths scale with the pixel ratio like the width does.
-            dash: (!dash.is_empty())
+            // Patterns too fine (or too numerous) to draw are solid.
+            dash: dash_is_drawable(dash, polyline_length(coords))
                 .then(|| StrokeDash::new(dash.to_vec(), 0.0))
                 .flatten(),
             ..Stroke::default()
@@ -492,6 +494,18 @@ mod tests {
         let mut solid = backend(40, 10, 1.0);
         solid.render(&scene(vec![line(vec![], 4.0)])).unwrap();
         assert_eq!(px(&solid, 12, 5)[0], 0);
+    }
+
+    #[test]
+    fn tiny_dashes_draw_solid_without_hanging() {
+        let start = std::time::Instant::now();
+        let mut b = backend(40, 10, 1.0);
+        b.render(&scene(vec![line(vec![1.0e-7, 1.0e-7], 4.0)]))
+            .unwrap();
+        assert!(start.elapsed().as_secs() < 5);
+        for x in [2, 12, 20, 35] {
+            assert_eq!(px(&b, x, 5)[0], 0, "solid at {x}");
+        }
     }
 
     #[test]

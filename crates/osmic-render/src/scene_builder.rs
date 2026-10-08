@@ -16,6 +16,7 @@ use osmic_tiles::mvt_decode::{AttrRef, DecodedFeature};
 
 use crate::camera::PixelMapping;
 use crate::scene::{RenderFeature, RenderLayer, SceneGraph};
+use crate::tessellate::MIN_DASH_PERIOD;
 
 /// Parameters of one scene build.
 #[derive(Debug, Clone)]
@@ -470,18 +471,26 @@ fn interior_point(p: &Polygon<f64>, m: &PixelMapping) -> Option<[f32; 2]> {
 }
 
 /// Dash pattern in pixels from a `line-dasharray` (multiples of the line
-/// width). Odd-length patterns repeat so on/off alternate consistently;
-/// invalid patterns are treated as solid.
+/// width). Odd-length patterns repeat so on/off alternate consistently.
+/// Invalid patterns, and patterns repeating more often than
+/// [`MIN_DASH_PERIOD`] pixels, are solid.
 fn dash_pattern(dasharray: &[f32], width: f32) -> Vec<f32> {
     if dasharray.is_empty() || dasharray.iter().any(|d| !d.is_finite() || *d < 0.0) {
         return Vec::new();
     }
-    let mut pattern: Vec<f32> = dasharray.iter().map(|d| d * width).collect();
-    if pattern.len() % 2 == 1 {
-        pattern.extend_from_slice(&pattern.clone());
-    }
-    if pattern.iter().sum::<f32>() <= 0.0 {
+    let period: f32 = dasharray.iter().sum::<f32>() * width;
+    let period = if dasharray.len() % 2 == 1 {
+        2.0 * period
+    } else {
+        period
+    };
+    if !(period.is_finite() && period >= MIN_DASH_PERIOD) {
         return Vec::new();
+    }
+    let mut pattern: Vec<f32> = Vec::with_capacity(dasharray.len() * 2);
+    pattern.extend(dasharray.iter().map(|d| d * width));
+    if dasharray.len() % 2 == 1 {
+        pattern.extend(dasharray.iter().map(|d| d * width));
     }
     pattern
 }
@@ -708,6 +717,11 @@ mod tests {
         );
         assert!(dash_pattern(&[0.0, 0.0], 2.0).is_empty());
         assert!(dash_pattern(&[-1.0, 2.0], 2.0).is_empty());
+        // A pattern repeating every 0.02 px would cut millions of dashes.
+        assert!(dash_pattern(&[0.01, 0.01], 1.0).is_empty());
+        assert!(dash_pattern(&[1.0e-30, 1.0e-30], 1.0e10).is_empty());
+        assert!(dash_pattern(&[3.0e38, 3.0e38], 10.0).is_empty(), "overflow");
+        assert_eq!(dash_pattern(&[0.125], 2.0), vec![0.25, 0.25]);
     }
 
     #[test]

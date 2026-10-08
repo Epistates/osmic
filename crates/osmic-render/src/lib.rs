@@ -33,4 +33,7 @@ pub use error::{RenderError, RenderResult};
 pub use scene::{RenderFeature, RenderLayer, SceneGraph};
 pub use scene_builder::{SceneBuilder, SceneOptions, build_scene};
 pub use skia::SkiaBackend;
-pub use tessellate::{Mesh, MeshVertex, TessellationOptions, dash_polyline, tessellate_scene};
+pub use tessellate::{
+    MAX_DASHES_PER_LINE, MIN_DASH_PERIOD, Mesh, MeshVertex, TessellationOptions, dash_polyline,
+    tessellate_scene,
+};

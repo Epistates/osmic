@@ -296,45 +296,69 @@ fn disc(
     }
 }
 
-/// Split a polyline into the "on" pieces of a dash pattern (alternating
-/// on/off lengths, repeating).
-pub fn dash_polyline(line: &[[f32; 2]], pattern: &[f32]) -> Vec<Vec<[f32; 2]>> {
-    let total: f32 = pattern.iter().sum();
-    if line.len() < 2
-        || pattern.is_empty()
+/// Dash patterns repeating more often than this many pixels are drawn
+/// solid: the dashes would be invisible, and cutting them could take
+/// unbounded time and memory.
+pub const MIN_DASH_PERIOD: f32 = 0.5;
+
+/// Most dashes one line is cut into; a line that would need more is drawn
+/// solid (Skia uses the same limit).
+pub const MAX_DASHES_PER_LINE: f64 = 1_000_000.0;
+
+/// Whether `pattern` (alternating on/off lengths in pixels) can be applied
+/// to a polyline `length` pixels long; otherwise the line is drawn solid.
+pub(crate) fn dash_is_drawable(pattern: &[f32], length: f64) -> bool {
+    if pattern.is_empty()
         || !pattern.len().is_multiple_of(2)
-        || total.is_nan()
-        || total <= 0.0
+        || pattern.iter().any(|d| !d.is_finite() || *d < 0.0)
     {
+        return false;
+    }
+    let period: f64 = pattern.iter().map(|d| f64::from(*d)).sum();
+    period >= f64::from(MIN_DASH_PERIOD)
+        && length / period * (pattern.len() / 2) as f64 <= MAX_DASHES_PER_LINE
+}
+
+pub(crate) fn polyline_length(line: &[[f32; 2]]) -> f64 {
+    line.windows(2)
+        .map(|w| f64::from(w[1][0] - w[0][0]).hypot(f64::from(w[1][1] - w[0][1])))
+        .sum()
+}
+
+/// Split a polyline into the "on" pieces of a dash pattern (alternating
+/// on/off lengths in pixels, repeating).
+///
+/// Patterns that cannot be drawn — odd-length, negative or non-finite
+/// entries, a period below [`MIN_DASH_PERIOD`], or more than
+/// [`MAX_DASHES_PER_LINE`] dashes — leave the line whole (solid).
+pub fn dash_polyline(line: &[[f32; 2]], pattern: &[f32]) -> Vec<Vec<[f32; 2]>> {
+    if line.len() < 2 || !dash_is_drawable(pattern, polyline_length(line)) {
         return vec![line.to_vec()];
     }
     let mut pieces: Vec<Vec<[f32; 2]>> = Vec::new();
-    let mut current: Vec<[f32; 2]> = Vec::new();
-    let (mut index, mut remaining) = (0usize, pattern[0]);
+    let mut current: Vec<[f32; 2]> = vec![line[0]];
+    // Distances in f64 so that progress along long lines never stalls on
+    // `f32` rounding.
+    let (mut index, mut remaining) = (0usize, f64::from(pattern[0]));
     let mut on = true;
-    if on {
-        current.push(line[0]);
-    }
     for w in line.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let seg = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let seg = f64::from(b[0] - a[0]).hypot(f64::from(b[1] - a[1]));
         if seg <= 0.0 {
             continue;
         }
         let mut travelled = 0.0;
         while seg - travelled > remaining {
             travelled += remaining;
-            let t = travelled / seg;
+            let t = (travelled / seg) as f32;
             let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            current.push(p);
             if on {
-                current.push(p);
                 pieces.push(std::mem::take(&mut current));
-            } else {
-                current.push(p);
             }
             on = !on;
             index = (index + 1) % pattern.len();
-            remaining = pattern[index];
+            remaining = f64::from(pattern[index]);
         }
         remaining -= seg - travelled;
         if on {
@@ -512,6 +536,36 @@ mod tests {
             .sum();
         assert!((total - 20.0).abs() < 1e-3, "{total}");
         assert_eq!(dash_polyline(&[[0.0, 0.0], [5.0, 0.0]], &[]).len(), 1);
+    }
+
+    #[test]
+    fn undrawable_dash_patterns_leave_the_line_solid() {
+        let line = [[0.0, 0.0], [1000.0, 0.0]];
+        let start = std::time::Instant::now();
+        for pattern in [
+            vec![1.0e-6, 1.0e-6],     // period far below half a pixel
+            vec![0.2, 0.2],           // still below MIN_DASH_PERIOD
+            vec![0.0, 0.0],           // no period at all
+            vec![f32::NAN, 1.0],      // not a number
+            vec![-1.0, 2.0],          // negative
+            vec![f32::MAX, f32::MAX], // overflowing period
+            vec![1.0, 2.0, 3.0],      // odd: not alternating
+        ] {
+            assert_eq!(
+                dash_polyline(&line, &pattern),
+                vec![line.to_vec()],
+                "{pattern:?}"
+            );
+        }
+        // More than MAX_DASHES_PER_LINE dashes: solid instead of an OOM.
+        let long = [[0.0, 0.0], [3.0e6, 0.0], [3.0e6, 3.0e6]];
+        assert_eq!(dash_polyline(&long, &[1.0, 1.0]).len(), 1);
+        assert!(start.elapsed().as_secs() < 5);
+        // Exactly at the minimum period, dashes are cut.
+        assert_eq!(
+            dash_polyline(&[[0.0, 0.0], [10.0, 0.0]], &[0.25, 0.25]).len(),
+            20
+        );
     }
 
     #[test]
