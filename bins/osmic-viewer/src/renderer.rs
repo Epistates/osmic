@@ -39,11 +39,27 @@ pub struct DrawUniform {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct OverlayUniform {
-    /// `x, y, w, h` of the overlay image in physical pixels.
+    /// `x, y, w, h` of the overlay image on screen, in physical pixels.
     rect: [f32; 4],
     viewport: [f32; 2],
     linearize: f32,
     _pad: f32,
+}
+
+/// Where the overlay image is drawn: overlay pixel `p` lands on screen at
+/// `offset + p * scale` (physical pixels).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayPlacement {
+    pub offset: [f32; 2],
+    pub scale: f32,
+}
+
+impl OverlayPlacement {
+    /// Drawn 1:1 where it was laid out.
+    pub const IDENTITY: Self = Self {
+        offset: [0.0, 0.0],
+        scale: 1.0,
+    };
 }
 
 /// A tile's GPU buffers.
@@ -102,8 +118,9 @@ pub struct Renderer {
     draw_bind_group: wgpu::BindGroup,
     overlay_pipeline: wgpu::RenderPipeline,
     overlay_layout: wgpu::BindGroupLayout,
+    overlay_sampler: wgpu::Sampler,
     overlay: OverlayGpu,
-    overlay_shift: [i32; 2],
+    overlay_placement: OverlayPlacement,
 }
 
 impl Renderer {
@@ -234,13 +251,29 @@ impl Renderer {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
+        });
+        // Bilinear, for the transient frames in which the last layout is
+        // scaled while zooming; at scale 1 every sample hits a texel center
+        // and returns it unchanged. The image is premultiplied, so filtering
+        // it is correct.
+        let overlay_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("overlay"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("overlay shader"),
@@ -281,7 +314,7 @@ impl Renderer {
             cache: None,
         });
 
-        let overlay = Self::create_overlay(&device, &overlay_layout, size);
+        let overlay = Self::create_overlay(&device, &overlay_layout, &overlay_sampler, size);
         let mut renderer = Self {
             device,
             queue,
@@ -296,8 +329,9 @@ impl Renderer {
             draw_bind_group,
             overlay_pipeline,
             overlay_layout,
+            overlay_sampler,
             overlay,
-            overlay_shift: [0, 0],
+            overlay_placement: OverlayPlacement::IDENTITY,
         };
         renderer.msaa = renderer.create_msaa();
         renderer
@@ -325,8 +359,13 @@ impl Renderer {
         }
         self.size = size;
         self.msaa = self.create_msaa();
-        self.overlay = Self::create_overlay(&self.device, &self.overlay_layout, size);
-        self.overlay_shift = [0, 0];
+        self.overlay = Self::create_overlay(
+            &self.device,
+            &self.overlay_layout,
+            &self.overlay_sampler,
+            size,
+        );
+        self.overlay_placement = OverlayPlacement::IDENTITY;
     }
 
     fn create_msaa(&self) -> Option<wgpu::TextureView> {
@@ -353,6 +392,7 @@ impl Renderer {
     fn create_overlay(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
         size: [u32; 2],
     ) -> OverlayGpu {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -388,6 +428,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -442,7 +486,12 @@ impl Renderer {
             return;
         }
         if size != self.overlay.size {
-            self.overlay = Self::create_overlay(&self.device, &self.overlay_layout, size);
+            self.overlay = Self::create_overlay(
+                &self.device,
+                &self.overlay_layout,
+                &self.overlay_sampler,
+                size,
+            );
         }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -463,13 +512,13 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.overlay_shift = [0, 0];
+        self.overlay_placement = OverlayPlacement::IDENTITY;
     }
 
-    /// Move the overlay image by whole physical pixels (it follows the map
-    /// between re-layouts).
-    pub fn set_overlay_shift(&mut self, shift: [i32; 2]) {
-        self.overlay_shift = shift;
+    /// Move and scale the overlay image (it follows the map between
+    /// re-layouts).
+    pub fn set_overlay_placement(&mut self, placement: OverlayPlacement) {
+        self.overlay_placement = placement;
     }
 
     /// Draw the tiles, then the overlay, into `view` (a target of the
@@ -484,15 +533,16 @@ impl Renderer {
             );
         }
         let [w, h] = self.size;
+        let OverlayPlacement { offset, scale } = self.overlay_placement;
         self.queue.write_buffer(
             &self.overlay.uniform,
             0,
             bytemuck::bytes_of(&OverlayUniform {
                 rect: [
-                    self.overlay_shift[0] as f32,
-                    self.overlay_shift[1] as f32,
-                    self.overlay.size[0] as f32,
-                    self.overlay.size[1] as f32,
+                    offset[0],
+                    offset[1],
+                    self.overlay.size[0] as f32 * scale,
+                    self.overlay.size[1] as f32 * scale,
                 ],
                 viewport: [w as f32, h as f32],
                 linearize: if self.linearize { 1.0 } else { 0.0 },
@@ -958,13 +1008,32 @@ mod tests {
             "premultiplied blend: {p:?}"
         );
         assert_eq!(pixel(&data, size, 5, 5), [0, 255, 0, 255]);
-        h.renderer.set_overlay_shift([5, 3]);
+        h.renderer.set_overlay_placement(OverlayPlacement {
+            offset: [5.0, 3.0],
+            scale: 1.0,
+        });
         let data = h.render(Color::rgb(0.0, 1.0, 0.0), &[]);
         assert_eq!(pixel(&data, size, 11, 11), [0, 255, 0, 255], "moved away");
         assert!(
             pixel(&data, size, 16, 14)[0] > 100,
             "moved to the shifted position"
         );
+        // Zooming: scaled 2x about the origin, the square covers 20..28.
+        h.renderer.set_overlay_placement(OverlayPlacement {
+            offset: [0.0, 0.0],
+            scale: 2.0,
+        });
+        let data = h.render(Color::rgb(0.0, 1.0, 0.0), &[]);
+        assert_eq!(pixel(&data, size, 12, 12), [0, 255, 0, 255], "scaled away");
+        let p = pixel(&data, size, 24, 24);
+        assert!(
+            (i32::from(p[0]) - 128).abs() <= 2 && (i32::from(p[1]) - 127).abs() <= 2,
+            "scaled into place: {p:?}"
+        );
+        // A new upload is drawn 1:1 again.
+        h.renderer.upload_overlay(&overlay, size);
+        let data = h.render(Color::rgb(0.0, 1.0, 0.0), &[]);
+        assert!(pixel(&data, size, 11, 11)[0] > 100);
         h.assert_no_validation_errors();
     }
 

@@ -118,7 +118,8 @@ fn a_loaded_tile_renders_with_style_colors_and_labels() {
     )
     .to_vec()])
     .unwrap();
-    let overlay = render_overlay(
+    let mut overlay = Vec::new();
+    render_overlay(
         &mut engine,
         &OverlayInput {
             scale: 1.0,
@@ -129,6 +130,7 @@ fn a_loaded_tile_renders_with_style_colors_and_labels() {
             }],
             panel: None,
         },
+        &mut overlay,
     );
     renderer.upload_overlay(&overlay, size);
     let draws = [TileDraw {

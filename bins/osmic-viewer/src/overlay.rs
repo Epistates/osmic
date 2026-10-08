@@ -3,22 +3,63 @@
 //!
 //! Placement is [`osmic_text::LabelPlacer`]; the overlay only gathers the
 //! labels of the tiles in view, converts them to physical screen pixels and
-//! decides *when* a fresh layout is needed (so panning does not re-place
-//! labels every frame).
+//! decides *when* a fresh layout is needed. Re-placing and uploading a
+//! full-screen image every frame is expensive (tens of megabytes on a
+//! high-resolution display), so while the user pans or zooms the previous
+//! layout is moved and scaled with the map, and changes to the labels (tiles
+//! arriving) are coalesced.
+
+use std::time::{Duration, Instant};
 
 use osmic_core::Color;
 use osmic_render::{Camera, TileTransform};
 use osmic_text::{Canvas, LabelCandidate, LabelPlacer, Rect, TextEngine};
 
 use crate::info::InfoPanel;
+use crate::renderer::OverlayPlacement;
 
 /// The map moved this many physical pixels since the last layout: re-place.
 const RELAYOUT_DISTANCE: f64 = 160.0;
+
+/// While zooming, the last layout is scaled instead of re-placed until the
+/// zoom differs from it by more than this.
+const MAX_SCALED_ZOOM: f64 = 1.0;
+
+/// Label changes (tiles arriving) re-place labels at most this often.
+pub const LABEL_REFRESH: Duration = Duration::from_millis(150);
 
 /// Labels of one tile and where the tile is on screen.
 pub struct TileLabels<'a> {
     pub transform: TileTransform,
     pub labels: &'a [LabelCandidate],
+}
+
+/// Generations of what the overlay shows, bumped by the application.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlayContent {
+    /// The set of labels changed (tiles loaded or evicted). Coalesced.
+    pub labels: u64,
+    /// The info panel opened, closed or changed. Shown at once.
+    pub panel: u64,
+}
+
+/// What the user is doing to the view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Motion {
+    pub dragging: bool,
+    /// A zoom gesture is in progress (scroll events are still arriving).
+    pub zooming: bool,
+}
+
+/// Whether to lay the overlay out again this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Re-place the labels now.
+    Now,
+    /// Keep showing the previous layout, moved and scaled with the map.
+    Keep,
+    /// Keep the previous layout for now, but re-place at this instant.
+    KeepUntil(Instant),
 }
 
 /// Everything a layout depends on.
@@ -27,12 +68,11 @@ struct LayoutKey {
     zoom: f64,
     center: [f64; 2],
     size: [u32; 2],
-    /// Bumped by the application when the set of labels changes (tiles
-    /// loaded, evicted) or the panel changes.
-    epoch: u64,
+    content: OverlayContent,
+    at: Instant,
 }
 
-/// Decides when the overlay must be re-laid-out, and how far to shift the
+/// Decides when the overlay must be re-laid-out, and how to place the
 /// previous layout meanwhile.
 #[derive(Debug, Default)]
 pub struct OverlayTracker {
@@ -40,51 +80,100 @@ pub struct OverlayTracker {
 }
 
 impl OverlayTracker {
-    fn key(camera: &Camera, size: [u32; 2], epoch: u64) -> LayoutKey {
-        LayoutKey {
-            zoom: camera.zoom(),
-            center: camera.center_unit(),
-            size,
-            epoch,
-        }
-    }
-
     /// Whether a new layout is needed for the camera's current state.
     ///
-    /// While `dragging`, small movements are covered by shifting the last
-    /// layout ([`OverlayTracker::shift`]); once the pointer is released, or
-    /// after a large movement, labels are re-placed.
-    pub fn needs_layout(
+    /// Panning while dragging and zooming within [`MAX_SCALED_ZOOM`] of the
+    /// last layout are covered by moving and scaling it
+    /// ([`OverlayTracker::placement`]); labels are re-placed once the
+    /// gesture ends, after a large movement, or when the panel or the size
+    /// changes. Label changes are applied at most every [`LABEL_REFRESH`],
+    /// and only once a zoom gesture ends.
+    pub fn decide(
         &self,
         camera: &Camera,
         size: [u32; 2],
-        epoch: u64,
-        dragging: bool,
+        content: OverlayContent,
+        motion: Motion,
         scale: f64,
-    ) -> bool {
+        now: Instant,
+    ) -> Layout {
         let Some(last) = &self.last else {
-            return true;
+            return Layout::Now;
         };
-        if last.size != size || last.epoch != epoch || (last.zoom - camera.zoom()).abs() > 1e-9 {
-            return true;
+        if last.size != size || last.content.panel != content.panel {
+            return Layout::Now;
+        }
+        let zoom_change = (camera.zoom() - last.zoom).abs();
+        if zoom_change > 1e-9 {
+            return if motion.zooming && zoom_change <= MAX_SCALED_ZOOM {
+                Layout::Keep
+            } else {
+                Layout::Now
+            };
         }
         let moved = self.displacement(camera, scale);
         let distance = moved[0].hypot(moved[1]);
-        distance > RELAYOUT_DISTANCE || (!dragging && distance > 0.0)
+        if distance > RELAYOUT_DISTANCE || (!motion.dragging && distance > 0.0) {
+            return Layout::Now;
+        }
+        if last.content.labels == content.labels || motion.zooming {
+            return Layout::Keep;
+        }
+        let due = last.at + LABEL_REFRESH;
+        if now >= due {
+            Layout::Now
+        } else {
+            Layout::KeepUntil(due)
+        }
     }
 
-    /// Record that the overlay was laid out for this state.
-    pub fn record(&mut self, camera: &Camera, size: [u32; 2], epoch: u64) {
-        self.last = Some(Self::key(camera, size, epoch));
+    /// Record that the overlay was laid out for this state at `now`.
+    pub fn record(
+        &mut self,
+        camera: &Camera,
+        size: [u32; 2],
+        content: OverlayContent,
+        now: Instant,
+    ) {
+        self.last = Some(LayoutKey {
+            zoom: camera.zoom(),
+            center: camera.center_unit(),
+            size,
+            content,
+            at: now,
+        });
     }
 
-    /// How far (physical pixels, rounded) the last layout must be moved to
-    /// follow the camera.
-    pub fn shift(&self, camera: &Camera, scale: f64) -> [i32; 2] {
+    /// Where to draw the last layout so it follows the camera: a world
+    /// point at overlay pixel `p` belongs at `offset + p * scale` on screen
+    /// (physical pixels). Without a zoom change the offset is rounded to
+    /// whole pixels so the text stays crisp.
+    pub fn placement(&self, camera: &Camera, scale: f64) -> OverlayPlacement {
+        let Some(last) = &self.last else {
+            return OverlayPlacement::IDENTITY;
+        };
         let d = self.displacement(camera, scale);
-        [d[0].round() as i32, d[1].round() as i32]
+        let k = (camera.zoom() - last.zoom).exp2();
+        if (k - 1.0).abs() < 1e-9 {
+            return OverlayPlacement {
+                offset: [d[0].round() as f32, d[1].round() as f32],
+                scale: 1.0,
+            };
+        }
+        // Scale about the view center, which the camera keeps fixed.
+        let [w, h] = camera.size();
+        let half = [w * scale / 2.0, h * scale / 2.0];
+        OverlayPlacement {
+            offset: [
+                (d[0] + half[0] * (1.0 - k)) as f32,
+                (d[1] + half[1] * (1.0 - k)) as f32,
+            ],
+            scale: k as f32,
+        }
     }
 
+    /// How far the camera center moved since the last layout, in physical
+    /// pixels at the current zoom.
     fn displacement(&self, camera: &Camera, scale: f64) -> [f64; 2] {
         let Some(last) = &self.last else {
             return [0.0, 0.0];
@@ -108,13 +197,16 @@ pub struct OverlayInput<'a> {
     pub panel: Option<&'a InfoPanel>,
 }
 
-/// Place the labels of `input.tiles` and draw them (and the panel) into a
-/// premultiplied RGBA8 image of `input.size` physical pixels.
-pub fn render_overlay(engine: &mut TextEngine, input: &OverlayInput<'_>) -> Vec<u8> {
+/// Place the labels of `input.tiles` and draw them (and the panel) into
+/// `pixels`, which becomes a premultiplied RGBA8 image of `input.size`
+/// physical pixels. The buffer is reused across layouts, so a full-screen
+/// overlay is not reallocated every time.
+pub fn render_overlay(engine: &mut TextEngine, input: &OverlayInput<'_>, pixels: &mut Vec<u8>) {
     let [w, h] = input.size;
-    let mut pixels = vec![0u8; w as usize * h as usize * 4];
-    let Some(mut canvas) = Canvas::new(&mut pixels, w, h) else {
-        return pixels;
+    pixels.clear();
+    pixels.resize(w as usize * h as usize * 4, 0);
+    let Some(mut canvas) = Canvas::new(pixels.as_mut_slice(), w, h) else {
+        return;
     };
     let scale = input.scale as f32;
 
@@ -149,7 +241,6 @@ pub fn render_overlay(engine: &mut TextEngine, input: &OverlayInput<'_>) -> Vec<
     if let (Some(panel), Some(layout)) = (input.panel, &panel_layout) {
         draw_panel(engine, &mut canvas, panel, layout, input.scale);
     }
-    pixels
 }
 
 struct PanelLayout {
@@ -248,39 +339,195 @@ mod tests {
         Camera::new(8.0, 47.0, 10.0, 400.0, 300.0)
     }
 
+    const SIZE: [u32; 2] = [800, 600];
+    const IDLE: Motion = Motion {
+        dragging: false,
+        zooming: false,
+    };
+    const DRAGGING: Motion = Motion {
+        dragging: true,
+        zooming: false,
+    };
+    const ZOOMING: Motion = Motion {
+        dragging: false,
+        zooming: true,
+    };
+
+    fn content(labels: u64, panel: u64) -> OverlayContent {
+        OverlayContent { labels, panel }
+    }
+
     #[test]
     fn first_layout_is_always_needed_then_only_on_change() {
         let cam = camera();
+        let now = Instant::now();
+        let later = now + LABEL_REFRESH;
         let mut t = OverlayTracker::default();
-        assert!(t.needs_layout(&cam, [800, 600], 1, false, 2.0));
-        t.record(&cam, [800, 600], 1);
-        assert!(!t.needs_layout(&cam, [800, 600], 1, false, 2.0));
-        assert!(
-            t.needs_layout(&cam, [800, 600], 2, false, 2.0),
+        let decide =
+            |t: &OverlayTracker, cam: &Camera, size, c, at| t.decide(cam, size, c, IDLE, 2.0, at);
+        assert_eq!(decide(&t, &cam, SIZE, content(1, 1), now), Layout::Now);
+        t.record(&cam, SIZE, content(1, 1), now);
+        assert_eq!(decide(&t, &cam, SIZE, content(1, 1), later), Layout::Keep);
+        assert_eq!(
+            decide(&t, &cam, SIZE, content(2, 1), later),
+            Layout::Now,
             "labels changed"
         );
-        assert!(t.needs_layout(&cam, [900, 600], 1, false, 2.0), "resized");
+        assert_eq!(
+            decide(&t, &cam, SIZE, content(1, 2), now),
+            Layout::Now,
+            "the panel changed: at once"
+        );
+        assert_eq!(
+            decide(&t, &cam, [900, 600], content(1, 1), now),
+            Layout::Now,
+            "resized"
+        );
         let mut zoomed = cam;
         zoomed.set_zoom(10.5);
-        assert!(t.needs_layout(&zoomed, [800, 600], 1, false, 2.0), "zoomed");
+        assert_eq!(
+            decide(&t, &zoomed, SIZE, content(1, 1), now),
+            Layout::Now,
+            "zoomed"
+        );
+    }
+
+    #[test]
+    fn label_changes_are_coalesced() {
+        let cam = camera();
+        let t0 = Instant::now();
+        let mut t = OverlayTracker::default();
+        t.record(&cam, SIZE, content(1, 0), t0);
+        // Tiles keep arriving right after a layout: wait, then re-place
+        // once for all of them.
+        let soon = t0 + LABEL_REFRESH / 3;
+        let due = t0 + LABEL_REFRESH;
+        assert_eq!(
+            t.decide(&cam, SIZE, content(2, 0), IDLE, 2.0, soon),
+            Layout::KeepUntil(due)
+        );
+        assert_eq!(
+            t.decide(&cam, SIZE, content(5, 0), DRAGGING, 2.0, soon),
+            Layout::KeepUntil(due)
+        );
+        assert_eq!(
+            t.decide(&cam, SIZE, content(5, 0), IDLE, 2.0, due),
+            Layout::Now
+        );
+        // While zooming, label changes wait for the gesture to end.
+        assert_eq!(
+            t.decide(&cam, SIZE, content(5, 0), ZOOMING, 2.0, due),
+            Layout::Keep
+        );
     }
 
     #[test]
     fn small_drags_shift_the_last_layout_and_release_relayouts() {
         let mut cam = camera();
+        let now = Instant::now();
+        let c = content(1, 0);
         let mut t = OverlayTracker::default();
-        t.record(&cam, [800, 600], 1);
+        t.record(&cam, SIZE, c, now);
         cam.pan_pixels(30.0, -10.0); // logical px; content moves with the pointer
-        assert!(!t.needs_layout(&cam, [800, 600], 1, true, 2.0));
-        assert_eq!(t.shift(&cam, 2.0), [60, -20], "physical pixels");
-        assert!(t.needs_layout(&cam, [800, 600], 1, false, 2.0), "released");
+        assert_eq!(t.decide(&cam, SIZE, c, DRAGGING, 2.0, now), Layout::Keep);
+        assert_eq!(
+            t.placement(&cam, 2.0),
+            OverlayPlacement {
+                offset: [60.0, -20.0],
+                scale: 1.0
+            },
+            "physical pixels"
+        );
+        assert_eq!(
+            t.decide(&cam, SIZE, c, IDLE, 2.0, now),
+            Layout::Now,
+            "released"
+        );
         cam.pan_pixels(200.0, 0.0);
-        assert!(
-            t.needs_layout(&cam, [800, 600], 1, true, 2.0),
+        assert_eq!(
+            t.decide(&cam, SIZE, c, DRAGGING, 2.0, now),
+            Layout::Now,
             "moved too far to fake"
         );
-        t.record(&cam, [800, 600], 1);
-        assert_eq!(t.shift(&cam, 2.0), [0, 0]);
+        t.record(&cam, SIZE, c, now);
+        assert_eq!(t.placement(&cam, 2.0), OverlayPlacement::IDENTITY);
+    }
+
+    #[test]
+    fn zooming_scales_the_last_layout_until_the_gesture_ends() {
+        let mut cam = camera();
+        let now = Instant::now();
+        let c = content(1, 0);
+        let scale = 2.0;
+        let mut t = OverlayTracker::default();
+        t.record(&cam, SIZE, c, now);
+        // Where a few world points were drawn in the last layout.
+        let probes = [[10.0, 20.0], [200.0, 150.0], [390.0, 290.0]];
+        let world: Vec<(f64, f64)> = probes
+            .iter()
+            .map(|p| cam.screen_to_lonlat(p[0], p[1]))
+            .collect();
+
+        cam.zoom_at([300.0, 100.0], 0.6);
+        assert_eq!(t.decide(&cam, SIZE, c, ZOOMING, scale, now), Layout::Keep);
+        // The scaled layout puts each point where the camera now draws it.
+        let placed = t.placement(&cam, scale);
+        assert!((f64::from(placed.scale) - 0.6f64.exp2()).abs() < 1e-6);
+        for (p, (lon, lat)) in probes.iter().zip(&world) {
+            let want = cam.lonlat_to_screen(*lon, *lat);
+            let got = [
+                f64::from(placed.offset[0]) + p[0] * scale * f64::from(placed.scale),
+                f64::from(placed.offset[1]) + p[1] * scale * f64::from(placed.scale),
+            ];
+            assert!(
+                (got[0] - want[0] * scale).abs() < 0.01 && (got[1] - want[1] * scale).abs() < 0.01,
+                "{got:?} vs {want:?}"
+            );
+        }
+
+        assert_eq!(
+            t.decide(&cam, SIZE, c, IDLE, scale, now),
+            Layout::Now,
+            "the zoom settled"
+        );
+        cam.zoom_at([300.0, 100.0], 0.6);
+        assert_eq!(
+            t.decide(&cam, SIZE, c, ZOOMING, scale, now),
+            Layout::Now,
+            "too far from the last layout to scale"
+        );
+    }
+
+    fn render(engine: &mut TextEngine, input: &OverlayInput<'_>) -> Vec<u8> {
+        let mut pixels = Vec::new();
+        render_overlay(engine, input, &mut pixels);
+        pixels
+    }
+
+    #[test]
+    fn the_pixel_buffer_is_reused_and_cleared() {
+        let mut eng = engine();
+        let labels = [label("Zurich", [100.0, 100.0], 0)];
+        let tiles = [TileLabels {
+            transform: TileTransform {
+                offset: [0.0, 0.0],
+                scale: 1.0,
+            },
+            labels: &labels,
+        }];
+        let input = |tiles| OverlayInput {
+            scale: 1.0,
+            size: [400, 300],
+            tiles,
+            panel: None,
+        };
+        let mut pixels = Vec::new();
+        render_overlay(&mut eng, &input(&tiles), &mut pixels);
+        assert!(!ink(&pixels, 400).is_empty());
+        let buffer = pixels.as_ptr();
+        render_overlay(&mut eng, &input(&[]), &mut pixels);
+        assert_eq!(pixels.as_ptr(), buffer, "same allocation");
+        assert!(ink(&pixels, 400).is_empty(), "old labels cleared");
     }
 
     fn label(text: &str, at: [f32; 2], rank: u32) -> LabelCandidate {
@@ -321,7 +568,7 @@ mod tests {
             },
             labels: &labels,
         }];
-        let pixels = render_overlay(
+        let pixels = render(
             &mut eng,
             &OverlayInput {
                 scale: 2.0,
@@ -371,7 +618,7 @@ mod tests {
                 labels: &important,
             },
         ];
-        let both = render_overlay(
+        let both = render(
             &mut eng,
             &OverlayInput {
                 scale: 1.0,
@@ -380,7 +627,7 @@ mod tests {
                 panel: None,
             },
         );
-        let only_important = render_overlay(
+        let only_important = render(
             &mut eng,
             &OverlayInput {
                 scale: 1.0,
@@ -399,7 +646,7 @@ mod tests {
     fn the_overlay_matches_a_resized_viewport() {
         let mut eng = engine();
         for size in [[1, 1], [123, 77], [2560, 1440]] {
-            let pixels = render_overlay(
+            let pixels = render(
                 &mut eng,
                 &OverlayInput {
                     scale: 1.0,
@@ -431,7 +678,7 @@ mod tests {
             transform: tf,
             labels: &labels,
         }];
-        let with_panel = render_overlay(
+        let with_panel = render(
             &mut eng,
             &OverlayInput {
                 scale: 1.0,
@@ -447,7 +694,7 @@ mod tests {
             .filter(|p| p[3] > 200)
             .count();
         assert!(opaque > 1000, "panel background is drawn ({opaque})");
-        let without = render_overlay(
+        let without = render(
             &mut eng,
             &OverlayInput {
                 scale: 1.0,

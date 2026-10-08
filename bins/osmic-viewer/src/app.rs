@@ -2,6 +2,7 @@
 //! label overlay and the GPU renderer together.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use osmic_core::{Color, TileCoord};
 use osmic_render::Camera;
@@ -11,14 +12,16 @@ use tracing::{debug, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::{WindowAttributes, WindowId};
 
 use crate::controller::{Outcome, Scroll, ViewController};
 use crate::gpu::{FrameOutcome, Gpu, region_scissor};
 use crate::info::{self, InfoPanel};
 use crate::loader::{LoadedTile, Poi, TileLoader};
-use crate::overlay::{OverlayInput, OverlayTracker, TileLabels, render_overlay};
+use crate::overlay::{
+    Layout, Motion, OverlayContent, OverlayInput, OverlayTracker, TileLabels, render_overlay,
+};
 use crate::plan::plan_draws;
 use crate::renderer::{GpuTile, TileDraw, tile_draw_uniform};
 use crate::tile_cache::{TileCache, Weigh};
@@ -37,6 +40,15 @@ const PREFETCH_MARGIN: f64 = 256.0;
 /// Cache limits: tiles and bytes of mesh data.
 const CACHE_ENTRIES: usize = 600;
 const CACHE_BYTES: usize = 512 * 1024 * 1024;
+
+/// A zoom gesture ends this long after its last scroll event; until then
+/// the label overlay is scaled rather than laid out again.
+const ZOOM_SETTLE: Duration = Duration::from_millis(150);
+
+/// Make `wake_at` the earlier of itself and `at`.
+fn schedule(wake_at: &mut Option<Instant>, at: Instant) {
+    *wake_at = Some(wake_at.map_or(at, |w| w.min(at)));
+}
 
 /// A tile as the render loop holds it.
 struct CachedTile {
@@ -73,7 +85,14 @@ pub struct App {
     text: TextEngine,
     tracker: OverlayTracker,
     /// Bumped whenever the overlay's contents (loaded tiles, panel) change.
-    epoch: u64,
+    content: OverlayContent,
+    /// The overlay image, reused across layouts.
+    overlay_pixels: Vec<u8>,
+    /// A zoom gesture counts as in progress until then (the last scroll
+    /// event plus [`ZOOM_SETTLE`]).
+    zoom_settles_at: Option<Instant>,
+    /// When the event loop must wake up to redraw without new input.
+    wake_at: Option<Instant>,
     panel: Option<InfoPanel>,
     /// Set when the viewer must stop with an error.
     pub failure: Option<String>,
@@ -91,7 +110,10 @@ impl App {
             gpu: None,
             text: TextEngine::system(),
             tracker: OverlayTracker::default(),
-            epoch: 0,
+            content: OverlayContent::default(),
+            overlay_pixels: Vec::new(),
+            zoom_settles_at: None,
+            wake_at: None,
             panel: None,
             failure: None,
         }
@@ -111,7 +133,7 @@ impl App {
 
     fn apply(&mut self, outcome: Outcome) {
         if outcome.dismiss_panel && self.panel.take().is_some() {
-            self.epoch += 1;
+            self.content.panel += 1;
         }
         if let Some(click) = outcome.click {
             self.click(click);
@@ -136,7 +158,7 @@ impl App {
         });
         if panel != self.panel {
             self.panel = panel;
-            self.epoch += 1;
+            self.content.panel += 1;
             self.request_redraw();
         }
     }
@@ -199,7 +221,7 @@ impl App {
                 .chain(self.drawn.iter().copied()),
         );
         if self.drain_loader() {
-            self.epoch += 1;
+            self.content.labels += 1;
         }
 
         // Ask for what is missing, nearest first, including a margin.
@@ -223,14 +245,30 @@ impl App {
         let size = gpu.size();
 
         // Labels: re-place when the view or the tiles changed enough,
-        // otherwise slide the previous layout along with the map.
-        if self.tracker.needs_layout(
-            &camera,
-            size,
-            self.epoch,
-            self.controller.is_dragging(),
-            scale,
-        ) {
+        // otherwise move and scale the previous layout with the map.
+        let now = Instant::now();
+        let zooming = match self.zoom_settles_at {
+            Some(t) if now < t => {
+                // Lay the labels out again once the gesture is over.
+                schedule(&mut self.wake_at, t);
+                true
+            }
+            _ => {
+                self.zoom_settles_at = None;
+                false
+            }
+        };
+        let motion = Motion {
+            dragging: self.controller.is_dragging(),
+            zooming,
+        };
+        let layout = self
+            .tracker
+            .decide(&camera, size, self.content, motion, scale, now);
+        if let Layout::KeepUntil(t) = layout {
+            schedule(&mut self.wake_at, t);
+        }
+        if layout == Layout::Now {
             // A stand-in tile may serve several regions; its labels count once.
             let mut seen: Vec<TileCoord> = Vec::new();
             let mut tiles: Vec<TileLabels<'_>> = Vec::new();
@@ -246,7 +284,7 @@ impl App {
                     });
                 }
             }
-            let rgba = render_overlay(
+            render_overlay(
                 &mut self.text,
                 &OverlayInput {
                     scale,
@@ -254,12 +292,14 @@ impl App {
                     tiles: &tiles,
                     panel: self.panel.as_ref(),
                 },
+                &mut self.overlay_pixels,
             );
-            gpu.renderer_mut().upload_overlay(&rgba, size);
-            self.tracker.record(&camera, size, self.epoch);
+            gpu.renderer_mut()
+                .upload_overlay(&self.overlay_pixels, size);
+            self.tracker.record(&camera, size, self.content, now);
         }
         gpu.renderer_mut()
-            .set_overlay_shift(self.tracker.shift(&camera, scale));
+            .set_overlay_placement(self.tracker.placement(&camera, scale));
 
         let logical = camera.size();
         let draws: Vec<TileDraw<'_>> = plan
@@ -360,6 +400,20 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Sleep until the next scheduled redraw (a zoom settling, coalesced
+        // label changes), or until the next event.
+        match self.wake_at {
+            Some(at) if Instant::now() >= at => {
+                self.wake_at = None;
+                self.request_redraw();
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -404,6 +458,9 @@ impl ApplicationHandler<UserEvent> for App {
                     MouseScrollDelta::PixelDelta(p) => Scroll::Pixels(p.y),
                 };
                 let outcome = self.controller.scroll(scroll);
+                if outcome.redraw {
+                    self.zoom_settles_at = Some(Instant::now() + ZOOM_SETTLE);
+                }
                 self.apply(outcome);
             }
 
