@@ -208,6 +208,44 @@ mod tests {
     fn packed_order_is_independent_of_validity_marker() {
         // (0,0) — the Gulf of Guinea — is a real location, not "empty".
         let origin = FixedCoord::new(0, 0);
+        assert_ne!(origin.pack(), 0);
         assert_eq!(FixedCoord::unpack(origin.pack()), Some(origin));
+
+        // The sign flip that keeps valid coordinates off the empty marker
+        // must also keep packed values ordered like the coordinates
+        // (lexicographically by longitude, then latitude), across the sign
+        // boundary and at the limits.
+        let values: [i32; 11] = [
+            -1_800_000_000,
+            -900_000_000,
+            -123_456_789,
+            -2,
+            -1,
+            0,
+            1,
+            2,
+            98_765_432,
+            900_000_000,
+            1_800_000_000,
+        ];
+        let coords: Vec<FixedCoord> = values
+            .iter()
+            .flat_map(|&lon| {
+                values
+                    .iter()
+                    .filter(|lat| lat.abs() <= 900_000_000)
+                    .map(move |&lat| FixedCoord::new(lon, lat))
+            })
+            .collect();
+        for a in &coords {
+            for b in &coords {
+                assert_eq!(a.pack().cmp(&b.pack()), a.cmp(b), "{a:?} vs {b:?}");
+            }
+        }
+        let mut by_packed = coords.clone();
+        by_packed.sort_by_key(|c| c.pack());
+        let mut by_coord = coords;
+        by_coord.sort();
+        assert_eq!(by_packed, by_coord);
     }
 }
