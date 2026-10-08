@@ -8,11 +8,11 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 categories = ["text-processing", "graphics"]
-keywords = ["text-shaping", "labels", "glyph", "cosmic-text"]
+keywords = ["text-shaping", "labels", "collision", "cosmic-text"]
 readme.workspace = true
-description = "Text shaping, label collision, glyph atlas"
+description = "Text shaping, deterministic label placement with collision detection and line-following labels, glyph rasterisation and premultiplied compositing"
 
 [dependencies]
 osmic-core = { workspace = true }
 cosmic-text = { workspace = true }
-tracing = { workspace = true }
+rstar = { workspace = true }

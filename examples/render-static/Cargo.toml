@@ -9,13 +9,18 @@ publish = false
 [dependencies]
 osmic-core = { workspace = true }
 osmic-render = { workspace = true }
+osmic-style = { workspace = true }
+osmic-text = { workspace = true }
 osmic-tiles = { workspace = true }
-osmic-geo = { workspace = true }
 pmtiles = { workspace = true, features = ["mmap-async-tokio"] }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
