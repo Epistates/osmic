@@ -10,6 +10,7 @@ mod writer;
 
 pub use writer::{PbfWriter, PbfWriterOptions};
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use osmpbf::{BlobDecode, BlobReader, PrimitiveBlock};
@@ -50,6 +51,45 @@ impl PbfHeader {
             .iter()
             .chain(&self.required_features)
             .any(|f| f == "LocationsOnWays")
+    }
+}
+
+/// A block's string table, decoded once.
+///
+/// osmpbf's tag iterators validate UTF-8 on every access and silently stop
+/// at the first invalid string, dropping the element's remaining tags.
+/// Decoding the table once is cheaper when tags are read more than once,
+/// and invalid sequences become U+FFFD so every tag is kept.
+pub struct StringTable<'a> {
+    strings: Vec<Cow<'a, str>>,
+}
+
+impl<'a> StringTable<'a> {
+    pub fn new(block: &'a PrimitiveBlock) -> Self {
+        Self {
+            strings: block
+                .raw_stringtable()
+                .iter()
+                .map(|s| String::from_utf8_lossy(s))
+                .collect(),
+        }
+    }
+
+    pub fn get(&self, index: usize) -> Option<&str> {
+        self.strings.get(index).map(|s| &**s)
+    }
+
+    /// Tags from `(key, value)` string-table indices (as returned by
+    /// osmpbf's `raw_tags`); pairs referring outside the table are skipped.
+    pub fn tags<'s, K, I>(&'s self, raw: I) -> impl Iterator<Item = (&'s str, &'s str)> + Clone
+    where
+        K: TryInto<usize>,
+        I: Iterator<Item = (K, K)> + Clone + 's,
+    {
+        raw.filter_map(|(k, v)| {
+            let (k, v) = (k.try_into().ok()?, v.try_into().ok()?);
+            Some((self.get(k)?, self.get(v)?))
+        })
     }
 }
 

@@ -27,7 +27,7 @@ use tracing::info;
 use osmic_core::{BBox, FixedCoord, Geometry, NodeLocationStore, OsmType};
 use osmic_index::NodeIndex;
 use osmic_osm::multipolygon::{MemberWay, Role, assemble_area};
-use osmic_osm::pbf::par_blocks;
+use osmic_osm::pbf::{StringTable, par_blocks};
 use osmic_osm::{NodeStorage, OsmError, RelationRecord, TagFilter, scan_nodes};
 
 use crate::entity::Entity;
@@ -165,13 +165,14 @@ impl Extractor {
                 entities: Vec::new(),
                 cached: Vec::new(),
             };
+            let strings = StringTable::new(block);
             let mut tags: Vec<(&str, &str)> = Vec::new();
             let mut coords: Vec<FixedCoord> = Vec::new();
             for element in block.elements() {
                 match element {
                     Element::DenseNode(n) => {
                         tags.clear();
-                        tags.extend(n.tags());
+                        tags.extend(strings.tags(n.raw_tags()));
                         if !tags.is_empty() && self.wanted(&tags) {
                             let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
                             out.entities.extend(self.entity(
@@ -184,7 +185,7 @@ impl Extractor {
                     }
                     Element::Node(n) => {
                         tags.clear();
-                        tags.extend(n.tags());
+                        tags.extend(strings.tags(n.raw_tags()));
                         if !tags.is_empty() && self.wanted(&tags) {
                             let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
                             out.entities.extend(self.entity(
@@ -197,7 +198,7 @@ impl Extractor {
                     }
                     Element::Way(w) => {
                         tags.clear();
-                        tags.extend(w.tags());
+                        tags.extend(strings.tags(w.raw_tags()));
                         let matched = !tags.is_empty() && self.wanted(&tags);
                         let needed = needed_ways.contains(&w.id());
                         if !matched && !needed {

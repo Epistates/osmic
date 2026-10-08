@@ -38,7 +38,7 @@ use crate::feature::Feature;
 use crate::filter::TagFilter;
 use crate::layers::LayerSet;
 use crate::multipolygon::{MemberWay, Role, assemble_area};
-use crate::pbf::{PbfHeader, par_blocks, read_header};
+use crate::pbf::{PbfHeader, StringTable, par_blocks, read_header};
 use crate::tags::{TagRetention, TagStore};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -614,43 +614,46 @@ impl Pass2Context<'_> {
             };
         }
 
+        let strings = StringTable::new(block);
         for element in block.elements() {
             match element {
                 Element::DenseNode(n) => {
-                    let kv = KeyValues::scan(n.tags());
+                    let tags = strings.tags(n.raw_tags());
+                    let kv = KeyValues::scan(tags.clone());
                     if kv.is_empty() {
                         continue;
                     }
                     let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
                     let classes = classify(&kv, layers);
-                    if classes.is_empty() || !c.is_valid() || !passes!(n.tags()) {
+                    if classes.is_empty() || !c.is_valid() || !passes!(tags.clone()) {
                         continue;
                     }
                     let point = Geometry::Point(Point(c.to_coord()));
                     self.make_features(
                         OsmId::node(n.id()),
                         &classes,
-                        n.tags(),
+                        tags,
                         |_| Some(point.clone()),
                         &mut features,
                         &mut out.bbox,
                     );
                 }
                 Element::Node(n) => {
-                    let kv = KeyValues::scan(n.tags());
+                    let tags = strings.tags(n.raw_tags());
+                    let kv = KeyValues::scan(tags.clone());
                     if kv.is_empty() {
                         continue;
                     }
                     let c = FixedCoord::new(n.decimicro_lon(), n.decimicro_lat());
                     let classes = classify(&kv, layers);
-                    if classes.is_empty() || !c.is_valid() || !passes!(n.tags()) {
+                    if classes.is_empty() || !c.is_valid() || !passes!(tags.clone()) {
                         continue;
                     }
                     let point = Geometry::Point(Point(c.to_coord()));
                     self.make_features(
                         OsmId::node(n.id()),
                         &classes,
-                        n.tags(),
+                        tags,
                         |_| Some(point.clone()),
                         &mut features,
                         &mut out.bbox,
@@ -658,13 +661,14 @@ impl Pass2Context<'_> {
                 }
                 Element::Way(way) => {
                     let needed = self.needed_ways.contains(&way.id());
-                    let kv = KeyValues::scan(way.tags());
+                    let tags = strings.tags(way.raw_tags());
+                    let kv = KeyValues::scan(tags.clone());
                     let mut classes = if kv.is_empty() {
                         Default::default()
                     } else {
                         classify(&kv, layers)
                     };
-                    if !classes.is_empty() && !passes!(way.tags()) {
+                    if !classes.is_empty() && !passes!(tags.clone()) {
                         // Filtered out as a feature, but a relation may
                         // still need its geometry.
                         classes.clear();
@@ -712,7 +716,7 @@ impl Pass2Context<'_> {
                     self.make_features(
                         OsmId::way(way.id()),
                         &classes,
-                        way.tags(),
+                        tags,
                         |c| {
                             let ls = LineString(line.clone());
                             Some(if closed && closed_way_is_area(c, area) {

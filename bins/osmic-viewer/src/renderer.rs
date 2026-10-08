@@ -743,7 +743,11 @@ mod tests {
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll");
         rx.recv().expect("map callback").expect("map");
-        let data = buffer.slice(..).get_mapped_range().expect("mapped").to_vec();
+        let data = buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped")
+            .to_vec();
         buffer.unmap();
         data
     }
