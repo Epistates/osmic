@@ -2,6 +2,8 @@
 //! boxes, tile coordinates, Web Mercator projection, clipping and
 //! simplification.
 
+#![warn(missing_docs)]
+
 pub mod bbox;
 pub mod clip;
 pub mod color;

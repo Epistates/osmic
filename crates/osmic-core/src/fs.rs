@@ -82,6 +82,11 @@ fn parent_dir(path: &Path) -> &Path {
 /// Create a temporary file in the directory of `path` (after following
 /// symbolic links), so it can later be renamed over `path` without crossing
 /// filesystems.
+///
+/// # Errors
+///
+/// As for [`resolve_destination`], or failure to create the file (for
+/// example a missing or read-only directory).
 pub fn temp_file_for(path: &Path) -> io::Result<NamedTempFile> {
     let prefix = temp_file_prefix();
     let mut builder = tempfile::Builder::new();
@@ -103,6 +108,12 @@ pub fn temp_file_for(path: &Path) -> io::Result<NamedTempFile> {
 /// filesystems that cannot flush to stable storage the flush is skipped
 /// with a warning; the move itself is atomic either way. On Unix the
 /// directory is flushed after the rename so the new name is durable too.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::AlreadyExists`] as above; otherwise as for
+/// [`resolve_destination`], or failure to copy permissions, flush, rename
+/// or flush the directory. On error `temp` is dropped, which deletes it.
 pub fn persist(temp: NamedTempFile, path: &Path, overwrite: bool) -> io::Result<()> {
     let path = resolve_destination(path)?;
     if overwrite {

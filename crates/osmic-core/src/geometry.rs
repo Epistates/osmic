@@ -1,23 +1,38 @@
+//! Feature geometry.
+
 use geo_types::{Coord, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon};
 
 use crate::bbox::BBox;
 
 /// Unified geometry enum for OSM features.
+///
+/// Coordinates are `x` = longitude, `y` = latitude in degrees for
+/// geographic geometry; the same type also carries projected (tile-space)
+/// geometry, where they are planar x and y.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Geometry {
+    /// A single point, such as a tagged node.
     Point(Point<f64>),
+    /// Several points treated as one feature.
     MultiPoint(MultiPoint<f64>),
+    /// An open or closed polyline, such as a way that is not an area.
     Line(LineString<f64>),
+    /// Several polylines, such as a route relation or a clipped line.
     MultiLine(MultiLineString<f64>),
+    /// An exterior ring with optional holes.
     Polygon(Polygon<f64>),
+    /// Several polygons, such as a multipolygon relation.
     MultiPolygon(MultiPolygon<f64>),
 }
 
 /// Coarse geometry class, matching the three MVT geometry types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GeometryType {
+    /// [`Geometry::Point`] or [`Geometry::MultiPoint`].
     Point,
+    /// [`Geometry::Line`] or [`Geometry::MultiLine`].
     Line,
+    /// [`Geometry::Polygon`] or [`Geometry::MultiPolygon`].
     Polygon,
 }
 

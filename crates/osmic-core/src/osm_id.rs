@@ -1,3 +1,5 @@
+//! Typed OSM element identifiers.
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -10,12 +12,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OsmType {
+    /// A point with a location.
     Node,
+    /// An ordered list of nodes.
     Way,
+    /// An ordered list of typed, role-tagged members.
     Relation,
 }
 
 impl OsmType {
+    /// The lowercase name used in OSM XML and the API: `"node"`, `"way"` or
+    /// `"relation"` (also the serde form).
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Node => "node",
@@ -34,6 +41,7 @@ impl OsmType {
         }
     }
 
+    /// Inverse of [`OsmType::code`]; `None` for any other value.
     pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Node),
@@ -51,25 +59,34 @@ impl fmt::Display for OsmType {
 }
 
 /// A typed OSM element identifier.
+///
+/// Orders by type (node < way < relation), then by id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OsmId {
+    /// Element type; the namespace `id` belongs to.
     pub osm_type: OsmType,
+    /// Numeric id within that type. Negative for locally created objects
+    /// that have not been uploaded.
     pub id: i64,
 }
 
 impl OsmId {
+    /// The id `id` of element type `osm_type`.
     pub const fn new(osm_type: OsmType, id: i64) -> Self {
         Self { osm_type, id }
     }
 
+    /// Node `id`.
     pub const fn node(id: i64) -> Self {
         Self::new(OsmType::Node, id)
     }
 
+    /// Way `id`.
     pub const fn way(id: i64) -> Self {
         Self::new(OsmType::Way, id)
     }
 
+    /// Relation `id`.
     pub const fn relation(id: i64) -> Self {
         Self::new(OsmType::Relation, id)
     }

@@ -1,3 +1,6 @@
+//! Geographic coordinates: floating-point [`LonLat`] and OSM's fixed-point
+//! [`FixedCoord`].
+
 use serde::{Deserialize, Serialize};
 
 /// Fixed-point scale used by OSM: coordinates are stored in units of 1e-7 degrees.
@@ -6,11 +9,15 @@ pub const COORDINATE_SCALE: f64 = 1e7;
 /// A geographic coordinate in longitude/latitude (WGS84).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LonLat {
+    /// Longitude in degrees, positive east.
     pub lon: f64,
+    /// Latitude in degrees, positive north.
     pub lat: f64,
 }
 
 impl LonLat {
+    /// A coordinate in `(longitude, latitude)` order, in degrees. Not
+    /// validated; see [`LonLat::is_valid`].
     pub const fn new(lon: f64, lat: f64) -> Self {
         Self { lon, lat }
     }

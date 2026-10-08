@@ -1,3 +1,5 @@
+//! Zoom levels and slippy-map tile coordinates.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -89,14 +91,22 @@ impl From<Zoom> for u8 {
 }
 
 /// Slippy map tile coordinate (x, y, z).
+///
+/// XYZ scheme: `(0, 0)` is the north-west tile and y grows southward (not
+/// TMS). Displays as `z/x/y`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TileCoord {
+    /// Column, `0..2^z`, from west to east.
     pub x: u32,
+    /// Row, `0..2^z`, from north to south.
     pub y: u32,
+    /// Zoom level.
     pub z: Zoom,
 }
 
 impl TileCoord {
+    /// Tile `(x, y)` at zoom `z`. Unlike [`TileCoord::try_new`], `x` and `y`
+    /// are not checked against the grid at `z`.
     pub fn new(x: u32, y: u32, z: Zoom) -> Self {
         Self { x, y, z }
     }

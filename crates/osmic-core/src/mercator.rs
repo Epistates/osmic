@@ -104,10 +104,15 @@ pub fn tile_bounds(x: u32, y: u32, zoom: u8) -> BBox {
 /// exceeds its maximum on either axis is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileRange {
+    /// Zoom level the range applies to.
     pub zoom: u8,
+    /// Westernmost column, inclusive.
     pub min_x: u32,
+    /// Northernmost row, inclusive (y grows southward).
     pub min_y: u32,
+    /// Easternmost column, inclusive.
     pub max_x: u32,
+    /// Southernmost row, inclusive.
     pub max_y: u32,
 }
 

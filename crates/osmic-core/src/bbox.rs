@@ -1,18 +1,31 @@
+//! Axis-aligned bounding boxes.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::coord::LonLat;
 
 /// Axis-aligned bounding box in geographic coordinates (WGS84).
+///
+/// Bounds are inclusive. Boxes crossing the antimeridian are not
+/// represented: `min_lon > max_lon` means the box is empty (see
+/// [`BBox::is_valid`]), not that it wraps. In projected spaces (see
+/// [`crate::clip`]) the `lon` fields read as x and the `lat` fields as y.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BBox {
+    /// Western edge, in degrees.
     pub min_lon: f64,
+    /// Southern edge, in degrees.
     pub min_lat: f64,
+    /// Eastern edge, in degrees.
     pub max_lon: f64,
+    /// Northern edge, in degrees.
     pub max_lat: f64,
 }
 
 impl BBox {
+    /// A box from its edges, in `(west, south, east, north)` order. Not
+    /// validated.
     pub const fn new(min_lon: f64, min_lat: f64, max_lon: f64, max_lat: f64) -> Self {
         Self {
             min_lon,
@@ -58,10 +71,13 @@ impl BBox {
         self.max_lat = self.max_lat.max(other.max_lat);
     }
 
+    /// Whether the point lies inside the box or on its boundary.
     pub fn contains_point(&self, lon: f64, lat: f64) -> bool {
         lon >= self.min_lon && lon <= self.max_lon && lat >= self.min_lat && lat <= self.max_lat
     }
 
+    /// Whether the two boxes overlap; boxes that only touch along an edge or
+    /// at a corner count as intersecting.
     pub fn intersects(&self, other: &BBox) -> bool {
         self.min_lon <= other.max_lon
             && self.max_lon >= other.min_lon
@@ -69,6 +85,7 @@ impl BBox {
             && self.max_lat >= other.min_lat
     }
 
+    /// Midpoint of the box, in degrees (meaningless for an empty box).
     pub fn center(&self) -> LonLat {
         LonLat::new(
             (self.min_lon + self.max_lon) / 2.0,
@@ -76,10 +93,12 @@ impl BBox {
         )
     }
 
+    /// East-west extent, in degrees of longitude. Negative for an empty box.
     pub fn width(&self) -> f64 {
         self.max_lon - self.min_lon
     }
 
+    /// North-south extent, in degrees of latitude. Negative for an empty box.
     pub fn height(&self) -> f64 {
         self.max_lat - self.min_lat
     }

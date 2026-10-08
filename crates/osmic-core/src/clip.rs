@@ -30,7 +30,9 @@ use crate::geometry::Geometry;
 /// Coordinate axis for band clipping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
+    /// Horizontal: longitude, or projected x.
     X,
+    /// Vertical: latitude, or projected y.
     Y,
 }
 

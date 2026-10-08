@@ -1,3 +1,5 @@
+//! RGBA colours and CSS colour parsing.
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -41,19 +43,28 @@ impl FromStr for Color {
 }
 
 /// RGBA color with f32 components in [0, 1].
+///
+/// Channels are straight (not premultiplied) and in sRGB space; see
+/// [`Color::premultiplied`] for the premultiplied form.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Color {
+    /// Red channel, 0–1.
     pub r: f32,
+    /// Green channel, 0–1.
     pub g: f32,
+    /// Blue channel, 0–1.
     pub b: f32,
+    /// Alpha (opacity), 0 transparent to 1 opaque.
     pub a: f32,
 }
 
 impl Color {
+    /// A color from straight channels in [0, 1]. Not clamped.
     pub const fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }
 
+    /// An opaque color from channels in [0, 1]. Not clamped.
     pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b, a: 1.0 }
     }
@@ -120,6 +131,10 @@ impl Color {
     ///
     /// Unlike [`Color::from_hex`], anything that is not a valid color is an
     /// error — callers must not fall back to black silently.
+    ///
+    /// # Errors
+    ///
+    /// [`ColorParseError`] if `input` is not one of the forms above.
     pub fn parse(input: &str) -> Result<Self, ColorParseError> {
         let c = csscolorparser::parse(input).map_err(|e| ColorParseError {
             input: input.to_string(),
@@ -161,8 +176,11 @@ impl Color {
         }
     }
 
+    /// Opaque white.
     pub const WHITE: Self = Self::rgb(1.0, 1.0, 1.0);
+    /// Opaque black.
     pub const BLACK: Self = Self::rgb(0.0, 0.0, 0.0);
+    /// Fully transparent black, as CSS `transparent`.
     pub const TRANSPARENT: Self = Self::rgba(0.0, 0.0, 0.0, 0.0);
 }
 
