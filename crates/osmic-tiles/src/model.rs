@@ -66,34 +66,52 @@ pub fn ring_area2(ring: &[[i32; 2]]) -> i64 {
     sum
 }
 
+/// The leading part of a [`TileFeature`] sort record: id, geometry type and
+/// geometry. The record continues with [`encode_record_attributes`], which
+/// is identical for every piece of a feature and so can be encoded once and
+/// appended to each.
+pub(crate) fn encode_record_geometry(
+    id: Option<u64>,
+    geom_type: GeomType,
+    parts: &[Vec<[i32; 2]>],
+    out: &mut Vec<u8>,
+) {
+    match id {
+        Some(id) => {
+            out.push(1);
+            put_varint(out, id);
+        }
+        None => out.push(0),
+    }
+    out.push(geom_type as u8);
+    put_varint(out, parts.len() as u64);
+    for part in parts {
+        put_varint(out, part.len() as u64);
+        let (mut px, mut py) = (0i32, 0i32);
+        for &[x, y] in part {
+            put_varint(out, u64::from(zigzag_encode32(x.wrapping_sub(px))));
+            put_varint(out, u64::from(zigzag_encode32(y.wrapping_sub(py))));
+            (px, py) = (x, y);
+        }
+    }
+}
+
+/// The trailing part of a sort record; see [`encode_record_geometry`].
+pub(crate) fn encode_record_attributes(attributes: &[(String, String)], out: &mut Vec<u8>) {
+    put_varint(out, attributes.len() as u64);
+    for (k, v) in attributes {
+        put_varint(out, k.len() as u64);
+        out.extend_from_slice(k.as_bytes());
+        put_varint(out, v.len() as u64);
+        out.extend_from_slice(v.as_bytes());
+    }
+}
+
 impl TileFeature {
     /// Serialise for the external sort (compact varint encoding).
     pub fn encode(&self, out: &mut Vec<u8>) {
-        match self.id {
-            Some(id) => {
-                out.push(1);
-                put_varint(out, id);
-            }
-            None => out.push(0),
-        }
-        out.push(self.geom_type as u8);
-        put_varint(out, self.parts.len() as u64);
-        for part in &self.parts {
-            put_varint(out, part.len() as u64);
-            let (mut px, mut py) = (0i32, 0i32);
-            for &[x, y] in part {
-                put_varint(out, u64::from(zigzag_encode32(x.wrapping_sub(px))));
-                put_varint(out, u64::from(zigzag_encode32(y.wrapping_sub(py))));
-                (px, py) = (x, y);
-            }
-        }
-        put_varint(out, self.attributes.len() as u64);
-        for (k, v) in &self.attributes {
-            put_varint(out, k.len() as u64);
-            out.extend_from_slice(k.as_bytes());
-            put_varint(out, v.len() as u64);
-            out.extend_from_slice(v.as_bytes());
-        }
+        encode_record_geometry(self.id, self.geom_type, &self.parts, out);
+        encode_record_attributes(&self.attributes, out);
     }
 
     /// Inverse of [`TileFeature::encode`].

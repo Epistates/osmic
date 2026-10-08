@@ -30,7 +30,8 @@ pub struct LayerStats {
 }
 
 impl LayerStats {
-    pub fn record(&mut self, zoom: u8, fields: impl IntoIterator<Item = impl AsRef<str>>) {
+    /// Count one feature piece at `zoom`.
+    pub fn record_piece(&mut self, zoom: u8) {
         if self.features == 0 {
             self.min_zoom = zoom;
             self.max_zoom = zoom;
@@ -39,6 +40,11 @@ impl LayerStats {
             self.max_zoom = self.max_zoom.max(zoom);
         }
         self.features += 1;
+    }
+
+    /// Note attribute keys seen on the layer. All pieces of a feature share
+    /// its keys, so call this once per feature.
+    pub fn record_fields(&mut self, fields: impl IntoIterator<Item = impl AsRef<str>>) {
         for f in fields {
             if !self.fields.contains(f.as_ref()) {
                 self.fields.insert(f.as_ref().to_string());
@@ -287,8 +293,10 @@ mod tests {
     fn metadata_lists_only_present_layers() {
         let mut layers = BTreeMap::new();
         let mut roads = LayerStats::default();
-        roads.record(5, ["class", "name"]);
-        roads.record(9, ["class", "ref"]);
+        roads.record_piece(5);
+        roads.record_fields(["class", "name"]);
+        roads.record_piece(9);
+        roads.record_fields(["class", "ref"]);
         layers.insert("highway".to_string(), roads);
         layers.insert("shop".to_string(), LayerStats::default());
         let m = metadata_json(&ArchiveInfo::default(), TileFormat::Mvt, &layers);

@@ -22,12 +22,12 @@ use rayon::prelude::*;
 use tracing::{info, warn};
 
 use osmic_core::BBox;
-use osmic_osm::{Feature, FeatureSink, TagStore};
+use osmic_osm::{Feature, FeatureSink, Layer, TagStore};
 
 use crate::assemble::{AssembledTile, TileCompression, assemble, secondary_key};
 use crate::encode::TileEncoder;
 use crate::error::TileError;
-use crate::model::TileFeature;
+use crate::model::{TileFeature, encode_record_attributes, encode_record_geometry};
 use crate::pmtiles::{
     ArchiveInfo, ArchiveOptions, LayerStats, PmTilesArchive, metadata_json, tile_coord, tile_id,
 };
@@ -103,7 +103,8 @@ impl TileGeneratorConfig {
 /// Statistics collected while rendering.
 #[derive(Debug, Clone)]
 struct RenderStats {
-    layers: BTreeMap<String, LayerStats>,
+    /// Indexed by `Layer as usize` (the order of [`Layer::ALL`]).
+    layers: [LayerStats; Layer::ALL.len()],
     bbox: BBox,
     features: u64,
     min_zoom: Option<u8>,
@@ -113,7 +114,7 @@ struct RenderStats {
 impl Default for RenderStats {
     fn default() -> Self {
         Self {
-            layers: BTreeMap::new(),
+            layers: Default::default(),
             bbox: BBox::empty(),
             features: 0,
             min_zoom: None,
@@ -129,14 +130,24 @@ impl RenderStats {
     }
 
     fn merge(&mut self, other: RenderStats) {
-        for (k, v) in &other.layers {
-            self.layers.entry(k.clone()).or_default().merge(v);
+        for (mine, theirs) in self.layers.iter_mut().zip(&other.layers) {
+            mine.merge(theirs);
         }
         self.bbox.extend(&other.bbox);
         self.features += other.features;
         for z in other.min_zoom.into_iter().chain(other.max_zoom) {
             self.note_zoom(z);
         }
+    }
+
+    /// Per-layer statistics keyed by layer name, as archive metadata wants.
+    fn layers_by_name(&self) -> BTreeMap<String, LayerStats> {
+        Layer::ALL
+            .iter()
+            .zip(&self.layers)
+            .filter(|(_, s)| s.features > 0)
+            .map(|(l, s)| (l.as_str().to_string(), s.clone()))
+            .collect()
     }
 }
 
@@ -262,9 +273,13 @@ impl TileGenerator {
         let mut writer = self.sorter.writer();
         let mut local = RenderStats::default();
         let mut failure: Option<TileError> = None;
+        // A feature's attributes, encoded once and appended to the record
+        // of each of its pieces.
+        let mut attributes = Vec::new();
         for feature in features {
             local.features += 1;
             local.bbox.extend(&feature.bbox());
+            let mut first_piece = true;
             renderer.render(feature, &mut |piece| {
                 if failure.is_some() {
                     return;
@@ -278,13 +293,20 @@ impl TileGenerator {
                 };
                 let z = piece.tile.z.0;
                 local.note_zoom(z);
-                local
-                    .layers
-                    .entry(piece.layer.as_str().to_string())
-                    .or_default()
-                    .record(z, piece.feature.attributes.iter().map(|(k, _)| k));
+                let layer = &mut local.layers[piece.layer as usize];
+                layer.record_piece(z);
+                if first_piece {
+                    first_piece = false;
+                    layer.record_fields(piece.attributes.iter().map(|(k, _)| k));
+                    attributes.clear();
+                    encode_record_attributes(piece.attributes, &mut attributes);
+                }
                 let secondary = secondary_key(piece.layer, piece.importance, piece.size_class);
-                if let Err(e) = writer.push_with(key, secondary, |buf| piece.feature.encode(buf)) {
+                let pushed = writer.push_with(key, secondary, |buf| {
+                    encode_record_geometry(piece.id, piece.geom_type, &piece.parts, buf);
+                    buf.extend_from_slice(&attributes);
+                });
+                if let Err(e) = pushed {
                     failure = Some(e.into());
                 }
             });
@@ -422,7 +444,7 @@ impl TileGenerator {
             bounds,
             min_zoom: stats.min_zoom.unwrap_or(render.min_zoom),
             max_zoom: stats.max_zoom.unwrap_or(render.max_zoom),
-            metadata: metadata_json(info, self.encoder.format(), &stats.layers),
+            metadata: metadata_json(info, self.encoder.format(), &stats.layers_by_name()),
             overwrite,
         };
         let mut archive = PmTilesArchive::create(path, &options)?;
@@ -691,7 +713,7 @@ mod tests {
         config.render.attributes = mode;
         let g = TileGenerator::new(config, Box::new(MvtEncoder), Arc::clone(&store)).expect("new");
         g.add_parallel(&mixed_features(&store)).expect("add");
-        let layers = g.stats().expect("stats").layers;
+        let layers = g.stats().expect("stats").layers_by_name();
         let meta = metadata_json(&ArchiveInfo::default(), TileFormat::Mvt, &layers);
         let mut meta_hash = 0xCBF2_9CE4_8422_2325u64;
         fnv1a(&mut meta_hash, meta["vector_layers"].to_string().as_bytes());

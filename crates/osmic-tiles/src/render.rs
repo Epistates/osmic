@@ -76,15 +76,40 @@ impl Default for RenderConfig {
 }
 
 /// One feature rendered into one tile.
+///
+/// Every piece of a feature borrows the same attribute list, so a caller can
+/// process the attributes once per feature instead of once per tile.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RenderedFeature {
+pub struct RenderedFeature<'a> {
+    /// The tile this piece belongs to.
     pub tile: TileCoord,
+    /// The feature's layer.
     pub layer: Layer,
     /// [`osmic_osm::FeatureKind::importance`]; higher is more important.
     pub importance: u8,
     /// Logarithmic size class at this zoom (larger = bigger feature).
     pub size_class: u16,
-    pub feature: TileFeature,
+    /// Vector-tile feature id.
+    pub id: Option<u64>,
+    /// Geometry type of `parts`.
+    pub geom_type: GeomType,
+    /// Tile-local geometry, laid out as in [`TileFeature::parts`].
+    pub parts: Vec<Vec<[i32; 2]>>,
+    /// The feature's attributes, shared by all of its pieces.
+    pub attributes: &'a [(String, String)],
+}
+
+impl RenderedFeature<'_> {
+    /// The piece as a self-contained [`TileFeature`] (copies the
+    /// attributes).
+    pub fn into_tile_feature(self) -> TileFeature {
+        TileFeature {
+            id: self.id,
+            geom_type: self.geom_type,
+            parts: self.parts,
+            attributes: self.attributes.to_vec(),
+        }
+    }
 }
 
 type Ring = Vec<Coord<f64>>;
@@ -327,7 +352,7 @@ impl<'a> Renderer<'a> {
 
     /// Render `feature` into every tile it touches at every applicable
     /// zoom, calling `emit` for each piece.
-    pub fn render(&self, feature: &Feature, emit: &mut dyn FnMut(RenderedFeature)) {
+    pub fn render(&self, feature: &Feature, emit: &mut dyn FnMut(RenderedFeature<'_>)) {
         let cfg = self.config;
         let zmin = cfg.min_zoom.max(feature.kind.min_zoom());
         if zmin > cfg.max_zoom || cfg.max_zoom > Zoom::MAX.0 {
@@ -409,7 +434,7 @@ impl<'a> Renderer<'a> {
         zctx: &ZoomContext,
         shape: Shape,
         span: TileSpan,
-        emit: &mut dyn FnMut(RenderedFeature),
+        emit: &mut dyn FnMut(RenderedFeature<'_>),
     ) {
         if shape.is_empty() {
             return;
@@ -421,13 +446,16 @@ impl<'a> Renderer<'a> {
             let leaf = shape
                 .clip(Axis::X, ox - b, ox + e + b)
                 .clip(Axis::Y, oy - b, oy + e + b);
-            if let Some(feature) = quantize(&leaf, ox, oy, ctx) {
+            if let Some((geom_type, parts)) = quantize(&leaf, ox, oy) {
                 emit(RenderedFeature {
                     tile: TileCoord::new(x, y, Zoom(zctx.z)),
                     layer: ctx.layer,
                     importance: ctx.importance,
                     size_class: zctx.size_class,
-                    feature,
+                    id: ctx.id,
+                    geom_type,
+                    parts,
+                    attributes: &ctx.attributes,
                 });
             }
             return;
@@ -506,7 +534,7 @@ fn quantize_points(pts: &[Coord<f64>], ox: f64, oy: f64) -> Vec<[i32; 2]> {
 
 /// Quantise a clipped shape to tile-local integers. Returns `None` if
 /// nothing valid remains.
-fn quantize(shape: &Shape, ox: f64, oy: f64, ctx: &TileContext) -> Option<TileFeature> {
+fn quantize(shape: &Shape, ox: f64, oy: f64) -> Option<(GeomType, Vec<Vec<[i32; 2]>>)> {
     let (geom_type, parts) = match shape {
         Shape::Points(p) => {
             let pts: Vec<[i32; 2]> = p
@@ -560,15 +588,7 @@ fn quantize(shape: &Shape, ox: f64, oy: f64, ctx: &TileContext) -> Option<TileFe
             (GeomType::Polygon, parts)
         }
     };
-    if parts.is_empty() {
-        return None;
-    }
-    Some(TileFeature {
-        id: ctx.id,
-        geom_type,
-        parts,
-        attributes: ctx.attributes.clone(),
-    })
+    (!parts.is_empty()).then_some((geom_type, parts))
 }
 
 #[cfg(test)]
@@ -593,9 +613,20 @@ mod tests {
         }
     }
 
-    fn render_all(cfg: &RenderConfig, store: &TagStore, f: &Feature) -> Vec<RenderedFeature> {
+    /// An owned [`RenderedFeature`].
+    struct Piece {
+        tile: TileCoord,
+        feature: TileFeature,
+    }
+
+    fn render_all(cfg: &RenderConfig, store: &TagStore, f: &Feature) -> Vec<Piece> {
         let mut out = Vec::new();
-        Renderer::new(cfg, store).render(f, &mut |r| out.push(r));
+        Renderer::new(cfg, store).render(f, &mut |r| {
+            out.push(Piece {
+                tile: r.tile,
+                feature: r.into_tile_feature(),
+            });
+        });
         out
     }
 
@@ -831,7 +862,15 @@ mod tests {
             assert!(is_class_key(layer.as_str()), "{layer}");
         }
         assert!(is_class_key("waterway"));
-        for key in ["name", "ref", "class", "Highway", "highway ", "", "water_way"] {
+        for key in [
+            "name",
+            "ref",
+            "class",
+            "Highway",
+            "highway ",
+            "",
+            "water_way",
+        ] {
             assert_eq!(is_class_key(key), key.parse::<Layer>().is_ok(), "{key:?}");
             assert!(!is_class_key(key), "{key:?}");
         }
