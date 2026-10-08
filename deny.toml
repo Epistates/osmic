@@ -11,7 +11,6 @@ yanked = "deny"
 ignore = [
     # Unmaintained, no fix available upstream. Each is reviewed when its
     # parent crate releases.
-    { id = "RUSTSEC-2024-0436", reason = "paste (unmaintained): proc-macro used at build time by metal (osmic-accel) and wgpu-hal" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser (unmaintained): font parsing via cosmic-text/fontdb; tracked with the cosmic-text upgrade" },
     { id = "RUSTSEC-2025-0141", reason = "bincode (unmaintained): only with the optional `mlt` feature, via mlt-core -> probabilistic-collections" },
 ]
