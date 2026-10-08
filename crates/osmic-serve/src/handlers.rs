@@ -8,7 +8,6 @@
 //! * JSON / HTML / assets: `public, max-age=60`.
 //! * Health probes and every `4xx`/`5xx`: `no-store`.
 
-use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::{Path, Request, State};
@@ -18,13 +17,13 @@ use bytes::Bytes;
 use pmtiles::{Compression, TileCoord};
 use twox_hash::XxHash3_64;
 
+use osmic_tiles::reader::{DecompressError, MAX_DECOMPRESSED_TILE, decompress_tile};
+
 use crate::archive::{Archive, accepted_extensions};
 use crate::http::{
     NO_STORE, SHORT_CACHE, accepts_encoding, if_none_match_hits, is_valid_authority,
 };
 
-/// Upper bound for a decompressed tile; guards against decompression bombs.
-const MAX_DECOMPRESSED_TILE: u64 = 64 * 1024 * 1024;
 /// Tiles at least this large are inflated on the blocking pool.
 const BLOCKING_DECOMPRESS_THRESHOLD: usize = 64 * 1024;
 
@@ -196,14 +195,9 @@ fn choose_representation(
 }
 
 async fn gunzip(raw: Bytes) -> Result<Bytes, ApiError> {
-    fn inflate(raw: &[u8]) -> std::io::Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(raw.len().saturating_mul(4));
-        let mut dec = flate2::read::GzDecoder::new(raw).take(MAX_DECOMPRESSED_TILE + 1);
-        dec.read_to_end(&mut out)?;
-        if out.len() as u64 > MAX_DECOMPRESSED_TILE {
-            return Err(std::io::Error::other("decompressed tile too large"));
-        }
-        Ok(out)
+    fn inflate(raw: &[u8]) -> Result<Bytes, DecompressError> {
+        decompress_tile(raw, Compression::Gzip, MAX_DECOMPRESSED_TILE)
+            .map(|tile| Bytes::from(tile.into_owned()))
     }
     let result = if raw.len() >= BLOCKING_DECOMPRESS_THRESHOLD {
         tokio::task::spawn_blocking(move || inflate(&raw))
@@ -215,7 +209,7 @@ async fn gunzip(raw: Bytes) -> Result<Bytes, ApiError> {
     } else {
         inflate(&raw)
     };
-    result.map(Bytes::from).map_err(|e| {
+    result.map_err(|e| {
         tracing::error!(error = %e, "failed to gunzip tile");
         ApiError::Internal
     })
