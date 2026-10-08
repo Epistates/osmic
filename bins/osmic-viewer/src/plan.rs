@@ -56,7 +56,7 @@ fn best_source(
     if is_loaded(&tile.coord) {
         return Some((tile.coord, tile.world));
     }
-    let z = tile.coord.z.0;
+    let z = tile.coord.z.get();
     let n = i64::from(tiles_per_axis(z));
     let unwrapped_x = i64::from(tile.coord.x) + i64::from(tile.world) * n;
     for up in 1..=z {
@@ -64,7 +64,7 @@ fn best_source(
         let an = i64::from(tiles_per_axis(az));
         let ax = unwrapped_x >> up;
         let ay = tile.coord.y >> up;
-        let ancestor = TileCoord::new(ax.rem_euclid(an) as u32, ay, Zoom(az));
+        let ancestor = TileCoord::new(ax.rem_euclid(an) as u32, ay, Zoom::clamped(az));
         if is_loaded(&ancestor) {
             return Some((ancestor, ax.div_euclid(an) as i32));
         }
@@ -169,7 +169,7 @@ mod tests {
             .iter()
             .find(|v| v.world == 1)
             .expect("a tile in the next world copy");
-        let root = TileCoord::new(0, 0, Zoom(0));
+        let root = TileCoord::new(0, 0, Zoom::clamped(0));
         let plan = plan_draws(&cam, std::slice::from_ref(wrapped), |c| *c == root);
         // The root tile is drawn in world copy 1: one world width to the right.
         let expected = cam.tile_transform(root, 1);

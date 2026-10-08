@@ -200,7 +200,7 @@ async fn load_tile(
     reader: &AsyncPmTilesReader<MmapBackend>,
     tile: TileCoord,
 ) -> Result<Option<Vec<DecodedFeature>>, Box<dyn Error>> {
-    let coord = pmtiles::TileCoord::new(tile.z.0, tile.x, tile.y)?;
+    let coord = pmtiles::TileCoord::new(tile.z.get(), tile.x, tile.y)?;
     let Some(data) = reader.get_tile_decompressed(coord).await? else {
         return Ok(None);
     };
@@ -282,7 +282,7 @@ mod tests {
                 )],
             ),
         ]);
-        let coord = TileCoord::new(70, 95, osmic_core::Zoom(8));
+        let coord = TileCoord::new(70, 95, osmic_core::Zoom::clamped(8));
         let mut archive = PmTilesArchive::create(
             path,
             &ArchiveOptions {
@@ -328,7 +328,7 @@ mod tests {
     async fn renders_an_archive_to_a_png_with_the_library_pipeline() {
         let dir = tempfile::tempdir().unwrap();
         write_archive(&dir.path().join("tiny.pmtiles"));
-        let bb = TileCoord::new(70, 95, osmic_core::Zoom(8)).bbox();
+        let bb = TileCoord::new(70, 95, osmic_core::Zoom::clamped(8)).bbox();
         let bbox = format!(
             "{},{},{},{}",
             bb.min_lon, bb.min_lat, bb.max_lon, bb.max_lat
@@ -365,7 +365,7 @@ mod tests {
         a.font = vec![dir.path().join("missing.ttf")];
         assert!(run(a).await.is_err());
         // A tile zoom far above the view's: an error, not 10^17 tiles.
-        let bb = TileCoord::new(70, 95, osmic_core::Zoom(8)).bbox();
+        let bb = TileCoord::new(70, 95, osmic_core::Zoom::clamped(8)).bbox();
         let mut a = args(
             dir.path(),
             &format!(

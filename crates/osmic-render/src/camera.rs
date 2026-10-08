@@ -49,7 +49,7 @@ impl PixelMapping {
     /// Pixel coordinates are tile-local: `(0, 0)` is the tile's top-left
     /// and `TILE_SIZE` its far edge.
     pub fn for_tile(tile: TileCoord) -> Self {
-        let n = f64::from(tiles_per_axis(tile.z.0));
+        let n = f64::from(tiles_per_axis(tile.z.get()));
         Self {
             origin: [f64::from(tile.x) / n, f64::from(tile.y) / n],
             scale: TILE_SIZE * n,
@@ -300,7 +300,7 @@ impl Camera {
                 let world_copy = x.div_euclid(n);
                 let wrapped = x.rem_euclid(n);
                 tiles.push(VisibleTile {
-                    coord: TileCoord::new(wrapped as u32, y as u32, Zoom(tile_zoom)),
+                    coord: TileCoord::new(wrapped as u32, y as u32, Zoom::clamped(tile_zoom)),
                     world: world_copy as i32,
                 });
             }
@@ -319,7 +319,7 @@ impl Camera {
 
     /// Where `tile` (in world copy `world`) lands on screen.
     pub fn tile_transform(&self, tile: TileCoord, world: i32) -> TileTransform {
-        let n = f64::from(tiles_per_axis(tile.z.0));
+        let n = f64::from(tiles_per_axis(tile.z.get()));
         let world_px = self.world_size();
         let unit_x = (f64::from(tile.x) + f64::from(world) * n) / n;
         let unit_y = f64::from(tile.y) / n;
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn tile_mapping_is_tile_local() {
-        let tile = TileCoord::new(1309, 3166, Zoom(13));
+        let tile = TileCoord::new(1309, 3166, Zoom::clamped(13));
         let m = PixelMapping::for_tile(tile);
         let bb = tile.bbox();
         let tl = m.project(bb.min_lon, bb.max_lat);
@@ -504,7 +504,7 @@ mod tests {
         assert!(
             tiles
                 .iter()
-                .all(|t| t.coord.x < n && t.coord.y < n && t.coord.z.0 == 12)
+                .all(|t| t.coord.x < n && t.coord.y < n && t.coord.z.get() == 12)
         );
         // The first tile contains the center.
         let (lon, lat) = c.center();

@@ -18,7 +18,7 @@ pub use color::{Color, ColorParseError};
 pub use coord::{FixedCoord, LonLat};
 pub use geometry::{Geometry, GeometryType};
 pub use osm_id::{OsmId, OsmType};
-pub use tile::{TileCoord, Zoom};
+pub use tile::{TileCoord, Zoom, ZoomOutOfRange};
 
 /// Read access to node locations, keyed by node id.
 ///

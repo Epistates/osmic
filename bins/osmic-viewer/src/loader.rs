@@ -177,7 +177,7 @@ impl PmtilesSource {
 
 impl TileSource for PmtilesSource {
     fn fetch(&self, coord: TileCoord) -> Result<Option<Vec<u8>>, String> {
-        let pm = pmtiles::TileCoord::new(coord.z.0, coord.x, coord.y)
+        let pm = pmtiles::TileCoord::new(coord.z.get(), coord.x, coord.y)
             .map_err(|e| format!("tile {coord}: {e}"))?;
         let Some(raw) = self
             .runtime
@@ -377,7 +377,7 @@ mod tests {
     use super::*;
 
     fn t(x: u32) -> TileCoord {
-        TileCoord::new(x, 0, Zoom(6))
+        TileCoord::new(x, 0, Zoom::clamped(6))
     }
 
     fn wait_for(loader: &TileLoader, n: usize) -> Vec<LoadedTile> {
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn tile_data_contains_geometry_labels_and_pois() {
-        let coord = TileCoord::new(2618, 6332, Zoom(15));
+        let coord = TileCoord::new(2618, 6332, Zoom::clamped(15));
         let bb = coord.bbox();
         let at = |fx: f64, fy: f64| (bb.min_lon + bb.width() * fx, bb.min_lat + bb.height() * fy);
         let feature =
@@ -715,7 +715,7 @@ mod tests {
         )
         .unwrap();
         archive
-            .add_tile(TileCoord::new(70, 95, Zoom(8)), &pack(tile))
+            .add_tile(TileCoord::new(70, 95, Zoom::clamped(8)), &pack(tile))
             .unwrap();
         archive.finalize().unwrap();
     }
@@ -733,7 +733,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gz.pmtiles");
         write_archive_with(&path, TileCompression::Gzip, |t| gzip(&t));
-        let present = TileCoord::new(70, 95, Zoom(8));
+        let present = TileCoord::new(70, 95, Zoom::clamped(8));
 
         let mut source = PmtilesSource::open(&path).unwrap();
         let tile = source.fetch(present).unwrap().expect("present");
@@ -753,7 +753,7 @@ mod tests {
         // 65 MiB of zeros: past the default 64 MiB cap, ~65 KiB packed.
         write_archive_with(&path, TileCompression::Gzip, |_| gzip(&vec![0; 65 << 20]));
         let source = PmtilesSource::open(&path).unwrap();
-        let err = source.fetch(TileCoord::new(70, 95, Zoom(8))).unwrap_err();
+        let err = source.fetch(TileCoord::new(70, 95, Zoom::clamped(8))).unwrap_err();
         assert!(err.contains("more than"), "{err}");
     }
 
@@ -769,15 +769,15 @@ mod tests {
         assert!((lon + 45.0).abs() < 1e-6 && (lat - 33.0).abs() < 1e-6);
         assert!(
             source
-                .fetch(TileCoord::new(0, 0, Zoom(8)))
+                .fetch(TileCoord::new(0, 0, Zoom::clamped(8)))
                 .unwrap()
                 .is_none(),
             "no such tile"
         );
 
         let loader = TileLoader::spawn(source, style(), 2, || {}).unwrap();
-        let present = TileCoord::new(70, 95, Zoom(8));
-        let absent = TileCoord::new(3, 3, Zoom(8));
+        let present = TileCoord::new(70, 95, Zoom::clamped(8));
+        let absent = TileCoord::new(3, 3, Zoom::clamped(8));
         loader.request(&[present, absent]);
         let got = wait_for(&loader, 2);
         let tile = got

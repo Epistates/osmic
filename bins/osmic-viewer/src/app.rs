@@ -310,7 +310,7 @@ impl App {
                     tile,
                     uniform: tile_draw_uniform(
                         item.transform,
-                        item.source.z.0,
+                        item.source.z.get(),
                         camera.zoom(),
                         logical,
                         gpu.renderer().linearize(),

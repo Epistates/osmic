@@ -57,7 +57,7 @@ impl SceneOptions {
     /// tile's `TILE_SIZE` square.
     pub fn for_tile(tile: TileCoord) -> Self {
         let size = TILE_SIZE as f32;
-        Self::new(f64::from(tile.z.0), PixelMapping::for_tile(tile))
+        Self::new(f64::from(tile.z.get()), PixelMapping::for_tile(tile))
             .with_clip([0.0, 0.0, size, size])
     }
 
@@ -659,7 +659,7 @@ mod tests {
     }
 
     fn tile_options(zoom: f64) -> (TileCoord, SceneOptions) {
-        let tile = TileCoord::new(1309, 3166, Zoom(13));
+        let tile = TileCoord::new(1309, 3166, Zoom::clamped(13));
         (
             tile,
             SceneOptions {
@@ -997,7 +997,7 @@ mod tests {
             ]),
             vec![],
         );
-        let mapping = PixelMapping::for_tile(TileCoord::new(0, 0, Zoom(0)));
+        let mapping = PixelMapping::for_tile(TileCoord::new(0, 0, Zoom::clamped(0)));
         let pt = interior_point(&c, &mapping).unwrap();
         let rings = project_polygon(&c, &mapping).unwrap();
         // Ray-cast containment.
@@ -1103,7 +1103,7 @@ mod tests {
             panic!("{:?}", scene.layers[0])
         };
         assert_eq!(color.to_rgba8(), [255, 255, 255, 128]);
-        let n = f32::from(1u16 << tile.z.0); // the mapping is the tile's
+        let n = f32::from(1u16 << tile.z.get()); // the mapping is the tile's
         let (x0, y0) = (coords[0][0][0], coords[0][0][1]);
         let (x1, y1) = (coords[0][2][0], coords[0][2][1]);
         assert!(x0 <= 0.0 && y0 <= 0.0 && x1 >= 512.0 && y1 >= 512.0);

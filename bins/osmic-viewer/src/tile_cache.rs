@@ -125,7 +125,7 @@ mod tests {
     }
 
     fn t(x: u32) -> TileCoord {
-        TileCoord::new(x, 0, Zoom(5))
+        TileCoord::new(x, 0, Zoom::clamped(5))
     }
 
     fn keys(evicted: &[(TileCoord, Item)]) -> Vec<u32> {

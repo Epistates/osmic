@@ -2660,6 +2660,7 @@ dependencies = [
  "geo-types",
  "libc",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]

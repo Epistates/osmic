@@ -192,7 +192,7 @@ impl PmTilesArchive {
     /// Add an already-compressed tile. Tiles must arrive in strictly
     /// increasing tile-id order.
     pub fn add_tile(&mut self, coord: TileCoord, data: &[u8]) -> Result<(), TileError> {
-        let pm = pmtiles::TileCoord::new(coord.z.0, coord.x, coord.y).map_err(archive_err)?;
+        let pm = pmtiles::TileCoord::new(coord.z.get(), coord.x, coord.y).map_err(archive_err)?;
         let id = TileId::from(pm).value();
         if self.last_tile_id.is_some_and(|last| id <= last) {
             return Err(TileError::Archive(format!(
@@ -223,14 +223,15 @@ impl PmTilesArchive {
 
 /// Hilbert tile id used to order an archive.
 pub fn tile_id(coord: TileCoord) -> Result<u64, TileError> {
-    let pm = pmtiles::TileCoord::new(coord.z.0, coord.x, coord.y).map_err(archive_err)?;
+    let pm = pmtiles::TileCoord::new(coord.z.get(), coord.x, coord.y).map_err(archive_err)?;
     Ok(TileId::from(pm).value())
 }
 
 /// Inverse of [`tile_id`].
 pub fn tile_coord(id: u64) -> Result<TileCoord, TileError> {
     let pm = pmtiles::TileCoord::from(TileId::new(id).map_err(archive_err)?);
-    Ok(TileCoord::new(pm.x(), pm.y(), osmic_core::Zoom(pm.z())))
+    let z = osmic_core::Zoom::try_from(pm.z()).map_err(archive_err)?;
+    Ok(TileCoord::new(pm.x(), pm.y(), z))
 }
 
 #[cfg(test)]
@@ -252,10 +253,13 @@ mod tests {
 
     #[test]
     fn tile_id_round_trip_and_order() {
-        let a = TileCoord::new(0, 0, Zoom(0));
-        let b = TileCoord::new(1, 1, Zoom(1));
+        let a = TileCoord::new(0, 0, Zoom::clamped(0));
+        let b = TileCoord::new(1, 1, Zoom::clamped(1));
         assert!(tile_id(a).expect("valid") < tile_id(b).expect("valid"));
         assert_eq!(tile_coord(tile_id(b).expect("valid")).expect("valid"), b);
+        // Valid in PMTiles (up to z31) but beyond the supported zoom range.
+        let z23 = pmtiles::TileCoord::new(23, 0, 0).expect("valid in PMTiles");
+        assert!(tile_coord(TileId::from(z23).value()).is_err());
     }
 
     #[test]
@@ -263,9 +267,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("out.pmtiles");
         let mut a = PmTilesArchive::create(&path, &options(false)).expect("create");
-        a.add_tile(TileCoord::new(1, 1, Zoom(1)), b"x")
+        a.add_tile(TileCoord::new(1, 1, Zoom::clamped(1)), b"x")
             .expect("first");
-        assert!(a.add_tile(TileCoord::new(0, 0, Zoom(0)), b"y").is_err());
+        assert!(
+            a.add_tile(TileCoord::new(0, 0, Zoom::clamped(0)), b"y")
+                .is_err()
+        );
         drop(a);
         assert!(!path.exists(), "no partial archive at the destination");
         assert_eq!(
@@ -280,7 +287,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("out.pmtiles");
         let mut a = PmTilesArchive::create(&path, &options(false)).expect("create");
-        a.add_tile(TileCoord::new(0, 0, Zoom(0)), b"tile")
+        a.add_tile(TileCoord::new(0, 0, Zoom::clamped(0)), b"tile")
             .expect("add");
         a.finalize().expect("finalize");
         assert!(path.exists());

@@ -181,7 +181,7 @@ mod tests {
             (secondary_key(Layer::Place, 120, 0), point(3, 3)),
         ];
         let t = assemble(
-            TileCoord::new(0, 0, Zoom(0)),
+            TileCoord::new(0, 0, Zoom::clamped(0)),
             feats,
             4096,
             &MvtEncoder,
@@ -210,7 +210,7 @@ mod tests {
             .collect();
         feats.sort_by_key(|(s, f)| (*s, f.id));
         let t = assemble(
-            TileCoord::new(0, 0, Zoom(0)),
+            TileCoord::new(0, 0, Zoom::clamped(0)),
             feats,
             4096,
             &MvtEncoder,

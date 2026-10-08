@@ -33,7 +33,7 @@ fn a_loaded_tile_renders_with_style_colors_and_labels() {
     let size = [640u32, 480];
     let (lon, lat) = (-122.4194, 37.7749);
     let (tx, ty) = mercator::lonlat_to_tile(lon, lat, 14);
-    let tile = TileCoord::new(tx, ty, osmic_core::Zoom(14));
+    let tile = TileCoord::new(tx, ty, osmic_core::Zoom::clamped(14));
     let bb = tile.bbox();
     // Fractions of the tile, y measured down from its top edge.
     let at = |fx: f64, fy: f64| (bb.min_lon + bb.width() * fx, bb.max_lat - bb.height() * fy);

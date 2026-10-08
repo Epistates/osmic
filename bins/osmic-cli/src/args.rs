@@ -21,8 +21,11 @@ impl FromStr for ZoomRange {
                 .trim()
                 .parse()
                 .map_err(|_| format!("'{v}' is not a zoom level"))?;
-            if z > Zoom::MAX.0 {
-                return Err(format!("zoom {z} exceeds the maximum of {}", Zoom::MAX.0));
+            if z > Zoom::MAX.get() {
+                return Err(format!(
+                    "zoom {z} exceeds the maximum of {}",
+                    Zoom::MAX.get()
+                ));
             }
             Ok(z)
         };

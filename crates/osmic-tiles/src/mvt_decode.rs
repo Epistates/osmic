@@ -386,7 +386,7 @@ pub fn layer_tables(data: &[u8]) -> Result<Vec<LayerTables>, DecodeError> {
 
 /// Convert a tile-local feature to WGS84 geometry for `tile`.
 pub fn to_geographic(feature: &TileFeature, extent: u32, tile: TileCoord) -> Option<Geometry> {
-    let n = f64::from(osmic_core::mercator::tiles_per_axis(tile.z.0));
+    let n = f64::from(osmic_core::mercator::tiles_per_axis(tile.z.get()));
     let e = f64::from(extent);
     let to = |[x, y]: [i32; 2]| Coord {
         x: unit_x_to_lon((f64::from(tile.x) + f64::from(x) / e) / n),
@@ -567,7 +567,7 @@ mod tests {
             },
         ];
         let tile = layer(features);
-        let decoded = decode_tile(&tile, TileCoord::new(1, 1, Zoom(2))).expect("valid");
+        let decoded = decode_tile(&tile, TileCoord::new(1, 1, Zoom::clamped(2))).expect("valid");
         assert!(matches!(&decoded[0].geometry, Geometry::MultiLine(m) if m.0.len() == 2));
         let Geometry::MultiPolygon(mp) = &decoded[1].geometry else {
             panic!("expected multipolygon, got {:?}", decoded[1].geometry);
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn attribute_types_are_preserved() {
-        let decoded = decode_tile(&typed_tile(), TileCoord::new(0, 0, Zoom(0))).unwrap();
+        let decoded = decode_tile(&typed_tile(), TileCoord::new(0, 0, Zoom::clamped(0))).unwrap();
         let f = &decoded[0];
         assert_eq!(f.class.as_deref(), Some("primary"));
         assert_eq!(f.name, None, "a numeric name stays a typed attribute");
@@ -738,7 +738,7 @@ mod tests {
                 })
                 .collect();
             let _ = decode_layers(&data);
-            let _ = decode_tile(&data, TileCoord::new(0, 0, Zoom(0)));
+            let _ = decode_tile(&data, TileCoord::new(0, 0, Zoom::clamped(0)));
         }
     }
 }

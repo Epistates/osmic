@@ -355,7 +355,7 @@ impl<'a> Renderer<'a> {
     pub fn render(&self, feature: &Feature, emit: &mut dyn FnMut(RenderedFeature<'_>)) {
         let cfg = self.config;
         let zmin = cfg.min_zoom.max(feature.kind.min_zoom());
-        if zmin > cfg.max_zoom || cfg.max_zoom > Zoom::MAX.0 {
+        if zmin > cfg.max_zoom || cfg.max_zoom > Zoom::MAX.get() {
             return;
         }
         let layer = feature.kind.layer();
@@ -448,7 +448,7 @@ impl<'a> Renderer<'a> {
                 .clip(Axis::Y, oy - b, oy + e + b);
             if let Some((geom_type, parts)) = quantize(&leaf, ox, oy) {
                 emit(RenderedFeature {
-                    tile: TileCoord::new(x, y, Zoom(zctx.z)),
+                    tile: TileCoord::new(x, y, Zoom::clamped(zctx.z)),
                     layer: ctx.layer,
                     importance: ctx.importance,
                     size_class: zctx.size_class,
@@ -804,7 +804,7 @@ mod tests {
         );
         let zooms: Vec<u8> = render_all(&cfg, &store, &f)
             .iter()
-            .map(|r| r.tile.z.0)
+            .map(|r| r.tile.z.get())
             .collect();
         assert!(zooms.contains(&14));
         assert!(
@@ -825,7 +825,7 @@ mod tests {
         );
         let zooms: Vec<u8> = render_all(&cfg, &store, &f)
             .iter()
-            .map(|r| r.tile.z.0)
+            .map(|r| r.tile.z.get())
             .collect();
         assert!(zooms.iter().all(|&z| z >= 12), "{zooms:?}");
         assert!(zooms.contains(&12) && zooms.contains(&14));

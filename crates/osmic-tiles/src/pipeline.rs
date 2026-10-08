@@ -71,11 +71,11 @@ impl TileGeneratorConfig {
                 r.min_zoom, r.max_zoom
             ));
         }
-        if r.max_zoom > osmic_core::Zoom::MAX.0 {
+        if r.max_zoom > osmic_core::Zoom::MAX.get() {
             return bad(format!(
                 "max zoom {} exceeds {}",
                 r.max_zoom,
-                osmic_core::Zoom::MAX.0
+                osmic_core::Zoom::MAX.get()
             ));
         }
         if r.extent == 0 || r.extent > 1 << 16 {
@@ -183,7 +183,7 @@ impl TileSummary {
         self.budget_limited_tiles += u64::from(t.dropped > 0);
         self.largest_tile_bytes = self.largest_tile_bytes.max(t.data.len());
         self.total_bytes += t.data.len() as u64;
-        *self.tiles_per_zoom.entry(t.coord.z.0).or_default() += 1;
+        *self.tiles_per_zoom.entry(t.coord.z.get()).or_default() += 1;
     }
 
     /// Lowest and highest zoom with at least one tile.
@@ -379,7 +379,7 @@ impl TileGenerator {
                         return;
                     }
                 };
-                let z = piece.tile.z.0;
+                let z = piece.tile.z.get();
                 local.note_zoom(z);
                 let layer = &mut local.layers[piece.layer as usize];
                 layer.record_piece(z);

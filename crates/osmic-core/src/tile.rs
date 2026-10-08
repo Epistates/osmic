@@ -3,26 +3,46 @@ use std::fmt;
 
 use crate::bbox::BBox;
 
-/// Map zoom level (0-22).
+/// Map zoom level, always within [`Zoom::MIN`]`..=`[`Zoom::MAX`] (0–22).
+///
+/// Construct with [`Zoom::new`] (checked), [`Zoom::clamped`] or
+/// `Zoom::try_from(u8)`; deserialisation rejects levels above the maximum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Zoom(pub u8);
+#[serde(try_from = "u8", into = "u8")]
+pub struct Zoom(u8);
 
 impl Zoom {
+    /// The lowest zoom level, 0: one tile for the whole world.
     pub const MIN: Zoom = Zoom(0);
+    /// The highest supported zoom level, 22.
     pub const MAX: Zoom = Zoom(22);
 
-    pub fn new(z: u8) -> Self {
-        debug_assert!(z <= 22, "zoom must be 0-22");
-        Self(z.min(22))
+    /// Zoom level `z`, or `None` if it exceeds [`Zoom::MAX`].
+    pub const fn new(z: u8) -> Option<Self> {
+        if z <= Self::MAX.0 {
+            Some(Self(z))
+        } else {
+            None
+        }
+    }
+
+    /// Zoom level `z`, lowered to [`Zoom::MAX`] if it exceeds it.
+    pub const fn clamped(z: u8) -> Self {
+        if z <= Self::MAX.0 { Self(z) } else { Self::MAX }
+    }
+
+    /// The level as a number.
+    pub const fn get(self) -> u8 {
+        self.0
     }
 
     /// Number of tiles along one axis at this zoom.
-    pub fn num_tiles(self) -> u64 {
+    pub const fn num_tiles(self) -> u64 {
         1u64 << self.0
     }
 
     /// Total number of tiles at this zoom (num_tiles^2).
-    pub fn total_tiles(self) -> u64 {
+    pub const fn total_tiles(self) -> u64 {
         let n = self.num_tiles();
         n * n
     }
@@ -34,9 +54,37 @@ impl fmt::Display for Zoom {
     }
 }
 
-impl From<u8> for Zoom {
-    fn from(z: u8) -> Self {
-        Self::new(z)
+/// A zoom level above [`Zoom::MAX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoomOutOfRange {
+    /// The rejected level.
+    pub zoom: u8,
+}
+
+impl fmt::Display for ZoomOutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "zoom {} exceeds the maximum of {}",
+            self.zoom,
+            Zoom::MAX.0
+        )
+    }
+}
+
+impl std::error::Error for ZoomOutOfRange {}
+
+impl TryFrom<u8> for Zoom {
+    type Error = ZoomOutOfRange;
+
+    fn try_from(zoom: u8) -> Result<Self, Self::Error> {
+        Self::new(zoom).ok_or(ZoomOutOfRange { zoom })
+    }
+}
+
+impl From<Zoom> for u8 {
+    fn from(z: Zoom) -> Self {
+        z.0
     }
 }
 
@@ -106,6 +154,37 @@ impl fmt::Display for TileCoord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn z(level: u8) -> Zoom {
+        Zoom::new(level).expect("valid zoom")
+    }
+
+    // --- Zoom construction ---
+
+    #[test]
+    fn zoom_is_validated_everywhere() {
+        assert_eq!(Zoom::new(22).map(Zoom::get), Some(22));
+        assert_eq!(Zoom::new(23), None);
+        assert_eq!(Zoom::new(u8::MAX), None);
+        assert_eq!(Zoom::clamped(64), Zoom::MAX);
+        assert_eq!(Zoom::clamped(7).get(), 7);
+        assert_eq!(Zoom::try_from(40), Err(ZoomOutOfRange { zoom: 40 }));
+        assert_eq!(u8::from(z(9)), 9);
+        // Every constructible zoom has a total tile count.
+        assert_eq!(Zoom::clamped(64).num_tiles(), 1 << 22);
+        assert_eq!(Zoom::MAX.total_tiles(), 1 << 44);
+    }
+
+    #[test]
+    fn zoom_serde_rejects_out_of_range_levels() {
+        let ok: Zoom = serde_json::from_str("14").expect("valid");
+        assert_eq!(ok.get(), 14);
+        assert!(serde_json::from_str::<Zoom>("23").is_err());
+        assert_eq!(serde_json::to_string(&ok).expect("serialise"), "14");
+        let tile: TileCoord = serde_json::from_str(r#"{"x":1,"y":2,"z":3}"#).expect("valid");
+        assert_eq!(tile, TileCoord::new(1, 2, z(3)));
+        assert!(serde_json::from_str::<TileCoord>(r#"{"x":1,"y":2,"z":64}"#).is_err());
+    }
 
     // --- Zoom::num_tiles ---
 
