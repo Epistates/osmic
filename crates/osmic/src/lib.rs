@@ -1,9 +1,17 @@
-// Osmic facade crate: single-dependency access to the full SDK.
-//
-// ```toml
-// [dependencies]
-// osmic = "0.1"
-// ```
+//! osmic: single-dependency access to the full SDK.
+//!
+//! Each workspace crate is re-exported as a module ([`osm`], [`tiles`],
+//! [`serve`], …) and the most common types are collected in [`prelude`].
+//!
+//! ```no_run
+//! use osmic::prelude::*;
+//!
+//! // Serve a PMTiles archive until SIGINT/SIGTERM.
+//! App::new()
+//!     .add_plugin(TileServerPlugin::new("tiles.pmtiles"))
+//!     .run()?;
+//! # Ok::<(), AppError>(())
+//! ```
 
 pub use osmic_app as app;
 pub use osmic_core as core;
@@ -35,7 +43,7 @@ pub mod prelude {
     pub use osmic_index::{DenseNodeStore, SparseNodeIndex};
 
     // App framework
-    pub use osmic_app::{App, Plugin, PluginGroup};
+    pub use osmic_app::{App, AppError, BoxError, Plugin, PluginGroup};
 
     // Tile generation
     pub use osmic_tiles::{MvtEncoder, PmTilesArchive, TileGenerator, TileGeneratorConfig};
@@ -48,23 +56,5 @@ pub mod prelude {
     pub use osmic_style::default_style_json;
 
     // Server
-    pub use osmic_serve::{TileServer, TileServerConfig, TileServerPlugin};
-}
-
-/// Plugin group that includes all headless (non-GPU) plugins.
-pub struct HeadlessPlugins;
-
-impl osmic_app::PluginGroup for HeadlessPlugins {
-    fn build(self) -> osmic_app::PluginGroupBuilder {
-        osmic_app::PluginGroupBuilder::new()
-    }
-}
-
-/// Plugin group that includes all default plugins for interactive map rendering.
-pub struct DefaultPlugins;
-
-impl osmic_app::PluginGroup for DefaultPlugins {
-    fn build(self) -> osmic_app::PluginGroupBuilder {
-        osmic_app::PluginGroupBuilder::new()
-    }
+    pub use osmic_serve::{ServerRoutes, TileServer, TileServerConfig, TileServerPlugin};
 }

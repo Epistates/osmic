@@ -13,5 +13,5 @@ readme.workspace = true
 description = "Plugin system, App builder, event bus, and lifecycle"
 
 [dependencies]
-osmic-core = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -23,6 +23,10 @@
 //! | `/` | Embedded MapLibre GL viewer |
 //! | `/healthz`, `/readyz` | Liveness and readiness probes |
 //!
+//! Applications can serve their own routes under other prefixes, behind the
+//! same middleware, with [`TileServer::with_routes`] (or the [`ServerRoutes`]
+//! resource when using [`TileServerPlugin`]).
+//!
 //! # Tile delivery
 //!
 //! Tiles are served byte-for-byte from the archive. When the archive stores
@@ -69,9 +73,11 @@ mod error;
 mod handlers;
 mod http;
 mod plugin;
+mod routes;
 mod server;
 
 pub use config::TileServerConfig;
 pub use error::ServeError;
 pub use plugin::TileServerPlugin;
+pub use routes::ServerRoutes;
 pub use server::{TileServer, shutdown_signal};

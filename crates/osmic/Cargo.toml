@@ -10,7 +10,7 @@ authors.workspace = true
 categories = ["science::geo", "visualization"]
 keywords = ["osm", "openstreetmap", "maps", "tiles", "gis"]
 readme.workspace = true
-description = "Osmic facade crate: re-exports, prelude, DefaultPlugins"
+description = "Osmic facade crate: re-exports and prelude"
 
 [dependencies]
 osmic-core = { workspace = true }

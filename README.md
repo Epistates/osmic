@@ -35,7 +35,7 @@ osmic-tiles = "0.1.1"
 
 | Crate | Description |
 | --- | --- |
-| [`osmic`](crates/osmic) | Umbrella: re-exports, prelude, default plugin groups |
+| [`osmic`](crates/osmic) | Umbrella: re-exports and prelude |
 | [`osmic-core`](crates/osmic-core) | Shared types, errors, coordinate primitives |
 | [`osmic-osm`](crates/osmic-osm) | OSM data model, PBF parsing, tag system, classification |
 | [`osmic-geo`](crates/osmic-geo) | Projection, simplification, clipping, validation |
@@ -54,15 +54,14 @@ osmic-tiles = "0.1.1"
 
 ## Quickstart
 
-```rust
+```rust,no_run
 use osmic::prelude::*;
 
-fn main() -> OsmicResult<()> {
-    let mut app = App::new();
-    app.add_plugins(osmic::HeadlessPlugins);
-    app.build();
-
-    Ok(())
+fn main() -> Result<(), AppError> {
+    // Serve a PMTiles archive (with a MapLibre viewer at /) until Ctrl-C.
+    App::new()
+        .add_plugin(TileServerPlugin::new("tiles.pmtiles"))
+        .run()
 }
 ```
 

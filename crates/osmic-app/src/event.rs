@@ -49,16 +49,6 @@ impl Default for EventBus {
     }
 }
 
-// Concrete event types for the map system
-pub struct DataLoadedEvent;
-impl Event for DataLoadedEvent {}
-
-pub struct ViewportChangedEvent {
-    pub bbox: osmic_core::BBox,
-    pub zoom: osmic_core::Zoom,
-}
-impl Event for ViewportChangedEvent {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

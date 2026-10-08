@@ -27,6 +27,7 @@ use crate::config::{TileServerConfig, ValidatedConfig};
 use crate::error::ServeError;
 use crate::handlers::{self, AppState};
 use crate::http::NO_STORE;
+use crate::routes::ServerRoutes;
 
 /// HTTP tile server for a single PMTiles archive.
 ///
@@ -36,7 +37,10 @@ use crate::http::NO_STORE;
 /// with `tower::ServiceExt::oneshot` in tests).
 pub struct TileServer {
     config: TileServerConfig,
+    validated: ValidatedConfig,
     state: Arc<AppState>,
+    /// Routes before the middleware layers, for [`TileServer::with_routes`].
+    routes: Router,
     router: Router,
 }
 
@@ -71,12 +75,31 @@ impl TileServer {
             public_url: validated.public_url.clone(),
             draining: AtomicBool::new(false),
         });
-        let router = build_router(Arc::clone(&state), &config, &validated);
+        let routes = build_routes(Arc::clone(&state));
+        let router = apply_resource_controls(routes.clone(), &config, &validated);
         Ok(Self {
             config,
+            validated,
             state,
+            routes,
             router,
         })
+    }
+
+    /// Serve `extra` routes next to the built-in endpoints, behind the same
+    /// middleware.
+    ///
+    /// # Errors
+    ///
+    /// [`ServeError::InvalidConfig`] for an invalid or overlapping prefix
+    /// (see [`ServerRoutes::nest`]).
+    pub fn with_routes(mut self, extra: ServerRoutes) -> Result<Self, ServeError> {
+        if extra.is_empty() {
+            return Ok(self);
+        }
+        self.routes = extra.mount(self.routes)?;
+        self.router = apply_resource_controls(self.routes.clone(), &self.config, &self.validated);
+        Ok(self)
     }
 
     /// The configuration this server was opened with.
@@ -170,7 +193,7 @@ pub async fn shutdown_signal() {
     }
 }
 
-fn build_router(state: Arc<AppState>, config: &TileServerConfig, v: &ValidatedConfig) -> Router {
+fn build_routes(state: Arc<AppState>) -> Router {
     // Tiles are served pre-compressed (or deliberately identity); never
     // recompress them. Only the small JSON/HTML documents go through gzip.
     let tiles = Router::new().route("/tiles/{z}/{x}/{y}", get(handlers::get_tile));
@@ -186,12 +209,11 @@ fn build_router(state: Arc<AppState>, config: &TileServerConfig, v: &ValidatedCo
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz));
 
-    let router = Router::new()
+    Router::new()
         .merge(tiles)
         .merge(documents)
         .merge(probes)
-        .with_state(state);
-    apply_resource_controls(router, config, v)
+        .with_state(state)
 }
 
 /// Wrap `router` with the cross-cutting middleware. Outermost first:

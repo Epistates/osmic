@@ -423,3 +423,37 @@ async fn open_errors_are_typed() {
     assert!(matches!(err, ServeError::Archive { .. }));
     assert!(std::error::Error::source(&err).is_some());
 }
+
+#[tokio::test]
+async fn extra_routes_are_served_behind_the_middleware() {
+    use axum::routing::get as get_route;
+    let f = fixture().await;
+    let mut routes = osmic_serve::ServerRoutes::default();
+    routes.nest(
+        "/api",
+        axum::Router::new().route("/version", get_route(|| async { "1.0" })),
+    );
+    let server = osmic_serve::TileServer::open(f.server.config().clone())
+        .await
+        .unwrap()
+        .with_routes(routes)
+        .unwrap();
+    let app = server.router();
+    let res = get(&app, "/api/version", &[("origin", "https://a.example")]).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(hdr(&res, "x-content-type-options"), "nosniff");
+    assert_eq!(hdr(&res, "access-control-allow-origin"), "*");
+    assert_eq!(&body_bytes(res).await[..], b"1.0");
+    // Built-in endpoints are unaffected.
+    let tile = get(&app, "/tiles/0/0/0", &[]).await;
+    assert_eq!(tile.status(), StatusCode::OK);
+
+    let mut shadowing = osmic_serve::ServerRoutes::default();
+    shadowing.nest("/tiles", axum::Router::new());
+    let err = osmic_serve::TileServer::open(f.server.config().clone())
+        .await
+        .unwrap()
+        .with_routes(shadowing)
+        .expect_err("shadows /tiles");
+    assert!(err.to_string().contains("built-in"), "{err}");
+}
