@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 
+use rayon::prelude::*;
 use tempfile::TempDir;
 
 const IO_BUFFER: usize = 1 << 20;
@@ -211,9 +212,8 @@ impl ExternalSorter {
             .map_err(|_| io::Error::other("sorter file list poisoned"))?;
         spills.sort_by(|a, b| a.path.cmp(&b.path));
         chunks.retain(|c| !c.entries.is_empty());
-        for c in &mut chunks {
-            c.sort();
-        }
+        // One leftover chunk per writer thread, each up to the chunk size.
+        chunks.par_iter_mut().for_each(Chunk::sort);
 
         // Byte-weighted samples at key-run starts, from the spill indexes
         // and the chunks still in memory.
@@ -552,7 +552,6 @@ impl Partition<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rayon::prelude::*;
 
     fn collect(s: ExternalSorter) -> Vec<Record> {
         s.finish()
