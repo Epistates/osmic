@@ -606,7 +606,8 @@ mod tests {
             },
             {
                 let mut v = Vec::new();
-                crate::proto::put_fixed64_field(&mut v, 3, 2.25f64.to_bits());
+                v.push((3 << 3) | 1); // double_value, fixed64
+                v.extend_from_slice(&2.25f64.to_bits().to_le_bytes());
                 v
             },
             {

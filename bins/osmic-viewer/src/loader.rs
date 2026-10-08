@@ -745,7 +745,9 @@ mod tests {
         // 65 MiB of zeros: past the default 64 MiB cap, ~65 KiB packed.
         write_archive_with(&path, TileCompression::Gzip, |_| gzip(&vec![0; 65 << 20]));
         let source = PmtilesSource::open(&path).unwrap();
-        let err = source.fetch(TileCoord::new(70, 95, Zoom::clamped(8))).unwrap_err();
+        let err = source
+            .fetch(TileCoord::new(70, 95, Zoom::clamped(8)))
+            .unwrap_err();
         assert!(err.contains("more than"), "{err}");
     }
 
